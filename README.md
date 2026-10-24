@@ -52,12 +52,12 @@ flowchart TD
 
 | Công cụ & Vai trò | Model & Cờ tối ưu | Nhiệm vụ chuyên trách | Tỷ trọng |
 | :--- | :--- | :--- | :---: |
-| **`invoke-claude.ps1`**<br>`-Role architect` | **Claude Opus**<br>`--effort high`<br>`--tools ""` | • Lên kiến trúc tổng thể, chốt `SPEC.md` (Database & API Contract).<br>• Thiết kế khuôn mẫu UI (Design System gốc).<br>• Tắt toàn bộ công cụ thừa để tiết kiệm 15.000 token hệ thống. | **10% – 15%** |
-| **`invoke-claude.ps1`**<br>`-Role frontend` | **Claude Sonnet**<br>`--effort medium`<br>`--tools "Read,Edit,Write"` | • Trực tiếp viết **100% code Frontend** (`HTML`, `CSS`, `JS/TS`, `React`, `Vue`, `Blade`, `Tailwind`...).<br>• Khóa công cụ tìm kiếm (`Grep`/`Bash`), chỉ sửa đúng đường dẫn file được giao. | **50% – 60%** |
-| **`invoke-claude.ps1`**<br>`-Role reviewer` | **Claude Sonnet**<br>`--effort medium`<br>`--tools ""` | • Đọc bản `git diff` + kết quả chạy Test của Antigravity.<br>• Chấm điểm (`X/10`), chỉ ra lỗi bảo mật/race-condition và chốt `CHANGES_REQUESTED` hoặc `APPROVED`. | **15% – 20%** |
-| **`invoke-claude.ps1`**<br>`-Role ui-tweak` | **Claude Haiku**<br>`--effort low`<br>`--tools "Read,Edit,Write"` | • Tinh chỉnh nhanh CSS, màu sắc, responsive, đổi text hoặc kiểm tra khớp tên biến API. | **10% – 15%** |
-| **`invoke-codex.ps1`**<br>`-Role review-diff`<br>`-Role critic` / `coder` | **OpenAI Codex CLI**<br>`codex review`<br>`--ephemeral` | • Giám khảo độc lập thứ 2: Chấm chéo `git diff` bắt lỗi thuật toán, rò rỉ dữ liệu, edge-cases.<br>• Hỗ trợ viết thuật toán khó hoặc Unit Test trên nhánh `git worktree` riêng. | **Theo yêu cầu** |
-| **`invoke-antigravity.ps1`**<br>`-Action send-latest` | **Antigravity**<br>`Gemini 4 Argon (High)` | • Cầu nối để **Claude Code** trực tiếp bắn lệnh giao việc sang cửa sổ Antigravity đang mở và đọc báo cáo tiến độ (`-Action status`). | **Điều khiển 2 chiều** |
+| **`invoke-claude.ps1`**<br>`-Role architect` | **Claude Opus**<br>`--effort high`<br>`--tools ""` | • Lên kiến trúc tổng thể, chốt `SPEC.md` (Database & API Contract).<br>• Thiết kế khuôn mẫu UI (Design System gốc).<br>• Tắt toàn bộ công cụ thừa để tiết kiệm 15.000 token hệ thống. Hỗ trợ `-PromptFile` & `-IncludeGitDiff` qua stdin (chống lỗi nuốt biến `$` của PowerShell). | **10% – 15%** |
+| **`invoke-claude.ps1`**<br>`-Role frontend` | **Claude Sonnet**<br>`--effort medium`<br>`--tools "Read,Edit,Write"`<br>`--add-dir <WorkDir>` | • Trực tiếp viết **100% code Frontend** (`HTML`, `CSS`, `JS/TS`, `React`, `Vue`, `Blade`, `Tailwind`...).<br>• Khóa công cụ tìm kiếm (`Grep`/`Bash`), cấp quyền `--add-dir` vào đúng thư mục dự án để sửa file. | **50% – 60%** |
+| **`invoke-claude.ps1`**<br>`-Role reviewer` | **Claude Sonnet**<br>`--effort medium`<br>`--tools ""`<br>`-IncludeGitDiff` | • Tự động đính kèm `git diff` qua stdin (`-IncludeGitDiff`) hoặc đọc từ `-PromptFile` an toàn.<br>• Chấm điểm (`X/10`), chỉ ra lỗi bảo mật/race-condition và chốt `CHANGES_REQUESTED` hoặc `APPROVED`. | **15% – 20%** |
+| **`invoke-claude.ps1`**<br>`-Role ui-tweak` | **Claude Haiku**<br>`--effort low`<br>`--tools "Read,Edit,Write"`<br>`--add-dir <WorkDir>` | • Tinh chỉnh nhanh CSS, màu sắc, responsive, đổi text hoặc kiểm tra khớp tên biến API. | **10% – 15%** |
+| **`invoke-codex.ps1`**<br>`-Role review-diff`<br>`-Role critic` / `coder` | **OpenAI Codex CLI**<br>`codex review`<br>`--ephemeral`<br>`-IncludeGitDiff` / `-PromptFile` | • Giám khảo độc lập thứ 2: Chấm chéo `git diff` bắt lỗi thuật toán, rò rỉ dữ liệu, edge-cases (hỗ trợ `-PromptFile` & `-IncludeGitDiff`).<br>• Hỗ trợ viết thuật toán khó hoặc Unit Test trên nhánh `git worktree` riêng. | **Theo yêu cầu** |
+| **`invoke-antigravity.ps1`**<br>`-Action send-latest`<br>`-WorkDir` / `-Wait` | **Antigravity**<br>`Gemini 4 Argon (High)`<br>**Self-Healing Bridge** | • **Zero-Config Live Self-Healing Bridge**: Tự động dò tiến trình `language_server.exe` để lấy Port & CSRF Token mới nhất ngay cả khi khởi động lại IDE.<br>• Hỗ trợ `-WorkDir` (bắn lệnh đúng cửa sổ dự án đang mở) và `-Wait` (chờ code xong & trả về báo cáo đầy đủ từ `transcript_full.jsonl` chỉ trong 1 lệnh). | **Điều khiển 2 chiều** |
 
 ---
 
@@ -96,14 +96,14 @@ Script `install.ps1` sẽ tự động:
   ```text
   /claude-leader Hãy xây dựng tính năng X...
   ```
-* Antigravity sẽ tự động lọc sẵn Context, gọi **Claude Opus** chốt `SPEC.md`, gọi **Claude Sonnet** viết 100% Frontend, tự code 100% Backend rồi nộp `git diff` cho **Claude Sonnet / Codex** chấm điểm đến khi đạt `APPROVED`.
+* Antigravity sẽ tự động lọc sẵn Context, gọi **Claude Opus** chốt `SPEC.md`, gọi **Claude Sonnet** viết 100% Frontend, tự code 100% Backend rồi nộp `git diff` (`-IncludeGitDiff`) cho **Claude Sonnet / Codex** chấm điểm đến khi đạt `APPROVED`.
 
 ### Cách 3: Kích hoạt từ màn hình Claude Desktop / Claude Code (`/antigravity`)
 * Trong khung chat của **Claude Code**, gõ:
   ```text
   /antigravity Hãy thiết kế SPEC.md, tự làm Frontend và giao phần Backend cho Antigravity...
   ```
-* Claude sẽ tự làm 100% Frontend và gọi `invoke-antigravity.ps1 -Action send-latest` để đánh thức cửa sổ **Antigravity (Gemini 4 Argon)** dậy làm Backend, sau đó tự kiểm tra kết quả và chấm điểm!
+* Claude sẽ tự làm 100% Frontend và gọi `invoke-antigravity.ps1 -Action send-latest -WorkDir "<project>" -Wait` để đánh thức đúng cửa sổ **Antigravity (Gemini 4 Argon)** dậy làm Backend, tự động chờ nhận toàn bộ báo cáo không cắt cụt và chấm điểm `git diff`!
 
 ---
 
@@ -111,10 +111,11 @@ Script `install.ps1` sẽ tự động:
 
 ```text
 multi-ai-workflow/
+├── .gitignore                                             # Loại trừ file tạm & SESSION_MEMORY.md
+├── GEMINI.md                                              # Bộ nhớ ngữ cảnh dự án cho Antigravity
 ├── README.md                                              # Tài liệu hướng dẫn toàn diện
 ├── install.ps1                                            # Script cài đặt tự động 1-click
 ├── antigravity/
-│   ├── hooks.json                                         # Hook tự động đồng bộ CSRF Token & Port cho Claude
 │   ├── rules/
 │   │   └── claude-leader-workflow.md                      # Luật toàn cục (Always-On Global Rule)
 │   └── skills/
@@ -123,8 +124,8 @@ multi-ai-workflow/
 │           └── scripts/
 │               ├── invoke-claude.ps1                      # Điều phối Claude 3 tầng (Opus/Sonnet/Haiku)
 │               ├── invoke-codex.ps1                       # Điều phối OpenAI Codex CLI (Review/Critic/Coder)
-│               ├── invoke-antigravity.ps1                 # Cầu nối để Claude ra lệnh ngược cho Antigravity
-│               └── save-agentapi-env.ps1                  # Tự động lưu CSRF Token ra agentapi-bridge.json
+│               ├── invoke-antigravity.ps1                 # Cầu nối Self-Healing để Claude điều khiển Antigravity
+│               └── save-agentapi-env.ps1                  # Tự động dò tiến trình & lưu CSRF Token/Port
 └── claude/
     ├── CLAUDE.md                                          # Bộ nhớ toàn cục cho Claude Code
     └── commands/
