@@ -1,0 +1,269 @@
+BeforeAll {
+    $script:RepoRoot = Split-Path -Parent $PSScriptRoot
+    $script:CommonScript = Join-Path $script:RepoRoot "antigravity\skills\claude-leader\scripts\lib\maw-common.ps1"
+    . $script:CommonScript
+}
+
+Describe "ConvertTo-NativeArgument & Invoke-NativeProcess" {
+    BeforeAll {
+        $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+        $script:HasNode = [bool]$nodeCmd
+        if ($script:HasNode) {
+            $script:NodeExe = $nodeCmd.Source
+        }
+    }
+
+    It "Round-trips multi-line, quotes, command injection strings, trailing backslashes, and Vietnamese text via a real child process" {
+        $vnText = "Xin ch$([char]0x00E0)o th$([char]0x1EBF) gi$([char]0x1EDB)i $([char]0x2014) Ki$([char]0x1EC3)m th$([char]0x1EED) ti$([char]0x1EBF)ng Vi$([char]0x1EC7)t & k$([char]0x00FD) t$([char]0x1EF1)!"
+        $cases = @(
+            "",
+            "simple-token",
+            "Line 1: implement API`nLine 2: validate headers`r`nLine 3: done",
+            'Rename the 12" field & echo INJECTED_BY_PROMPT | calc.exe',
+            'C:\Program Files\My App\TrailingSlash\',
+            'Backslash before quote: a\"b and \\"c\"',
+            $vnText
+        )
+
+        if ($script:HasNode) {
+            $res = Invoke-NativeProcess -FilePath $script:NodeExe -ArgumentList (@("-e", "console.log(JSON.stringify(process.argv.slice(1)))") + $cases)
+            $res.ExitCode | Should -Be 0
+            $decoded = $res.StdOut.Trim() | ConvertFrom-Json
+            $decoded.Count | Should -Be $cases.Count
+            for ($i = 0; $i -lt $cases.Count; $i++) {
+                $decoded[$i] | Should -BeExactly $cases[$i]
+            }
+        } else {
+            $helperFile = Join-Path $env:TEMP ("maw_arg_echo_" + [guid]::NewGuid().ToString("N") + ".ps1")
+            try {
+                [System.IO.File]::WriteAllText($helperFile, '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ConvertTo-Json -InputObject @($args) -Compress', (New-Object System.Text.UTF8Encoding($true)))
+                $res = Invoke-NativeProcess -FilePath "powershell.exe" -ArgumentList (@("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $helperFile) + $cases)
+                $res.ExitCode | Should -Be 0
+                $decoded = $res.StdOut.Trim() | ConvertFrom-Json
+                for ($i = 0; $i -lt $cases.Count; $i++) {
+                    $decoded[$i] | Should -BeExactly $cases[$i]
+                }
+            } finally {
+                Remove-Item -LiteralPath $helperFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+Describe "Get-ReviewVerdict" {
+    It "Takes the last VERDICT: and SCORE: line when multiple appear" {
+        $text = @"
+Round 1 previously had:
+SCORE: 6.0/10
+VERDICT: CHANGES_REQUESTED
+
+After re-checking all fixes:
+SCORE: 9.2/10
+VERDICT: APPROVED
+"@
+        $r = Get-ReviewVerdict -Text $text
+        $r.Verdict | Should -Be "APPROVED"
+        $r.Score | Should -Be "9.2/10"
+        $r.ScoreValue | Should -Be 9.2
+    }
+
+    It "Ignores 'not CHANGES_REQUESTED' in prose when followed by VERDICT: APPROVED" {
+        $text = @"
+This update is clean and not CHANGES_REQUESTED anymore.
+All security checks pass.
+SCORE: 9/10
+VERDICT: APPROVED
+"@
+        $r = Get-ReviewVerdict -Text $text
+        $r.Verdict | Should -Be "APPROVED"
+        $r.Score | Should -Be "9/10"
+        $r.ScoreValue | Should -Be 9.0
+    }
+
+    It "Falls back to the last standalone keyword and X/10 when no explicit VERDICT: header is present" {
+        $text = "Overall score is 8.5/10. Although we considered APPROVED earlier, final decision is CHANGES_REQUESTED."
+        $r = Get-ReviewVerdict -Text $text
+        $r.Verdict | Should -Be "CHANGES_REQUESTED"
+        $r.Score | Should -Be "8.5/10"
+        $r.ScoreValue | Should -Be 8.5
+    }
+
+    It "Returns UNKNOWN when no verdict is present" {
+        $r = Get-ReviewVerdict -Text "Error: connection reset by peer"
+        $r.Verdict | Should -Be "UNKNOWN"
+        $r.Score | Should -Be ""
+        $r.ScoreValue | Should -BeNullOrEmpty
+    }
+}
+
+Describe "Get-ReviewDiff" {
+    It "Includes untracked text files without staging them in the index and skips binary/oversized files" {
+        $tmpDir = Join-Path $env:TEMP ("maw_diff_test_" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        try {
+            & git -C $tmpDir init 2>$null | Out-Null
+            & git -C $tmpDir config core.autocrlf false
+            & git -C $tmpDir config user.email "test@example.com"
+            & git -C $tmpDir config user.name "Test"
+
+            $trackedFile = Join-Path $tmpDir "tracked.txt"
+            [System.IO.File]::WriteAllText($trackedFile, "line1`n", (New-Object System.Text.UTF8Encoding($false)))
+            & git -C $tmpDir add tracked.txt
+            & git -C $tmpDir commit -m "initial" 2>$null | Out-Null
+
+            [System.IO.File]::WriteAllText($trackedFile, "line1`nline2`n", (New-Object System.Text.UTF8Encoding($false)))
+
+            $untrackedFile = Join-Path $tmpDir "newfile.ps1"
+            [System.IO.File]::WriteAllText($untrackedFile, "Write-Output 'hello untracked'`n", (New-Object System.Text.UTF8Encoding($false)))
+
+            $binFile = Join-Path $tmpDir "image.bin"
+            [System.IO.File]::WriteAllBytes($binFile, [byte[]]@(0x89, 0x50, 0x4E, 0x47, 0x00, 0x01, 0x02))
+
+            $diffText = Get-ReviewDiff -WorkDir $tmpDir
+            $diffText | Should -Match "line2"
+            $diffText | Should -Match "newfile\.ps1"
+            $diffText | Should -Match "hello untracked"
+            $diffText | Should -Match "image\.bin \(binary\)"
+
+            # Verify index was NOT modified
+            $cached = (& git -C $tmpDir diff --cached --name-only) -join ""
+            $cached | Should -Be ""
+        } finally {
+            Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe "Evaluate-TranscriptTurn & Read-TranscriptTurnIncremental (R3)" {
+    It "Rejects an interim PLANNER_RESPONSE when followed by a non-SYSTEM_MESSAGE step" {
+        $steps = @(
+            [pscustomobject]@{ step_index = 10; type = "USER_INPUT"; status = "DONE"; content = "Implement feature" },
+            [pscustomobject]@{ step_index = 11; type = "PLANNER_RESPONSE"; status = "DONE"; content = "Interim note: running Pester..."; tool_calls = @() },
+            [pscustomobject]@{ step_index = 12; type = "TOOL_EXECUTION"; status = "RUNNING"; content = "" }
+        )
+        $res = Evaluate-TranscriptTurn -Steps $steps -BaselineStepCount 1 -QuietSeconds 20 -QuietElapsedSeconds 30
+        $res.Completed | Should -BeFalse
+    }
+
+    It "Rejects an interim PLANNER_RESPONSE when the step immediately preceding it has status RUNNING (async background task), but accepts a later final PLANNER_RESPONSE even if the earlier step stays RUNNING forever" {
+        $stepsWhileAsyncRunning = @(
+            [pscustomobject]@{ step_index = 700; type = "USER_INPUT"; status = "DONE"; content = "Run Pester suite" },
+            [pscustomobject]@{ step_index = 703; type = "GENERIC"; status = "RUNNING"; content = "Background task task-703 started" },
+            [pscustomobject]@{ step_index = 704; type = "PLANNER_RESPONSE"; status = "DONE"; content = "Dang chay bo kiem thu Pester..."; tool_calls = @() }
+        )
+        $resInterim = Evaluate-TranscriptTurn -Steps $stepsWhileAsyncRunning -MinStepIndex 699 -QuietSeconds 20 -QuietElapsedSeconds 45
+        $resInterim.Completed | Should -BeFalse
+
+        # Later: background task finishes via wakeup, a DONE step occurs, and final PLANNER_RESPONSE is written (while step 703 remains RUNNING in the append-only transcript)
+        $stepsAfterFinish = $stepsWhileAsyncRunning + @(
+            [pscustomobject]@{ step_index = 705; type = "GENERIC"; status = "DONE"; content = "Task completed" },
+            [pscustomobject]@{ step_index = 706; type = "PLANNER_RESPONSE"; status = "DONE"; content = "All tests green! Final report."; tool_calls = @() }
+        )
+        $resFinal = Evaluate-TranscriptTurn -Steps $stepsAfterFinish -MinStepIndex 699 -QuietSeconds 20 -QuietElapsedSeconds 25
+        $resFinal.Completed | Should -BeTrue
+        $resFinal.StepIndex | Should -Be 706
+        $resFinal.Text | Should -Be "All tests green! Final report."
+    }
+
+    It "Rejects a candidate final PLANNER_RESPONSE until QuietElapsedSeconds >= QuietSeconds" {
+        $steps = @(
+            [pscustomobject]@{ step_index = 10; type = "USER_INPUT"; status = "DONE"; content = "Implement feature" },
+            [pscustomobject]@{ step_index = 11; type = "PLANNER_RESPONSE"; status = "DONE"; content = "All done!"; tool_calls = @() },
+            [pscustomobject]@{ step_index = 12; type = "SYSTEM_MESSAGE"; status = "DONE"; content = "Notification" }
+        )
+        $resEarly = Evaluate-TranscriptTurn -Steps $steps -BaselineStepCount 1 -QuietSeconds 20 -QuietElapsedSeconds 5
+        $resEarly.Completed | Should -BeFalse
+        $resEarly.WaitingQuiet | Should -BeTrue
+
+        $resReady = Evaluate-TranscriptTurn -Steps $steps -BaselineStepCount 1 -QuietSeconds 20 -QuietElapsedSeconds 21
+        $resReady.Completed | Should -BeTrue
+        $resReady.StepIndex | Should -Be 11
+        $resReady.Text | Should -Be "All done!"
+    }
+
+    It "Reads transcript.jsonl incrementally by byte offset and resolves full content from transcript_full.jsonl" {
+        $tmpDir = Join-Path $env:TEMP ("maw_transcript_" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        try {
+            $tFile = Join-Path $tmpDir "transcript.jsonl"
+            $fFile = Join-Path $tmpDir "transcript_full.jsonl"
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+            $line1 = '{"step_index":1,"type":"USER_INPUT","status":"DONE","content":"Task"}' + "`n"
+            $line2 = '{"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","content":"Interim update...","tool_calls":[]}' + "`n"
+            [System.IO.File]::WriteAllText($tFile, $line1 + $line2, $utf8NoBom)
+            [System.IO.File]::WriteAllText($fFile, $line1 + $line2, $utf8NoBom)
+
+            $state = New-TranscriptReaderState -TranscriptPath $tFile -FullTranscriptPath $fFile -BaselineStepCount 1
+            # Append a tool step and then a final truncated response
+            $line3 = '{"step_index":3,"type":"TOOL_RESULT","status":"DONE","content":"ok"}' + "`n"
+            $line4Compact = '{"step_index":4,"type":"PLANNER_RESPONSE","status":"DONE","content":"Trunc...","truncated_fields":["content"],"tool_calls":[]}' + "`n"
+            $line4Full    = '{"step_index":4,"type":"PLANNER_RESPONSE","status":"DONE","content":"Full untruncated final report from step 4.","tool_calls":[]}' + "`n"
+            [System.IO.File]::AppendAllText($tFile, $line3 + $line4Compact, $utf8NoBom)
+            [System.IO.File]::AppendAllText($fFile, $line3 + $line4Full, $utf8NoBom)
+
+            # Backdate LastWriteTime by 25s to satisfy QuietSeconds = 20
+            (Get-Item -LiteralPath $tFile).LastWriteTimeUtc = [DateTime]::UtcNow.AddSeconds(-25)
+
+            $turn = Read-TranscriptTurnIncremental -State $state -QuietSeconds 20
+            $turn.Completed | Should -BeTrue
+            $turn.StepIndex | Should -Be 4
+            $turn.Text | Should -Be "Full untruncated final report from step 4."
+            $state.ByteOffset | Should -BeGreaterThan 0
+        } finally {
+            Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "Preserves multi-byte UTF-8 Vietnamese characters when a write is split mid-character across two incremental reads (m3)" {
+        $tmpDir = Join-Path $env:TEMP ("maw_utf8_split_" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        try {
+            $tFile = Join-Path $tmpDir "transcript.jsonl"
+            $vnContent = "B$([char]0x00E1)o c$([char]0x00E1)o ti$([char]0x1EBF)ng Vi$([char]0x1EC7)t $([char]0x0111)$([char]0x1EA7)y $([char]0x0111)$([char]0x1EE7) kh$([char]0x00F4)ng l$([char]0x1ED7)i UTF-8"
+            $jsonLine = (@{
+                step_index = 1
+                type       = "PLANNER_RESPONSE"
+                status     = "DONE"
+                content    = $vnContent
+                tool_calls = @()
+            } | ConvertTo-Json -Compress) + "`n"
+
+            $allBytes = [System.Text.Encoding]::UTF8.GetBytes($jsonLine)
+            # Find the first 3-byte UTF-8 lead byte (0xE0..0xEF) and split immediately after it (mid-character)
+            $splitIdx = -1
+            for ($i = 0; $i -lt $allBytes.Length; $i++) {
+                if ($allBytes[$i] -ge 0xE0 -and $allBytes[$i] -le 0xEF) {
+                    $splitIdx = $i
+                    break
+                }
+            }
+            $splitIdx | Should -BeGreaterThan 0
+
+            $part1 = $allBytes[0..$splitIdx]
+            $part2 = $allBytes[($splitIdx + 1)..($allBytes.Length - 1)]
+
+            $state = New-TranscriptReaderState -TranscriptPath $tFile -BaselineStepCount 0
+
+            # First write: stops in the middle of a multi-byte UTF-8 character (before '\n')
+            [System.IO.File]::WriteAllBytes($tFile, [byte[]]$part1)
+            Update-TranscriptReaderState -State $state -TranscriptPath $tFile
+            $state.Steps.Count | Should -Be 0
+            $state.RemainderBytes.Length | Should -Be $part1.Length
+
+            # Second write: appends the remaining bytes of the character and the trailing '\n'
+            $fs = New-Object System.IO.FileStream($tFile, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+            try {
+                $fs.Write([byte[]]$part2, 0, $part2.Length)
+            } finally {
+                $fs.Dispose()
+            }
+
+            Update-TranscriptReaderState -State $state -TranscriptPath $tFile
+            $state.Steps.Count | Should -Be 1
+            $state.Steps[0].content | Should -BeExactly $vnContent
+        } finally {
+            Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

@@ -13,7 +13,7 @@ Write-Host "================================================================" -F
 # 1. Antigravity IDE & Bridge
 Write-Host "`n[1/6] Antigravity IDE & Self-Healing Bridge" -ForegroundColor Yellow
 $agentApi = Join-Path $env:USERPROFILE ".gemini\antigravity\bin\agentapi.bat"
-if (Test-Path $agentApi) {
+if (Test-Path -LiteralPath $agentApi) {
     Write-Host "  [OK] agentapi.bat found: $agentApi" -ForegroundColor Green
 } else {
     Write-Host "  [WARN] agentapi.bat NOT found at $agentApi" -ForegroundColor Red
@@ -34,9 +34,9 @@ if ($lsProc) {
 }
 
 $bridgeFile = Join-Path $env:USERPROFILE ".gemini\antigravity\agentapi-bridge.json"
-if (Test-Path $bridgeFile) {
+if (Test-Path -LiteralPath $bridgeFile) {
     try {
-        $bridgeData = Get-Content -Path $bridgeFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        $bridgeData = Get-Content -LiteralPath $bridgeFile -Raw -Encoding UTF8 | ConvertFrom-Json
         Write-Host "  [OK] Bridge config exists ($bridgeFile) - LS: $($bridgeData.ANTIGRAVITY_LS_ADDRESS), UpdatedAt: $($bridgeData.UpdatedAt)" -ForegroundColor Green
     } catch {
         Write-Host "  [WARN] Bridge config exists but could not be parsed: $bridgeFile" -ForegroundColor DarkYellow
@@ -53,8 +53,8 @@ if ($claudeCmd) {
     $claudeExe = $claudeCmd.Source
 } else {
     $claudeBase = Join-Path $env:APPDATA "Claude\claude-code"
-    if (Test-Path $claudeBase) {
-        $latestExe = Get-ChildItem -Path $claudeBase -Filter "claude.exe" -Recurse -ErrorAction SilentlyContinue |
+    if (Test-Path -LiteralPath $claudeBase) {
+        $latestExe = Get-ChildItem -LiteralPath $claudeBase -Filter "claude.exe" -Recurse -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
         if ($latestExe) {
@@ -63,7 +63,7 @@ if ($claudeCmd) {
     }
 }
 
-if ($claudeExe -and (Test-Path $claudeExe)) {
+if ($claudeExe -and (Test-Path -LiteralPath $claudeExe)) {
     $claudeVer = (& $claudeExe --version 2>$null) -join " "
     Write-Host "  [OK] claude.exe found: $claudeExe ($claudeVer)" -ForegroundColor Green
 } else {
@@ -78,12 +78,12 @@ if ($codexCmd) {
     $codexExe = $codexCmd.Source
 } else {
     $npmCodex = Join-Path $env:APPDATA "npm\codex.ps1"
-    if (Test-Path $npmCodex) {
+    if (Test-Path -LiteralPath $npmCodex) {
         $codexExe = $npmCodex
     }
 }
 
-if ($codexExe -and (Test-Path $codexExe)) {
+if ($codexExe -and (Test-Path -LiteralPath $codexExe)) {
     $codexVer = (& $codexExe --version 2>$null) -join " "
     Write-Host "  [OK] codex CLI found: $codexExe ($codexVer)" -ForegroundColor Green
 } else {
@@ -114,6 +114,8 @@ $expectedFiles = @(
     (Join-Path $env:USERPROFILE ".gemini\config\rules\claude-leader-workflow.md"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\multi-ai\SKILL.md"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\SKILL.md"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\lib\maw-common.ps1"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-agent.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-claude.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-codex.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1"),
@@ -122,6 +124,12 @@ $expectedFiles = @(
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-auto-gate.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\send-notification.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\save-agentapi-env.ps1"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\templates\roles\architect.md"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\templates\roles\leader.md"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\templates\roles\backend.md"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\templates\roles\frontend.md"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\templates\roles\reviewer.md"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\templates\roles\tester.md"),
     (Join-Path $env:USERPROFILE ".claude\CLAUDE.md"),
     (Join-Path $env:USERPROFILE ".claude\commands\multi-ai.md"),
     (Join-Path $env:USERPROFILE ".claude\commands\antigravity.md"),
@@ -131,19 +139,19 @@ $expectedFiles = @(
 )
 
 foreach ($f in $expectedFiles) {
-    if (Test-Path $f) {
+    if (Test-Path -LiteralPath $f) {
         Write-Host "  [OK] $f" -ForegroundColor Green
     } else {
         Write-Host "  [MISSING] $f (Run .\install.ps1 to sync)" -ForegroundColor Red
     }
 }
 
-# 6. Audit & Token Optimization Summary
-Write-Host "`n[6/6] Audit & Token Optimization Summary (multi-ai-audit.jsonl)" -ForegroundColor Yellow
+# 6. Audit & Telemetry Summary
+Write-Host "`n[6/6] Audit & Telemetry Summary (multi-ai-audit.jsonl)" -ForegroundColor Yellow
 $auditFile = Join-Path $env:USERPROFILE ".gemini\antigravity\multi-ai-audit.jsonl"
-if (Test-Path $auditFile) {
+if (Test-Path -LiteralPath $auditFile) {
     $entries = @()
-    foreach ($line in (Get-Content -Path $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue)) {
+    foreach ($line in (Get-Content -LiteralPath $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue)) {
         if ($line -and $line.Trim()) {
             try {
                 $entries += ($line | ConvertFrom-Json)
@@ -153,10 +161,12 @@ if (Test-Path $auditFile) {
 
     if ($entries.Count -gt 0) {
         $totalChars = ($entries | Measure-Object -Property PromptChars -Sum).Sum
-        $estTokensSaved = $entries.Count * 15000
+        $totalCost  = ($entries | Where-Object { $null -ne $_.CostUsd } | Measure-Object -Property CostUsd -Sum).Sum
+        if ($null -eq $totalCost) { $totalCost = 0.0 }
+        $avgCost    = [Math]::Round($totalCost / $entries.Count, 5)
         Write-Host "  Total AI Invocations Logged : $($entries.Count)" -ForegroundColor White
         Write-Host "  Total Prompt Characters Sent: $totalChars chars" -ForegroundColor White
-        Write-Host "  Est. Overhead Tokens Saved  : ~$estTokensSaved tokens (via --tools '' & pre-filtered context)" -ForegroundColor Green
+        Write-Host ("  Total Recorded Cost (USD)   : `${0:N4} (Avg: `${1:N5}/call)" -f $totalCost, $avgCost) -ForegroundColor Green
 
         $byRole = $entries | Group-Object -Property Role | Select-Object Name, Count
         Write-Host "`n  Invocations by Role:" -ForegroundColor Cyan

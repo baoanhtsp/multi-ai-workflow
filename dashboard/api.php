@@ -2,14 +2,8 @@
 declare(strict_types=1);
 
 /**
- * Multi-AI Workflow — Mission Control Backend & Telemetry API (v2.0)
+ * Multi-AI Workflow — Mission Control Backend & Telemetry API (v2.2)
  * Zero-dependency PHP 8.x endpoint for C:\laragon\www\multi-ai-workflow\dashboard\api.php
- * Includes:
- *  - P0 #1: Live Web Job Runner & Real-Time Log Streaming (run_job, job_status, cancel_job)
- *  - P0 #2: 1-Click Auto-Review Gate (Implement -> SPEC Guard -> Council Review -> Auto-Fix)
- *  - P1 #3: Real Token & USD Cost Telemetry (InputTokens, OutputTokens, CostUsd, Cost by Model/Tool)
- *  - P1 #4: SPEC.md Contract Guard (0-Token Static File Ownership & Endpoint Verifier)
- *  - P2 #5: Git Branch / Worktree Explorer & Desktop Toast / Webhook / Telegram Notifications
  */
 
 header('Content-Type: application/json; charset=utf-8');
@@ -26,7 +20,7 @@ function respondJson(array $payload, int $statusCode = 200): never {
     exit;
 }
 
-// 1. Strict Local-Only Access Control & DNS Rebinding Protection
+// 1. Strict Local-Only Access Control & DNS Rebinding Protection (SPEC §3.0)
 $remoteAddr = $_SERVER['REMOTE_ADDR'] ?? '';
 $allowedLoopbacks = ['127.0.0.1', '::1', 'localhost'];
 if ($remoteAddr !== '' && !in_array($remoteAddr, $allowedLoopbacks, true)) {
@@ -34,12 +28,12 @@ if ($remoteAddr !== '' && !in_array($remoteAddr, $allowedLoopbacks, true)) {
 }
 
 $httpHost = strtolower((string)($_SERVER['HTTP_HOST'] ?? ''));
-$hostOnly = preg_replace('/:\d+$/', '', $httpHost);
+$hostOnly = (string)preg_replace('/:\d+$/', '', $httpHost);
 if ($hostOnly !== '' && !in_array($hostOnly, ['localhost', '127.0.0.1', '[::1]'], true) && !str_ends_with($hostOnly, '.test') && !str_ends_with($hostOnly, '.local')) {
     respondJson(['ok' => false, 'error' => 'Forbidden: Untrusted Host header.'], 403);
 }
 
-// 2. Method & CSRF / Origin Validation for State-Changing Requests
+// 2. Method & CSRF / Origin / Sec-Fetch-Site Validation for State-Changing Requests (SPEC §3.0)
 $method = strtoupper($_SERVER['REQUEST_METHOD'] ?? 'GET');
 if ($method === 'OPTIONS') {
     header('Allow: GET, POST, OPTIONS');
@@ -48,23 +42,53 @@ if ($method === 'OPTIONS') {
 }
 
 if ($method === 'POST') {
-    $contentType = strtolower((string)($_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? ''));
-    if (!str_contains($contentType, 'application/json')) {
+    // (1) Custom header X-MAW-Request: 1 required on every POST
+    $mawHeader = trim((string)($_SERVER['HTTP_X_MAW_REQUEST'] ?? ''));
+    if ($mawHeader !== '1') {
+        respondJson([
+            'ok' => false,
+            'error' => 'Forbidden: Missing or invalid X-MAW-Request header.',
+        ], 403);
+    }
+
+    // (2) Media type (part before ';', trimmed, lower-cased) must be exactly 'application/json'
+    $rawContentType = (string)($_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? '');
+    $mediaType = strtolower(trim(explode(';', $rawContentType, 2)[0]));
+    if ($mediaType !== 'application/json') {
         respondJson([
             'ok' => false,
             'error' => 'Unsupported Media Type: Content-Type must be application/json.',
         ], 415);
     }
 
-    $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
-    if ($origin !== '') {
-        $originHost = strtolower((string)parse_url($origin, PHP_URL_HOST));
-        if ($originHost !== '' && $hostOnly !== '' && $originHost !== $hostOnly) {
-            respondJson([
-                'ok' => false,
-                'error' => 'Forbidden: Cross-origin POST requests are not allowed.',
-            ], 403);
+    // (3) Origin, if present, must be a real origin whose host equals the request host; Origin: null is rejected
+    if (array_key_exists('HTTP_ORIGIN', $_SERVER)) {
+        $rawOrigin = trim((string)$_SERVER['HTTP_ORIGIN']);
+        if ($rawOrigin !== '') {
+            if (strtolower($rawOrigin) === 'null') {
+                respondJson([
+                    'ok' => false,
+                    'error' => 'Forbidden: Origin null is not allowed.',
+                ], 403);
+            }
+            $originScheme = strtolower((string)parse_url($rawOrigin, PHP_URL_SCHEME));
+            $originHost   = strtolower((string)parse_url($rawOrigin, PHP_URL_HOST));
+            if (!in_array($originScheme, ['http', 'https'], true) || $originHost === '' || ($hostOnly !== '' && $originHost !== $hostOnly)) {
+                respondJson([
+                    'ok' => false,
+                    'error' => 'Forbidden: Cross-origin POST requests are not allowed.',
+                ], 403);
+            }
         }
+    }
+
+    // (4) Sec-Fetch-Site, if present, must be 'same-origin' or 'none'
+    $secFetchSite = strtolower(trim((string)($_SERVER['HTTP_SEC_FETCH_SITE'] ?? '')));
+    if ($secFetchSite !== '' && !in_array($secFetchSite, ['same-origin', 'none'], true)) {
+        respondJson([
+            'ok' => false,
+            'error' => 'Forbidden: Cross-site request blocked by Sec-Fetch-Site policy.',
+        ], 403);
     }
 }
 
@@ -248,6 +272,54 @@ function getBridgeStatus(string $bridgeFile): array {
     ];
 }
 
+function getDetectedToolVersions(string $userProfile): array {
+    $cacheFile = sys_get_temp_dir() . '\\maw_tool_versions_cache_v2.json';
+    if (is_file($cacheFile) && (time() - (int)@filemtime($cacheFile)) < 3600) {
+        $cached = json_decode((string)@file_get_contents($cacheFile), true);
+        if (is_array($cached) && array_key_exists('claude', $cached) && array_key_exists('codex', $cached)) {
+            return [
+                'claude' => is_string($cached['claude']) ? $cached['claude'] : null,
+                'codex' => is_string($cached['codex']) ? $cached['codex'] : null,
+            ];
+        }
+    }
+
+    $claudeVer = null;
+    $claudeOut = trim((string)@shell_exec('claude --version 2>NUL'));
+    if ($claudeOut === '') {
+        $claudeBase = $userProfile . '\\AppData\\Roaming\\Claude\\claude-code';
+        if (is_dir($claudeBase)) {
+            $exes = array_merge(
+                glob($claudeBase . '\\*\\*\\claude.exe') ?: [],
+                glob($claudeBase . '\\*\\claude.exe') ?: []
+            );
+            if (!empty($exes)) {
+                usort($exes, static fn(string $a, string $b): int => (filemtime($b) ?: 0) <=> (filemtime($a) ?: 0));
+                $claudeOut = trim((string)@shell_exec(escapeshellarg($exes[0]) . ' --version 2>NUL'));
+            }
+        }
+    }
+    if ($claudeOut !== '' && preg_match('/(\d+\.\d+\.\d+(?:-[a-zA-Z0-9._]+)?)/', $claudeOut, $m)) {
+        $claudeVer = $m[1];
+    }
+
+    $codexVer = null;
+    $codexOut = trim((string)@shell_exec('codex --version 2>NUL'));
+    if ($codexOut === '') {
+        $npmCodex = $userProfile . '\\AppData\\Roaming\\npm\\codex.cmd';
+        if (is_file($npmCodex)) {
+            $codexOut = trim((string)@shell_exec(escapeshellarg($npmCodex) . ' --version 2>NUL'));
+        }
+    }
+    if ($codexOut !== '' && preg_match('/(\d+\.\d+\.\d+(?:-[a-zA-Z0-9._]+)?)/', $codexOut, $m)) {
+        $codexVer = $m[1];
+    }
+
+    $result = ['claude' => $claudeVer, 'codex' => $codexVer];
+    @file_put_contents($cacheFile, json_encode($result, JSON_UNESCAPED_SLASHES));
+    return $result;
+}
+
 function getConversations(string $presenceDir, string $brainDir, array &$lineCache): array {
     $activeLocks = [];
     $now = time();
@@ -356,7 +428,7 @@ function getLocalProjects(string $laragonWww): array {
 }
 
 /**
- * Estimates per-call token & USD cost for both new and legacy audit records.
+ * Computes per-call token & USD cost for audit records (B9: no fabricated saved-token metrics).
  */
 function estimateEntryTelemetry(array $entry): array {
     $promptChars = max(0, (int)($entry['PromptChars'] ?? 0));
@@ -390,16 +462,10 @@ function estimateEntryTelemetry(array $entry): array {
         $costUsd = round(($inTokens * $inRate + $outTokens * $outRate) / 1000000.0, 5);
     }
 
-    // Without --tools "" & context filtering, each call carries ~15,000 extra tool/repo discovery input tokens
-    $savedTokens = 15000;
-    $savedUsd = round(($savedTokens * 3.0) / 1000000.0, 4); // ~$0.045 saved per call
-
     return [
-        'in_tokens'    => $inTokens,
-        'out_tokens'   => $outTokens,
-        'cost_usd'     => $costUsd,
-        'saved_tokens' => $savedTokens,
-        'saved_usd'    => $savedUsd,
+        'in_tokens'  => $inTokens,
+        'out_tokens' => $outTokens,
+        'cost_usd'   => $costUsd,
     ];
 }
 
@@ -410,15 +476,17 @@ function getAuditStats(string $auditFile): array {
         'total_input_tokens' => 0,
         'total_output_tokens' => 0,
         'total_cost_usd' => 0.0,
-        'estimated_tokens_saved' => 0,
-        'estimated_cost_saved_usd' => 0.0,
+        'avg_cost_per_call_usd' => 0.0,
         'by_tool' => ['claude' => 0, 'codex' => 0, 'antigravity' => 0],
         'cost_by_tool' => ['claude' => 0.0, 'codex' => 0.0, 'antigravity' => 0.0],
         'cost_by_model' => [],
         'by_role' => [
             'architect' => 0,
+            'leader' => 0,
+            'backend' => 0,
             'frontend' => 0,
             'reviewer' => 0,
+            'tester' => 0,
             'ui-tweak' => 0,
             'review-diff' => 0,
             'critic' => 0,
@@ -435,7 +503,7 @@ function getAuditStats(string $auditFile): array {
 
     $mtime = (int)@filemtime($auditFile);
     $size  = (int)@filesize($auditFile);
-    $cacheFile = sys_get_temp_dir() . '\\agy_dashboard_auditcache.json';
+    $cacheFile = sys_get_temp_dir() . '\\agy_dashboard_auditcache_v21.json';
     if (is_file($cacheFile)) {
         $cached = json_decode((string)@file_get_contents($cacheFile), true);
         if (is_array($cached) && ($cached['_sig'] ?? '') === ($mtime . '|' . $size) && isset($cached['data'])) {
@@ -486,8 +554,6 @@ function getAuditStats(string $auditFile): array {
         $stats['total_input_tokens'] += $tel['in_tokens'];
         $stats['total_output_tokens'] += $tel['out_tokens'];
         $stats['total_cost_usd'] = round($stats['total_cost_usd'] + $tel['cost_usd'], 4);
-        $stats['estimated_tokens_saved'] += $tel['saved_tokens'];
-        $stats['estimated_cost_saved_usd'] = round($stats['estimated_cost_saved_usd'] + $tel['saved_usd'], 4);
         $stats['cost_by_tool'][$tool] = round(($stats['cost_by_tool'][$tool] ?? 0.0) + $tel['cost_usd'], 4);
         $stats['cost_by_model'][$modelName] = round(($stats['cost_by_model'][$modelName] ?? 0.0) + $tel['cost_usd'], 4);
 
@@ -510,6 +576,9 @@ function getAuditStats(string $auditFile): array {
     }
     fclose($fp);
 
+    $stats['avg_cost_per_call_usd'] = $stats['total_calls'] > 0
+        ? round($stats['total_cost_usd'] / $stats['total_calls'], 5)
+        : 0.0;
     $stats['recent_logs'] = array_reverse($recentRing);
 
     $tmpCache = $cacheFile . '.' . bin2hex(random_bytes(3)) . '.tmp';
@@ -564,9 +633,6 @@ function getCodexModels(string $userProfile): array {
     return !empty($slugs) ? array_values(array_unique($slugs)) : $defaultModels;
 }
 
-/**
- * Collects Git branch, worktree, uncommitted count & recent commits for a project directory (P2 #5).
- */
 function getProjectGitInfo(string $projectPath): array {
     if (!is_dir($projectPath . '\\.git') && !is_file($projectPath . '\\.git')) {
         return [
@@ -624,7 +690,7 @@ function getProjectGitInfo(string $projectPath): array {
         if (str_starts_with($line, 'worktree ')) {
             $curWt['path'] = substr($line, 9);
         } elseif (str_starts_with($line, 'HEAD ')) {
-            $curWt['head'] = substr($line, 0, 12);
+            $curWt['head'] = substr($line, 5, 7);
         } elseif (str_starts_with($line, 'branch ')) {
             $curWt['branch'] = str_replace('refs/heads/', '', substr($line, 7));
         } elseif ($line === 'detached') {
@@ -661,7 +727,7 @@ function getProjectGitInfo(string $projectPath): array {
     ];
 }
 
-function getNotifyConfig(string $notifyCfgFile): array {
+function loadInternalNotifyConfig(string $notifyCfgFile): array {
     $cfg = [
         'desktop_toast' => true,
         'webhook_url' => '',
@@ -681,28 +747,20 @@ function getNotifyConfig(string $notifyCfgFile): array {
     return $cfg;
 }
 
-function getRecentJobs(string $jobsDir): array {
-    if (!is_dir($jobsDir)) {
-        return [];
+function getPublicNotifyConfig(string $notifyCfgFile): array {
+    $cfg = loadInternalNotifyConfig($notifyCfgFile);
+    $tok = $cfg['telegram_bot_token'];
+    $masked = null;
+    if ($tok !== '') {
+        $masked = strlen($tok) > 10 ? (substr($tok, 0, 6) . '...' . substr($tok, -4)) : 'configured';
     }
-    $files = glob($jobsDir . '\\job_*.json') ?: [];
-    usort($files, static fn(string $a, string $b): int => (filemtime($b) ?: 0) <=> (filemtime($a) ?: 0));
-    $jobs = [];
-    foreach (array_slice($files, 0, 8) as $f) {
-        $meta = json_decode((string)@file_get_contents($f), true);
-        if (!is_array($meta)) continue;
-        $meta = refreshJobMetaStatus($meta, $jobsDir);
-        $jobs[] = [
-            'job_id' => $meta['job_id'] ?? '',
-            'mode' => $meta['mode'] ?? '',
-            'role' => $meta['role'] ?? '',
-            'project_name' => basename((string)($meta['project_path'] ?? '')),
-            'status' => $meta['status'] ?? 'UNKNOWN',
-            'started_at' => $meta['started_at'] ?? '',
-            'pid' => $meta['pid'] ?? null,
-        ];
-    }
-    return $jobs;
+    return [
+        'desktop_toast' => (bool)$cfg['desktop_toast'],
+        'webhook_url' => $cfg['webhook_url'],
+        'telegram_chat_id' => $cfg['telegram_chat_id'],
+        'telegram_bot_token_set' => ($tok !== ''),
+        'telegram_bot_token_masked' => $masked,
+    ];
 }
 
 function isProcessRunning(int $pid): bool {
@@ -713,6 +771,9 @@ function isProcessRunning(int $pid): bool {
 
 function refreshJobMetaStatus(array $meta, string $jobsDir): array {
     if (($meta['status'] ?? '') !== 'RUNNING') {
+        if (!array_key_exists('exit_code', $meta)) {
+            $meta['exit_code'] = null;
+        }
         return $meta;
     }
     $jobId = (string)($meta['job_id'] ?? '');
@@ -738,6 +799,7 @@ function refreshJobMetaStatus(array $meta, string $jobsDir): array {
                 }
                 if (str_contains($tail, '=== [JOB_CANCELLED_BY_USER] ===')) {
                     $meta['status'] = 'CANCELLED';
+                    $meta['exit_code'] = $meta['exit_code'] ?? null;
                     $meta['finished_at'] = date('c');
                     @file_put_contents($metaFile, json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
                     return $meta;
@@ -746,13 +808,247 @@ function refreshJobMetaStatus(array $meta, string $jobsDir): array {
         }
     }
 
-    if ($pid > 0 && !isProcessRunning($pid)) {
-        $meta['status'] = 'DONE';
+    // R5: If PID capture failed (pid <= 0), keep RUNNING while the log was modified in the last 60s
+    if ($pid <= 0) {
+        clearstatcache(true, $logFile);
+        $lastMod = is_file($logFile) ? (int)@filemtime($logFile) : 0;
+        if ($lastMod <= 0) {
+            $lastMod = (int)($meta['started_ts'] ?? 0);
+        }
+        if ($lastMod > 0 && (time() - $lastMod) < 60) {
+            $meta['exit_code'] = $meta['exit_code'] ?? null;
+            return $meta;
+        }
+        $meta['status'] = 'FAILED';
+        $meta['exit_code'] = null;
         $meta['finished_at'] = date('c');
         @file_put_contents($metaFile, json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        return $meta;
     }
 
+    // A process that exits without writing the JOB_FINISHED marker => FAILED with exit_code: null (SPEC §3.7)
+    if (!isProcessRunning($pid)) {
+        $meta['status'] = 'FAILED';
+        $meta['exit_code'] = null;
+        $meta['finished_at'] = date('c');
+        @file_put_contents($metaFile, json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
+        return $meta;
+    }
+
+    $meta['exit_code'] = $meta['exit_code'] ?? null;
     return $meta;
+}
+
+function getRecentJobs(string $jobsDir): array {
+    if (!is_dir($jobsDir)) {
+        return [];
+    }
+    $files = glob($jobsDir . '\\job_*.json') ?: [];
+    usort($files, static fn(string $a, string $b): int => (filemtime($b) ?: 0) <=> (filemtime($a) ?: 0));
+    $jobs = [];
+    foreach (array_slice($files, 0, 8) as $f) {
+        $meta = json_decode((string)@file_get_contents($f), true);
+        if (!is_array($meta)) continue;
+        $meta = refreshJobMetaStatus($meta, $jobsDir);
+        $row = [
+            'job_id' => $meta['job_id'] ?? '',
+            'mode' => $meta['mode'] ?? '',
+            'agent' => $meta['agent'] ?? ($meta['mode'] ?? ''),
+            'role' => $meta['role'] ?? '',
+            'project_name' => basename((string)($meta['project_path'] ?? '')),
+            'status' => $meta['status'] ?? 'UNKNOWN',
+            'exit_code' => $meta['exit_code'] ?? null,
+            'started_at' => $meta['started_at'] ?? '',
+            'pid' => $meta['pid'] ?? null,
+        ];
+        if (array_key_exists('team', $meta) && is_array($meta['team'])) {
+            $row['team'] = $meta['team'];
+        }
+        $jobs[] = $row;
+    }
+    return $jobs;
+}
+
+/**
+ * Ensures a raw byte chunk never ends in the middle of a multi-byte UTF-8 character (SPEC §3.7).
+ */
+function trimIncompleteUtf8Tail(string $bytes): string {
+    $len = strlen($bytes);
+    if ($len === 0) {
+        return '';
+    }
+    // Fast path: last byte is ASCII (0xxxxxxx)
+    if ((ord($bytes[$len - 1]) & 0x80) === 0) {
+        return $bytes;
+    }
+    // Scan backwards up to 4 bytes to find the UTF-8 lead byte (11xxxxxx)
+    for ($back = 1; $back <= 4 && $back <= $len; $back++) {
+        $idx = $len - $back;
+        $b = ord($bytes[$idx]);
+        if (($b & 0xC0) === 0x80) {
+            // Continuation byte (10xxxxxx), keep scanning back
+            continue;
+        }
+        if (($b & 0xE0) === 0xC0) {
+            $expected = 2;
+        } elseif (($b & 0xF0) === 0xE0) {
+            $expected = 3;
+        } elseif (($b & 0xF8) === 0xF0) {
+            $expected = 4;
+        } else {
+            return substr($bytes, 0, $idx);
+        }
+        return ($back < $expected) ? substr($bytes, 0, $idx) : $bytes;
+    }
+    return $bytes;
+}
+
+/**
+ * Single unified builder for PowerShell script invocation (B10 & F4: used by both dispatch preview and run_job).
+ */
+function buildPowerShellCall(array $info, string $scriptsDir, ?string $promptFile = null): string {
+    $mode           = $info['mode'];
+    $agent          = $info['agent'] ?? '';
+    $role           = $info['role'];
+    $modelOverride  = $info['model'];
+    $effortOverride = $info['effort'];
+    $newSession     = (bool)($info['new_session'] ?? false);
+    $teamSpec       = (string)($info['team_spec'] ?? '');
+    $projectPath    = $info['project_path'];
+    $prompt         = $info['prompt'];
+
+    if ($mode === 'task' || $mode === 'team') {
+        $extra = '';
+        if ($mode === 'team' && $teamSpec !== '') {
+            $extra .= ' -Team ' . psq($teamSpec);
+        }
+        if ($modelOverride !== '') {
+            $extra .= ' -ModelOverride ' . psq($modelOverride);
+        }
+        if ($effortOverride !== '') {
+            $extra .= ' -EffortOverride ' . psq($effortOverride);
+        }
+        if ($newSession) {
+            $extra .= ' -NewSession';
+        }
+        $promptPart = ($promptFile !== null)
+            ? (' -PromptFile ' . psq($promptFile))
+            : (' -Prompt ' . psq($prompt));
+        return sprintf(
+            '& %s -Agent %s -Role %s -WorkDir %s%s%s',
+            psq($scriptsDir . '\\invoke-agent.ps1'),
+            psq($agent),
+            psq($role),
+            psq($projectPath),
+            $extra,
+            $promptPart
+        );
+    }
+
+    if ($mode === 'claude') {
+        $extra = ($role === 'reviewer') ? ' -IncludeGitDiff' : '';
+        if ($modelOverride !== '') $extra .= ' -ModelOverride ' . psq($modelOverride);
+        if ($effortOverride !== '') $extra .= ' -EffortOverride ' . psq($effortOverride);
+        $promptPart = ($promptFile !== null)
+            ? (' -PromptFile ' . psq($promptFile))
+            : (' -Prompt ' . psq($prompt));
+        return sprintf(
+            '& %s -Role %s -WorkDir %s%s%s',
+            psq($scriptsDir . '\\invoke-claude.ps1'),
+            psq($role),
+            psq($projectPath),
+            $extra,
+            $promptPart
+        );
+    }
+
+    if ($mode === 'codex') {
+        $extra = '';
+        if ($modelOverride !== '') $extra .= ' -ModelOverride ' . psq($modelOverride);
+        if ($effortOverride !== '') $extra .= ' -EffortOverride ' . psq($effortOverride);
+        $promptPart = '';
+        if ($prompt !== '') {
+            $promptPart = ($promptFile !== null)
+                ? (' -PromptFile ' . psq($promptFile))
+                : (' -Prompt ' . psq($prompt));
+        }
+        return sprintf(
+            '& %s -Role %s -WorkDir %s%s%s',
+            psq($scriptsDir . '\\invoke-codex.ps1'),
+            psq($role),
+            psq($projectPath),
+            $extra,
+            $promptPart
+        );
+    }
+
+    if ($mode === 'council') {
+        if ($promptFile !== null && $prompt !== '') {
+            return sprintf(
+                '& %s -WorkDir %s -Prompt %s -PromptFile %s',
+                psq($scriptsDir . '\\invoke-council-review.ps1'),
+                psq($projectPath),
+                psq(''),
+                psq($promptFile)
+            );
+        }
+        $effectivePrompt = $prompt !== '' ? $prompt : 'Review uncommitted changes against SPEC.md and score X/10.';
+        return sprintf(
+            '& %s -WorkDir %s -Prompt %s',
+            psq($scriptsDir . '\\invoke-council-review.ps1'),
+            psq($projectPath),
+            psq($effectivePrompt)
+        );
+    }
+
+    if ($mode === 'auto-gate') {
+        $skipFlag = ($role === 'review-only') ? ' -SkipInitialImplement' : '';
+        $promptPart = '';
+        if ($prompt !== '') {
+            $promptPart = ($promptFile !== null)
+                ? (' -PromptFile ' . psq($promptFile))
+                : (' -Prompt ' . psq($prompt));
+        }
+        return sprintf(
+            '& %s -WorkDir %s -MaxRounds 2%s%s',
+            psq($scriptsDir . '\\invoke-auto-gate.ps1'),
+            psq($projectPath),
+            $skipFlag,
+            $promptPart
+        );
+    }
+
+    if ($mode === 'spec-guard') {
+        return sprintf(
+            '& %s -WorkDir %s',
+            psq($scriptsDir . '\\invoke-spec-guard.ps1'),
+            psq($projectPath)
+        );
+    }
+
+    // mode === 'antigravity'
+    if (in_array($role, ['status', 'wait'], true)) {
+        return sprintf(
+            '& %s -Action %s -WorkDir %s',
+            psq($scriptsDir . '\\invoke-antigravity.ps1'),
+            psq($role),
+            psq($projectPath)
+        );
+    }
+
+    $modelArg = ($role === 'new' && $modelOverride !== '') ? (' -Model ' . psq($modelOverride)) : '';
+    $promptPart = ($promptFile !== null)
+        ? (' -PromptFile ' . psq($promptFile))
+        : (' -Prompt ' . psq($prompt));
+    return sprintf(
+        '& %s -Action %s -WorkDir %s%s -Title %s%s',
+        psq($scriptsDir . '\\invoke-antigravity.ps1'),
+        psq($role),
+        psq($projectPath),
+        $modelArg,
+        psq('Task from Mission Control'),
+        $promptPart
+    );
 }
 
 /**
@@ -760,11 +1056,11 @@ function refreshJobMetaStatus(array $meta, string $jobsDir): array {
  */
 function buildValidatedCommand(array $body, string $laragonWww, string $repoRoot, string $userProfile, string $scriptsDir): array {
     $mode = strtolower(trim((string)($body['mode'] ?? '')));
-    $allowedModes = ['antigravity', 'claude', 'codex', 'council', 'auto-gate', 'spec-guard'];
+    $allowedModes = ['task', 'team', 'antigravity', 'claude', 'codex', 'council', 'auto-gate', 'spec-guard'];
     if (!in_array($mode, $allowedModes, true)) {
         respondJson([
             'ok' => false,
-            'error' => 'Invalid mode. Must be one of: antigravity, claude, codex, council, auto-gate, spec-guard.',
+            'error' => 'Invalid mode. Must be one of: task, team, antigravity, claude, codex, council, auto-gate, spec-guard.',
         ], 400);
     }
 
@@ -777,45 +1073,100 @@ function buildValidatedCommand(array $body, string $laragonWww, string $repoRoot
         ], 400);
     }
 
+    $allowedAgents = ['claude', 'antigravity', 'codex'];
+    $agent = '';
     $role = strtolower(trim((string)($body['role'] ?? '')));
-    $allowedRolesByMode = [
-        'claude' => ['architect', 'frontend', 'reviewer', 'ui-tweak'],
-        'codex' => ['review-diff', 'critic', 'coder'],
-        'antigravity' => ['send-latest', 'new', 'status', 'wait'],
-        'council' => ['parallel-review', 'reviewer', ''],
-        'auto-gate' => ['auto-loop', 'review-only', ''],
-        'spec-guard' => ['check', ''],
-    ];
+    $newSession = ($body['new_session'] ?? false) === true;
+    $teamArray = null;
+    $teamSpec = '';
 
-    if ($mode === 'claude' && !in_array($role, $allowedRolesByMode['claude'], true)) {
-        respondJson(['ok' => false, 'error' => 'Invalid role for claude. Allowed: architect, frontend, reviewer, ui-tweak.'], 400);
-    }
-    if ($mode === 'codex') {
-        if ($role === '') $role = 'review-diff';
-        if (!in_array($role, $allowedRolesByMode['codex'], true)) {
-            respondJson(['ok' => false, 'error' => 'Invalid role for codex. Allowed: review-diff, critic, coder.'], 400);
+    if ($mode === 'task') {
+        $agent = strtolower(trim((string)($body['agent'] ?? '')));
+        if (!in_array($agent, $allowedAgents, true)) {
+            respondJson(['ok' => false, 'error' => 'Invalid agent for task mode. Allowed: claude, antigravity, codex.'], 400);
         }
-    }
-    if ($mode === 'antigravity') {
-        if ($role === '') $role = 'send-latest';
-        if (!in_array($role, $allowedRolesByMode['antigravity'], true)) {
-            respondJson(['ok' => false, 'error' => 'Invalid role/action for antigravity. Allowed: send-latest, new, status, wait.'], 400);
+        $allowedTaskRoles = ['architect', 'backend', 'frontend', 'reviewer', 'tester'];
+        if (!in_array($role, $allowedTaskRoles, true)) {
+            respondJson(['ok' => false, 'error' => 'Invalid role for task mode. Allowed: architect, backend, frontend, reviewer, tester.'], 400);
         }
-    }
-    if ($mode === 'council') {
-        if ($role === '' || $role === 'reviewer') $role = 'parallel-review';
-        if (!in_array($role, $allowedRolesByMode['council'], true)) {
-            respondJson(['ok' => false, 'error' => 'Invalid role for council. Allowed: parallel-review.'], 400);
+    } elseif ($mode === 'team') {
+        $agent = strtolower(trim((string)($body['agent'] ?? '')));
+        if (!in_array($agent, $allowedAgents, true)) {
+            respondJson(['ok' => false, 'error' => 'Invalid leader agent for team mode. Allowed: claude, antigravity, codex.'], 400);
         }
-    }
-    if ($mode === 'auto-gate') {
-        if ($role === '') $role = 'auto-loop';
-        if (!in_array($role, $allowedRolesByMode['auto-gate'], true)) {
-            respondJson(['ok' => false, 'error' => 'Invalid role for auto-gate. Allowed: auto-loop, review-only.'], 400);
+        $role = 'leader';
+        $rawTeam = $body['team'] ?? null;
+        if (!is_array($rawTeam) || empty($rawTeam)) {
+            respondJson(['ok' => false, 'error' => 'Team mode requires a non-empty team map (subset of backend, frontend, reviewer).'], 400);
         }
-    }
-    if ($mode === 'spec-guard') {
-        $role = 'check';
+        $allowedTeamKeys = ['backend', 'frontend', 'reviewer'];
+        $normalizedTeam = [];
+        foreach ($rawTeam as $k => $v) {
+            $kNorm = strtolower(trim((string)$k));
+            $vNorm = is_string($v) ? strtolower(trim($v)) : '';
+            if (!in_array($kNorm, $allowedTeamKeys, true)) {
+                respondJson(['ok' => false, 'error' => "Invalid team slot '$kNorm'. Allowed keys: backend, frontend, reviewer."], 400);
+            }
+            if (!in_array($vNorm, $allowedAgents, true)) {
+                respondJson(['ok' => false, 'error' => "Invalid agent '$vNorm' for team slot '$kNorm'. Allowed: claude, antigravity, codex."], 400);
+            }
+            $normalizedTeam[$kNorm] = $vNorm;
+        }
+        if (empty($normalizedTeam)) {
+            respondJson(['ok' => false, 'error' => 'Team mode requires at least 1 valid team member.'], 400);
+        }
+        $teamArray = [];
+        $teamParts = [];
+        foreach ($allowedTeamKeys as $slotKey) {
+            if (isset($normalizedTeam[$slotKey])) {
+                $teamArray[$slotKey] = $normalizedTeam[$slotKey];
+                $teamParts[] = $slotKey . '=' . $normalizedTeam[$slotKey];
+            }
+        }
+        $teamSpec = implode(',', $teamParts);
+    } else {
+        $allowedRolesByMode = [
+            'claude' => ['architect', 'leader', 'backend', 'frontend', 'reviewer', 'ui-tweak'],
+            'codex' => ['review-diff', 'critic', 'coder'],
+            'antigravity' => ['send-latest', 'new', 'status', 'wait'],
+            'council' => ['parallel-review', 'reviewer', ''],
+            'auto-gate' => ['auto-loop', 'review-only', ''],
+            'spec-guard' => ['check', ''],
+        ];
+
+        if ($mode === 'claude') {
+            $agent = 'claude';
+            if (!in_array($role, $allowedRolesByMode['claude'], true)) {
+                respondJson(['ok' => false, 'error' => 'Invalid role for claude. Allowed: architect, leader, backend, frontend, reviewer, ui-tweak.'], 400);
+            }
+        } elseif ($mode === 'codex') {
+            $agent = 'codex';
+            if ($role === '') $role = 'review-diff';
+            if (!in_array($role, $allowedRolesByMode['codex'], true)) {
+                respondJson(['ok' => false, 'error' => 'Invalid role for codex. Allowed: review-diff, critic, coder.'], 400);
+            }
+        } elseif ($mode === 'antigravity') {
+            $agent = 'antigravity';
+            if ($role === '') $role = 'send-latest';
+            if (!in_array($role, $allowedRolesByMode['antigravity'], true)) {
+                respondJson(['ok' => false, 'error' => 'Invalid role/action for antigravity. Allowed: send-latest, new, status, wait.'], 400);
+            }
+        } elseif ($mode === 'council') {
+            $agent = 'council';
+            if ($role === '' || $role === 'reviewer') $role = 'parallel-review';
+            if (!in_array($role, $allowedRolesByMode['council'], true)) {
+                respondJson(['ok' => false, 'error' => 'Invalid role for council. Allowed: parallel-review.'], 400);
+            }
+        } elseif ($mode === 'auto-gate') {
+            $agent = 'auto-gate';
+            if ($role === '') $role = 'auto-loop';
+            if (!in_array($role, $allowedRolesByMode['auto-gate'], true)) {
+                respondJson(['ok' => false, 'error' => 'Invalid role for auto-gate. Allowed: auto-loop, review-only.'], 400);
+            }
+        } elseif ($mode === 'spec-guard') {
+            $agent = 'spec-guard';
+            $role = 'check';
+        }
     }
 
     $rawPrompt = $body['prompt'] ?? '';
@@ -823,11 +1174,14 @@ function buildValidatedCommand(array $body, string $laragonWww, string $repoRoot
         respondJson(['ok' => false, 'error' => 'Invalid prompt format: must be a string.'], 400);
     }
     $prompt = trim($rawPrompt);
-    if (mb_strlen($prompt, 'UTF-8') > 4000) {
-        respondJson(['ok' => false, 'error' => 'Prompt exceeds maximum inline length (4000 characters).'], 400);
+    // SPEC §3.0 & B10: Prompt limit 20000 characters
+    if (mb_strlen($prompt, 'UTF-8') > 20000) {
+        respondJson(['ok' => false, 'error' => 'Prompt exceeds maximum length (20000 characters).'], 400);
     }
 
     $requiresPrompt = (
+        $mode === 'task' ||
+        $mode === 'team' ||
         $mode === 'claude' ||
         ($mode === 'codex' && in_array($role, ['critic', 'coder'], true)) ||
         ($mode === 'antigravity' && in_array($role, ['send-latest', 'new'], true)) ||
@@ -857,106 +1211,47 @@ function buildValidatedCommand(array $body, string $laragonWww, string $repoRoot
     $allowedCodexEfforts = ['', 'low', 'medium', 'high', 'xhigh'];
     $allowedAgyModels = ['', 'pro', 'flash', 'flash_lite'];
 
-    if ($mode === 'claude') {
+    $execAgent = in_array($mode, ['task', 'team'], true) ? $agent : $mode;
+    if ($execAgent === 'claude') {
         if (!in_array($modelOverride, $allowedClaudeModels, true)) {
             respondJson(['ok' => false, 'error' => 'Invalid Claude model override.'], 400);
         }
         if (!in_array($effortOverride, $allowedClaudeEfforts, true)) {
             respondJson(['ok' => false, 'error' => 'Invalid Claude effort override.'], 400);
         }
-    } elseif ($mode === 'codex') {
+    } elseif ($execAgent === 'codex') {
         if (!in_array($modelOverride, $allowedCodexModels, true)) {
             respondJson(['ok' => false, 'error' => 'Invalid Codex model override.'], 400);
         }
         if (!in_array($effortOverride, $allowedCodexEfforts, true)) {
             respondJson(['ok' => false, 'error' => 'Invalid Codex effort override.'], 400);
         }
-    } elseif ($mode === 'antigravity') {
+    } elseif ($execAgent === 'antigravity') {
         if (!in_array($modelOverride, $allowedAgyModels, true)) {
             respondJson(['ok' => false, 'error' => 'Invalid Antigravity model tier (allowed: pro, flash, flash_lite).'], 400);
         }
-    }
-
-    if ($mode === 'claude') {
-        $extra = ($role === 'reviewer') ? ' -IncludeGitDiff' : '';
-        if ($modelOverride !== '') $extra .= ' -ModelOverride ' . psq($modelOverride);
-        if ($effortOverride !== '') $extra .= ' -EffortOverride ' . psq($effortOverride);
-        $cmd = sprintf(
-            '& %s -Role %s -WorkDir %s%s -Prompt %s',
-            psq($scriptsDir . '\\invoke-claude.ps1'),
-            psq($role),
-            psq($validatedProjectPath),
-            $extra,
-            psq($prompt)
-        );
-    } elseif ($mode === 'codex') {
-        $extra = '';
-        if ($modelOverride !== '') $extra .= ' -ModelOverride ' . psq($modelOverride);
-        if ($effortOverride !== '') $extra .= ' -EffortOverride ' . psq($effortOverride);
-        $promptArg = ($prompt !== '') ? (' -Prompt ' . psq($prompt)) : '';
-        $cmd = sprintf(
-            '& %s -Role %s -WorkDir %s%s%s',
-            psq($scriptsDir . '\\invoke-codex.ps1'),
-            psq($role),
-            psq($validatedProjectPath),
-            $extra,
-            $promptArg
-        );
-    } elseif ($mode === 'council') {
-        $effectivePrompt = $prompt !== '' ? $prompt : 'Review uncommitted changes against SPEC.md and score X/10.';
-        $cmd = sprintf(
-            '& %s -WorkDir %s -Prompt %s',
-            psq($scriptsDir . '\\invoke-council-review.ps1'),
-            psq($validatedProjectPath),
-            psq($effectivePrompt)
-        );
-    } elseif ($mode === 'auto-gate') {
-        $skipFlag = ($role === 'review-only') ? ' -SkipInitialImplement' : '';
-        $promptArg = ($prompt !== '') ? (' -Prompt ' . psq($prompt)) : '';
-        $cmd = sprintf(
-            '& %s -WorkDir %s -MaxRounds 2%s%s',
-            psq($scriptsDir . '\\invoke-auto-gate.ps1'),
-            psq($validatedProjectPath),
-            $skipFlag,
-            $promptArg
-        );
-    } elseif ($mode === 'spec-guard') {
-        $cmd = sprintf(
-            '& %s -WorkDir %s',
-            psq($scriptsDir . '\\invoke-spec-guard.ps1'),
-            psq($validatedProjectPath)
-        );
-    } else {
-        if (in_array($role, ['status', 'wait'], true)) {
-            $cmd = sprintf(
-                '& %s -Action %s -WorkDir %s',
-                psq($scriptsDir . '\\invoke-antigravity.ps1'),
-                psq($role),
-                psq($validatedProjectPath)
-            );
-        } else {
-            $modelArg = ($role === 'new' && $modelOverride !== '') ? (' -Model ' . psq($modelOverride)) : '';
-            $cmd = sprintf(
-                '& %s -Action %s -WorkDir %s%s -Title %s -Prompt %s',
-                psq($scriptsDir . '\\invoke-antigravity.ps1'),
-                psq($role),
-                psq($validatedProjectPath),
-                $modelArg,
-                psq('Task from Mission Control'),
-                psq($prompt)
-            );
+        if (in_array($mode, ['task', 'team'], true) && $modelOverride !== '' && !$newSession) {
+            respondJson(['ok' => false, 'error' => 'Antigravity model tier override is only supported when new_session is true.'], 400);
+        }
+        if ($effortOverride !== '') {
+            respondJson(['ok' => false, 'error' => 'Antigravity does not accept an effort override.'], 400);
         }
     }
 
-    return [
+    $info = [
         'mode' => $mode,
+        'agent' => $agent,
         'role' => $role,
         'model' => $modelOverride,
         'effort' => $effortOverride,
+        'new_session' => $newSession,
+        'team' => $teamArray,
+        'team_spec' => $teamSpec,
         'project_path' => $validatedProjectPath,
         'prompt' => $prompt,
-        'command' => $cmd,
     ];
+    $info['command'] = buildPowerShellCall($info, $scriptsDir, null);
+    return $info;
 }
 
 // ============================================================================
@@ -978,9 +1273,12 @@ if ($action === 'status') {
     $codexModels = getCodexModels($userProfile);
     $projects = getLocalProjects($laragonWww);
     $defaultProjectPath = $projects[0]['path'] ?? $repoRoot;
+    $detectedVersions = getDetectedToolVersions($userProfile);
 
     respondJson([
         'ok' => true,
+        'api_version' => '2.2',
+        'features' => ['agents'],
         'timestamp' => date('c'),
         'user_profile' => $userProfile,
         'bridge' => $bridge,
@@ -1003,7 +1301,7 @@ if ($action === 'status') {
             ],
             'claude' => [
                 'installed' => $claudeInstalled,
-                'version' => '2.1.308',
+                'version' => $detectedVersions['claude'],
                 'models' => [
                     'claude-opus-5-5',
                     'claude-sonnet-5-5',
@@ -1034,7 +1332,7 @@ if ($action === 'status') {
             ],
             'codex' => [
                 'installed' => $codexInstalled,
-                'version' => '0.163.0',
+                'version' => $detectedVersions['codex'],
                 'model' => 'gpt-6-sol (high)',
                 'models' => $codexModels,
                 'cli_models' => $codexModels,
@@ -1046,14 +1344,14 @@ if ($action === 'status') {
         'conversations' => $conversations,
         'projects' => $projects,
         'git_info' => getProjectGitInfo($defaultProjectPath),
-        'notify_config' => getNotifyConfig($notifyCfgFile),
+        'notify_config' => getPublicNotifyConfig($notifyCfgFile),
         'jobs' => getRecentJobs($jobsDir),
         'audit' => getAuditStats($auditFile),
     ]);
 }
 
 // ============================================================================
-// ENDPOINT 2: GET ?action=git_info&project_path=... (P2 #5)
+// ENDPOINT 2: GET ?action=git_info&project_path=...
 // ============================================================================
 if ($action === 'git_info') {
     if ($method !== 'GET') {
@@ -1072,7 +1370,7 @@ if ($action === 'git_info') {
 }
 
 // ============================================================================
-// ENDPOINT 3: POST ?action=spec_guard (P1 #4 — 0-Token SPEC.md Contract Guard)
+// ENDPOINT 3: POST ?action=spec_guard (SPEC §3.3 & B6)
 // ============================================================================
 if ($action === 'spec_guard') {
     if ($method !== 'POST') {
@@ -1085,15 +1383,22 @@ if ($action === 'spec_guard') {
         respondJson(['ok' => false, 'error' => 'Invalid project_path.'], 400);
     }
 
+    $owner = strtolower(trim((string)($body['owner'] ?? '')));
+    if (!in_array($owner, ['', 'antigravity', 'claude', 'codex'], true)) {
+        respondJson(['ok' => false, 'error' => 'Invalid owner. Allowed: antigravity, claude, codex, or empty.'], 400);
+    }
+
     $guardScript = $scriptsDir . '\\invoke-spec-guard.ps1';
     if (!is_file($guardScript)) {
         respondJson(['ok' => false, 'error' => 'invoke-spec-guard.ps1 not found.'], 500);
     }
 
+    $ownerArg = ($owner !== '') ? (' -Owner ' . escapeshellarg($owner)) : '';
     $cmd = sprintf(
-        'powershell -NoProfile -ExecutionPolicy Bypass -File %s -WorkDir %s -Json 2>&1',
+        'powershell -NoProfile -ExecutionPolicy Bypass -File %s -WorkDir %s%s -Json 2>&1',
         escapeshellarg($guardScript),
-        escapeshellarg($validPath)
+        escapeshellarg($validPath),
+        $ownerArg
     );
     $out = (string)@shell_exec($cmd);
     $parsed = json_decode(trim($out), true);
@@ -1291,7 +1596,7 @@ if ($action === 'dispatch') {
 }
 
 // ============================================================================
-// ENDPOINT 6: POST ?action=run_job (P0 #1 & #2 — Live Web Job Runner for ALL Modes)
+// ENDPOINT 6: POST ?action=run_job (Live Web Job Runner for ALL Modes)
 // ============================================================================
 if ($action === 'run_job') {
     if ($method !== 'POST') {
@@ -1301,9 +1606,12 @@ if ($action === 'run_job') {
     $body = getJsonBody();
     $info = buildValidatedCommand($body, $laragonWww, $repoRoot, $userProfile, $scriptsDir);
     $mode = $info['mode'];
+    $agent = $info['agent'] ?? ($mode ?: '');
     $role = $info['role'];
     $modelOverride = $info['model'];
     $effortOverride = $info['effort'];
+    $newSession = (bool)($info['new_session'] ?? false);
+    $teamArray = $info['team'] ?? null;
     $validatedProjectPath = $info['project_path'];
     $prompt = $info['prompt'];
     $cmd = $info['command'];
@@ -1312,11 +1620,32 @@ if ($action === 'run_job') {
         @mkdir($jobsDir, 0777, true);
     }
 
-    // Clean up old job files older than 2 hours
+    // B7 Cleanup: never delete files of a job whose meta says RUNNING and whose process is alive; age = newest mtime of its files
     $now = time();
-    foreach (glob($jobsDir . '\\job_*') ?: [] as $old) {
-        if (($now - (filemtime($old) ?: 0)) > 7200) {
-            @unlink($old);
+    foreach (glob($jobsDir . '\\job_*.json') ?: [] as $metaPath) {
+        $jid = pathinfo($metaPath, PATHINFO_FILENAME);
+        $metaData = json_decode((string)@file_get_contents($metaPath), true);
+        if (is_array($metaData) && ($metaData['status'] ?? '') === 'RUNNING') {
+            $mPid = (int)($metaData['pid'] ?? 0);
+            if ($mPid > 0 && isProcessRunning($mPid)) {
+                continue;
+            }
+            if ($mPid <= 0 && ($now - (int)($metaData['started_ts'] ?? 0)) < 60) {
+                continue;
+            }
+        }
+        $relatedFiles = glob($jobsDir . '\\' . $jid . '.*') ?: [$metaPath];
+        $newestMtime = 0;
+        foreach ($relatedFiles as $rf) {
+            $mt = (int)@filemtime($rf);
+            if ($mt > $newestMtime) {
+                $newestMtime = $mt;
+            }
+        }
+        if ($newestMtime > 0 && ($now - $newestMtime) > 7200) {
+            foreach ($relatedFiles as $rf) {
+                @unlink($rf);
+            }
         }
     }
 
@@ -1328,85 +1657,17 @@ if ($action === 'run_job') {
 
     file_put_contents($promptFile, "\xEF\xBB\xBF" . $prompt);
     $headerLine = sprintf(
-        "=== [MISSION CONTROL JOB %s] ===\nMode: %s | Role: %s | Project: %s\nStarted: %s\n------------------------------------------------------------\n",
+        "=== [MISSION CONTROL JOB %s] ===\nMode: %s | Agent: %s | Role: %s | Project: %s\nStarted: %s\n------------------------------------------------------------\n",
         $jobId,
         strtoupper($mode),
+        $agent,
         $role,
         $validatedProjectPath,
         date('Y-m-d H:i:s')
     );
     file_put_contents($logFile, "\xEF\xBB\xBF" . $headerLine);
 
-    if ($mode === 'claude') {
-        $extra = ($role === 'reviewer') ? ' -IncludeGitDiff' : '';
-        if ($modelOverride !== '') $extra .= ' -ModelOverride ' . psq($modelOverride);
-        if ($effortOverride !== '') $extra .= ' -EffortOverride ' . psq($effortOverride);
-        $innerCall = sprintf(
-            '& %s -Role %s -WorkDir %s%s -PromptFile %s',
-            psq($scriptsDir . '\\invoke-claude.ps1'),
-            psq($role),
-            psq($validatedProjectPath),
-            $extra,
-            psq($promptFile)
-        );
-    } elseif ($mode === 'codex') {
-        $extra = '';
-        if ($modelOverride !== '') $extra .= ' -ModelOverride ' . psq($modelOverride);
-        if ($effortOverride !== '') $extra .= ' -EffortOverride ' . psq($effortOverride);
-        $promptArg = ($prompt !== '') ? (' -PromptFile ' . psq($promptFile)) : '';
-        $innerCall = sprintf(
-            '& %s -Role %s -WorkDir %s%s%s',
-            psq($scriptsDir . '\\invoke-codex.ps1'),
-            psq($role),
-            psq($validatedProjectPath),
-            $extra,
-            $promptArg
-        );
-    } elseif ($mode === 'council') {
-        $effPrompt = $prompt !== '' ? $prompt : 'Review uncommitted changes against SPEC.md and score X/10.';
-        $innerCall = sprintf(
-            '& %s -WorkDir %s -Prompt %s',
-            psq($scriptsDir . '\\invoke-council-review.ps1'),
-            psq($validatedProjectPath),
-            psq($effPrompt)
-        );
-    } elseif ($mode === 'auto-gate') {
-        $skipFlag = ($role === 'review-only') ? ' -SkipInitialImplement' : '';
-        $promptArg = ($prompt !== '') ? (' -PromptFile ' . psq($promptFile)) : '';
-        $innerCall = sprintf(
-            '& %s -WorkDir %s -MaxRounds 2%s%s',
-            psq($scriptsDir . '\\invoke-auto-gate.ps1'),
-            psq($validatedProjectPath),
-            $skipFlag,
-            $promptArg
-        );
-    } elseif ($mode === 'spec-guard') {
-        $innerCall = sprintf(
-            '& %s -WorkDir %s',
-            psq($scriptsDir . '\\invoke-spec-guard.ps1'),
-            psq($validatedProjectPath)
-        );
-    } else {
-        if (in_array($role, ['status', 'wait'], true)) {
-            $innerCall = sprintf(
-                '& %s -Action %s -WorkDir %s',
-                psq($scriptsDir . '\\invoke-antigravity.ps1'),
-                psq($role),
-                psq($validatedProjectPath)
-            );
-        } else {
-            $modelArg = ($role === 'new' && $modelOverride !== '') ? (' -Model ' . psq($modelOverride)) : '';
-            $innerCall = sprintf(
-                '& %s -Action %s -WorkDir %s%s -Title %s -PromptFile %s',
-                psq($scriptsDir . '\\invoke-antigravity.ps1'),
-                psq($role),
-                psq($validatedProjectPath),
-                $modelArg,
-                psq('Task from Mission Control'),
-                psq($promptFile)
-            );
-        }
-    }
+    $innerCall = buildPowerShellCall($info, $scriptsDir, $promptFile);
 
     $notifyScript = $scriptsDir . '\\send-notification.ps1';
     $projShort = basename($validatedProjectPath);
@@ -1426,10 +1687,11 @@ if ($action === 'run_job') {
         "    \$code = 1\n" .
         "}\n" .
         "[System.IO.File]::AppendAllText(\$logPath, \"`r`n=== [JOB_FINISHED exit_code=\$code] ===`r`n\", [System.Text.Encoding]::UTF8)\n" .
-        "if (Test-Path %s) {\n" .
+        "if (Test-Path -LiteralPath %s) {\n" .
         "    \$st = if (\$code -eq 0) { 'success' } else { 'warn' }\n" .
         "    & powershell -NoProfile -ExecutionPolicy Bypass -File %s -Title %s -Message \"Job %s (%s) finished with exit code \$code.\" -Status \$st | Out-Null\n" .
-        "}\n",
+        "}\n" .
+        "exit \$code\n",
         psq($logFile),
         $innerCall,
         psq($notifyScript),
@@ -1440,11 +1702,15 @@ if ($action === 'run_job') {
     );
     file_put_contents($runnerFile, "\xEF\xBB\xBF" . $runnerCode);
 
-    // Launch background PowerShell process and capture PID
-    $launchCmd = sprintf(
-        'powershell -NoProfile -ExecutionPolicy Bypass -Command "$p = Start-Process -FilePath \'powershell.exe\' -ArgumentList \'-NoProfile\',\'-ExecutionPolicy\',\'Bypass\',\'-File\',%s -WindowStyle Hidden -PassThru; Write-Output $p.Id" 2>&1',
-        psq($runnerFile)
-    );
+    // R1: Launch outer PowerShell via -EncodedCommand (UTF-16LE base64) and pass -ArgumentList as ONE string so paths with spaces never split
+    $outerPs = "\$argStr = '-NoProfile -ExecutionPolicy Bypass -File \"' + " . psq($runnerFile) . " + '\"'; "
+             . "\$p = Start-Process -FilePath 'powershell.exe' -ArgumentList \$argStr -WindowStyle Hidden -PassThru; "
+             . "Write-Output \$p.Id";
+    $utf16Script = function_exists('mb_convert_encoding')
+        ? mb_convert_encoding($outerPs, 'UTF-16LE', 'UTF-8')
+        : (string)@iconv('UTF-8', 'UTF-16LE', $outerPs);
+    $encodedCmd = base64_encode($utf16Script);
+    $launchCmd = 'powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' . escapeshellarg($encodedCmd) . ' 2>&1';
     $pidOut = trim((string)@shell_exec($launchCmd));
     $pid = preg_match('/(\d+)/', $pidOut, $m) ? (int)$m[1] : 0;
 
@@ -1452,28 +1718,41 @@ if ($action === 'run_job') {
         'job_id' => $jobId,
         'pid' => $pid,
         'mode' => $mode,
+        'agent' => $agent,
         'role' => $role,
         'model' => $modelOverride,
         'effort' => $effortOverride,
+        'new_session' => $newSession,
         'project_path' => $validatedProjectPath,
         'command' => $cmd,
         'status' => 'RUNNING',
+        'exit_code' => null,
         'started_at' => date('c'),
         'started_ts' => time(),
     ];
+    if (is_array($teamArray)) {
+        $meta['team'] = $teamArray;
+    }
     file_put_contents($metaFile, json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 
-    respondJson([
+    $runResp = [
         'ok' => true,
         'job_id' => $jobId,
         'pid' => $pid,
+        'mode' => $mode,
+        'agent' => $agent,
+        'role' => $role,
         'status' => 'RUNNING',
         'command' => $cmd,
-    ]);
+    ];
+    if (is_array($teamArray)) {
+        $runResp['team'] = $teamArray;
+    }
+    respondJson($runResp);
 }
 
 // ============================================================================
-// ENDPOINT 7: GET ?action=job_status&job_id=...&offset=0 (P0 #1 Live Log Tail)
+// ENDPOINT 7: GET ?action=job_status&job_id=...&offset=0 (SPEC §3.7 & B7)
 // ============================================================================
 if ($action === 'job_status') {
     if ($method !== 'GET') {
@@ -1508,32 +1787,42 @@ if ($action === 'job_status') {
                 $readBytes = min($fullSize - $offset, 131072);
                 $rawChunk = (string)fread($fp, $readBytes);
                 fclose($fp);
+
+                // Back off to the last complete UTF-8 character boundary (SPEC §3.7)
+                $safeChunk = trimIncompleteUtf8Tail($rawChunk);
+                $nextOffset = $offset + strlen($safeChunk);
+
                 if ($offset === 0) {
-                    $rawChunk = (string)preg_replace('/^\xEF\xBB\xBF/', '', $rawChunk);
+                    $safeChunk = (string)preg_replace('/^\xEF\xBB\xBF/', '', $safeChunk);
                 }
-                $chunk = $rawChunk;
-                $nextOffset = $offset + $readBytes;
+                $chunk = $safeChunk;
             }
         }
     }
 
     $elapsed = max(0, time() - (int)($meta['started_ts'] ?? time()));
-    respondJson([
+    $statusResp = [
         'ok' => true,
         'job_id' => $jobId,
         'status' => $meta['status'] ?? 'UNKNOWN',
+        'exit_code' => $meta['exit_code'] ?? null,
         'pid' => $meta['pid'] ?? 0,
         'mode' => $meta['mode'] ?? '',
+        'agent' => $meta['agent'] ?? ($meta['mode'] ?? ''),
         'role' => $meta['role'] ?? '',
         'elapsed_sec' => $elapsed,
         'log_chunk' => $chunk,
         'next_offset' => $nextOffset,
         'full_log_size' => $fullSize,
-    ]);
+    ];
+    if (array_key_exists('team', $meta) && is_array($meta['team'])) {
+        $statusResp['team'] = $meta['team'];
+    }
+    respondJson($statusResp);
 }
 
 // ============================================================================
-// ENDPOINT 8: POST ?action=cancel_job (P0 #1 Kill Running Job)
+// ENDPOINT 8: POST ?action=cancel_job (SPEC §3.8 & B7)
 // ============================================================================
 if ($action === 'cancel_job') {
     if ($method !== 'POST') {
@@ -1552,6 +1841,15 @@ if ($action === 'cancel_job') {
     }
 
     $meta = json_decode((string)@file_get_contents($metaFile), true) ?: [];
+    $meta = refreshJobMetaStatus($meta, $jobsDir);
+    if (($meta['status'] ?? '') !== 'RUNNING') {
+        respondJson([
+            'ok' => false,
+            'error' => 'Job is not running.',
+            'status' => $meta['status'] ?? 'UNKNOWN',
+        ], 409);
+    }
+
     $pid = (int)($meta['pid'] ?? 0);
     if ($pid > 0) {
         @shell_exec("taskkill /PID $pid /T /F 2>&1");
@@ -1561,6 +1859,7 @@ if ($action === 'cancel_job') {
         @file_put_contents($logFile, "\r\n=== [JOB_CANCELLED_BY_USER] ===\r\n", FILE_APPEND);
     }
     $meta['status'] = 'CANCELLED';
+    $meta['exit_code'] = null;
     $meta['finished_at'] = date('c');
     @file_put_contents($metaFile, json_encode($meta, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES));
 
@@ -1572,18 +1871,28 @@ if ($action === 'cancel_job') {
 }
 
 // ============================================================================
-// ENDPOINT 9: POST ?action=save_notify & POST ?action=test_notify (P2 #5)
+// ENDPOINT 9: POST ?action=save_notify & POST ?action=test_notify (SPEC §3.9, §3.10 & B8)
 // ============================================================================
 if ($action === 'save_notify') {
     if ($method !== 'POST') {
         respondJson(['ok' => false, 'error' => 'Method Not Allowed: Use POST for save_notify.'], 405);
     }
     $body = getJsonBody();
+    $existing = loadInternalNotifyConfig($notifyCfgFile);
+
+    $tokenToSave = $existing['telegram_bot_token'];
+    if (array_key_exists('telegram_bot_token', $body) && $body['telegram_bot_token'] !== null) {
+        if (!is_string($body['telegram_bot_token'])) {
+            respondJson(['ok' => false, 'error' => 'Invalid telegram_bot_token: must be a string or null.'], 400);
+        }
+        $tokenToSave = trim($body['telegram_bot_token']);
+    }
+
     $cfg = [
-        'desktop_toast' => (bool)($body['desktop_toast'] ?? true),
-        'webhook_url' => trim((string)($body['webhook_url'] ?? '')),
-        'telegram_bot_token' => trim((string)($body['telegram_bot_token'] ?? '')),
-        'telegram_chat_id' => trim((string)($body['telegram_chat_id'] ?? '')),
+        'desktop_toast' => array_key_exists('desktop_toast', $body) ? (bool)$body['desktop_toast'] : $existing['desktop_toast'],
+        'webhook_url' => array_key_exists('webhook_url', $body) ? trim((string)$body['webhook_url']) : $existing['webhook_url'],
+        'telegram_bot_token' => $tokenToSave,
+        'telegram_chat_id' => array_key_exists('telegram_chat_id', $body) ? trim((string)$body['telegram_chat_id']) : $existing['telegram_chat_id'],
     ];
     if ($cfg['webhook_url'] !== '' && !preg_match('#^https?://#i', $cfg['webhook_url'])) {
         respondJson(['ok' => false, 'error' => 'Webhook URL must start with http:// or https://'], 400);
@@ -1593,7 +1902,7 @@ if ($action === 'save_notify') {
         @mkdir($dir, 0777, true);
     }
     file_put_contents($notifyCfgFile, json_encode($cfg, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
-    respondJson(['ok' => true, 'notify_config' => $cfg]);
+    respondJson(['ok' => true, 'notify_config' => getPublicNotifyConfig($notifyCfgFile)]);
 }
 
 if ($action === 'test_notify') {
@@ -1614,7 +1923,14 @@ if ($action === 'test_notify') {
     $res = json_decode($out, true);
     respondJson([
         'ok' => true,
-        'result' => is_array($res) ? $res : ['raw' => $out],
+        'result' => is_array($res) ? $res : [
+            'desktop_sent' => false,
+            'webhook_configured' => false,
+            'webhook_sent' => false,
+            'telegram_configured' => false,
+            'telegram_sent' => false,
+            'errors' => ['raw' => $out],
+        ],
     ]);
 }
 

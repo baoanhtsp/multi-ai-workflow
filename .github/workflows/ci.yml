@@ -1,4 +1,4 @@
-﻿name: PowerShell Syntax & Installer CI
+name: PowerShell Syntax, Pester & API Smoke CI
 
 on:
   push:
@@ -12,12 +12,19 @@ on:
 
 jobs:
   validate-and-test:
-    name: Validate PowerShell AST & 1-Click Installer
+    name: Validate PowerShell AST, Installer, Pester 5 & API Smoke Tests
     runs-on: windows-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Setup PHP 8.3
+        if: env.PHP_INSTALLED != 'true'
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
 
       - name: Validate PowerShell Scripts Syntax
         shell: powershell
@@ -32,14 +39,14 @@ jobs:
           foreach ($script in $scripts) {
               $errors = $null
               [void][System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$null, [ref]$errors)
-          if ($errors -and $errors.Count -gt 0) {
+              if ($errors -and $errors.Count -gt 0) {
                   $hasSyntaxErrors = $true
-                  Write-Host "❌ Syntax error(s) in $($script.FullName):" -ForegroundColor Red
+                  Write-Host "Syntax error(s) in $($script.FullName):" -ForegroundColor Red
                   foreach ($err in $errors) {
                       Write-Host "  Line $($err.Extent.StartLineNumber): $($err.Message)" -ForegroundColor Red
                   }
               } else {
-                  Write-Host "✅ Syntax OK: $($script.FullName)" -ForegroundColor Green
+                  Write-Host "Syntax OK: $($script.FullName)" -ForegroundColor Green
               }
           }
 
@@ -59,22 +66,34 @@ jobs:
               "templates/SPEC.template.md",
               "antigravity/rules/claude-leader-workflow.md",
               "antigravity/skills/claude-leader/SKILL.md",
+              "antigravity/skills/claude-leader/scripts/lib/maw-common.ps1",
+              "antigravity/skills/claude-leader/scripts/invoke-agent.ps1",
+              "antigravity/skills/claude-leader/templates/roles/architect.md",
+              "antigravity/skills/claude-leader/templates/roles/leader.md",
+              "antigravity/skills/claude-leader/templates/roles/backend.md",
+              "antigravity/skills/claude-leader/templates/roles/frontend.md",
+              "antigravity/skills/claude-leader/templates/roles/reviewer.md",
+              "antigravity/skills/claude-leader/templates/roles/tester.md",
               "claude/CLAUDE.md",
               "claude/commands/antigravity.md",
               "codex/AGENTS.md",
               "codex/skills/multi-ai-leader/SKILL.md",
               "codex/skills/multi-ai-leader/agents/openai.yaml",
               "dashboard/index.html",
-              "dashboard/api.php"
+              "dashboard/api.php",
+              "tests/MawCommon.Tests.ps1",
+              "tests/SpecGuard.Tests.ps1",
+              "tests/InvokeAgent.Tests.ps1",
+              "tests/api-smoke.ps1"
           )
 
           $missing = @()
           foreach ($relPath in $requiredFiles) {
               if (-not (Test-Path -LiteralPath $relPath -PathType Leaf)) {
                   $missing += $relPath
-                  Write-Host "❌ Missing required file: $relPath" -ForegroundColor Red
+                  Write-Host "Missing required file: $relPath" -ForegroundColor Red
               } else {
-                  Write-Host "✅ Found required file: $relPath" -ForegroundColor Green
+                  Write-Host "Found required file: $relPath" -ForegroundColor Green
               }
           }
 
@@ -93,6 +112,7 @@ jobs:
 
           $installedFiles = @(
               "$env:USERPROFILE\.gemini\config\skills\claude-leader\SKILL.md",
+              "$env:USERPROFILE\.gemini\config\skills\claude-leader\scripts\lib\maw-common.ps1",
               "$env:USERPROFILE\.claude\CLAUDE.md",
               "$env:USERPROFILE\.codex\AGENTS.md",
               "$env:USERPROFILE\.codex\skills\multi-ai-leader\SKILL.md"
@@ -102,6 +122,25 @@ jobs:
               if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
                   throw "Installer verification failed: expected file not created at $target"
               }
-              Write-Host "✅ Verified installed file: $target" -ForegroundColor Green
+              Write-Host "Verified installed file: $target" -ForegroundColor Green
           }
 
+      - name: Install Pester 5 & Run Unit Tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          if (-not (Get-Module -ListAvailable Pester | Where-Object { $_.Version -ge [version]'5.5.0' })) {
+              Install-Module Pester -MinimumVersion 5.5 -Force -SkipPublisherCheck -Scope CurrentUser
+          }
+          Import-Module Pester -MinimumVersion 5.5 -Force
+          Invoke-Pester -Path .\tests -CI
+
+      - name: Run PHP Backend API Smoke Tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\tests\api-smoke.ps1
+          if ($LASTEXITCODE -ne 0) {
+              throw "api-smoke.ps1 failed with exit code $LASTEXITCODE"
+          }
