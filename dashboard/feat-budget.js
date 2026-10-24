@@ -252,7 +252,7 @@
     if (!panel.dataset.s4bound) { panel.dataset.s4bound = '1'; panel.addEventListener('click', onClick); }
     loadConfigs();
   }
-  const R = name => S.panel?.querySelector(`[data-r="${name}"]`);
+  function R(name) { return S.panel?.querySelector(`[data-r="${name}"]`); }
 
   async function loadConfigs() {
     try {

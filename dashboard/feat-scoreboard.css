@@ -4,7 +4,7 @@
 .s4-sec h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
 .s4-sec-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
 .s4-sec-h h3 { margin: 0; }
-.s4-sel { padding: 3px 6px; font-size: 12px; max-width: 100%; }
+.s4-sel { width: auto; padding: 3px 6px; font-size: 12px; max-width: 100%; }
 
 /* Scoreboard specifics */
 .s4s-team { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }

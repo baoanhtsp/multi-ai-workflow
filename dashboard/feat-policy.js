@@ -129,7 +129,7 @@
     loadConfig();
     S.at = 0;
   }
-  const R = n => S.panel?.querySelector(`[data-r="${n}"]`);
+  function R(n) { return S.panel?.querySelector(`[data-r="${n}"]`); }
 
   // ---- live lists ----------------------------------------------------------
   async function loadLive(force) {
@@ -197,7 +197,7 @@
       if (sel) sel.innerHTML = [...new Set([...S.known, ...Object.keys(S.cfg.roles)])].map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
     } catch (e) { const b = R('rules'); if (b) b.innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   }
-  const scopeObj = () => S.scope === 'global' ? S.cfg.global : (S.cfg.roles[S.scope] = S.cfg.roles[S.scope] || {});
+  function scopeObj() { return S.scope === 'global' ? S.cfg.global : (S.cfg.roles[S.scope] = S.cfg.roles[S.scope] || {}); }
 
   function paintRules() {
     const box = R('rules'); if (!box || !S.cfg) return;

@@ -116,8 +116,8 @@
     loadConfig();
     loadStatus(true);
   }
-  const R = n => S.panel?.querySelector(`[data-r="${n}"]`);
-  const A = n => S.panel?.querySelector(`[data-act="${n}"]`);
+  function R(n) { return S.panel?.querySelector(`[data-r="${n}"]`); }
+  function A(n) { return S.panel?.querySelector(`[data-act="${n}"]`); }
 
   // ---- status / gate -------------------------------------------------------
   async function loadStatus(refresh) {
@@ -179,7 +179,7 @@
       paintConfig();
     } catch (e) { R('cfg').innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
   }
-  const defaultCfg = () => ({ version: 1, checks: [], todo_patterns: ['TODO', 'FIXME', 'XXX', 'HACK'], todo_max: -1, require_clean_git: false, min_review_score: 8.5, spec_guard: true });
+  function defaultCfg() { return ({ version: 1, checks: [], todo_patterns: ['TODO', 'FIXME', 'XXX', 'HACK'], todo_max: -1, require_clean_git: false, min_review_score: 8.5, spec_guard: true }); }
 
   function paintConfig() {
     const c = S.cfg, d = S.draft; if (!d) return;

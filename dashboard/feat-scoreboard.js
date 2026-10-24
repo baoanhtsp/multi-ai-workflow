@@ -99,7 +99,7 @@
     }
     S.key = '';
   }
-  const R = n => S.panel?.querySelector(`[data-r="${n}"]`);
+  function R(n) { return S.panel?.querySelector(`[data-r="${n}"]`); }
 
   async function load() {
     const p = S.onlyProject ? (M.project()?.path || '') : '';
