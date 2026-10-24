@@ -924,13 +924,22 @@
   // Shared form for "how to run" (mode / agent / role / preset); also used by schedules.
   function runFields(v, prefix) {
     const ids = agentIds();
-    return html`<div class="tk-grid">
+    return html`<div class="tk-grid tk-runf">
       <div><label class="lbl" for="${prefix}Mode">${esc(t('tk.f.mode'))}</label><select id="${prefix}Mode" name="mode">${MODES.filter(m => m !== 'chat').map(m => opt(m, m, m === v.mode)).join('')}</select></div>
-      <div><label class="lbl" for="${prefix}Agent">${esc(t('tk.f.agent'))}</label><select id="${prefix}Agent" name="agent">${ids.map(i => opt(i, agentLabel(i), i === v.agent)).join('')}</select></div>
-      <div><label class="lbl" for="${prefix}Role">${esc(t('tk.f.role'))}</label><select id="${prefix}Role" name="role">${ROLES.map(r => opt(r, r, r === v.role)).join('')}</select></div>
+      <div data-hide-for="council"><label class="lbl" for="${prefix}Agent">${esc(t('tk.f.agent'))}</label><select id="${prefix}Agent" name="agent">${ids.map(i => opt(i, agentLabel(i), i === v.agent)).join('')}</select></div>
+      <div data-only-for="task"><label class="lbl" for="${prefix}Role">${esc(t('tk.f.role'))}</label><select id="${prefix}Role" name="role">${ROLES.map(r => opt(r, r, r === v.role)).join('')}</select></div>
       <div><label class="lbl" for="${prefix}Preset">${esc(t('tk.f.preset'))}</label><select id="${prefix}Preset" name="preset_id">${opt('', t('tk.f.none'), !v.preset_id)}${(S.presets || []).map(p => opt(p.id, p.name, p.id === v.preset_id)).join('')}</select></div>
     </div>`;
   }
+  // Agent is meaningless for council, role only applies to task mode.
+  function syncRunFields(root) {
+    for (const g of root.querySelectorAll('.tk-runf')) {
+      const mode = g.querySelector('[name="mode"]')?.value || 'task';
+      g.querySelectorAll('[data-hide-for]').forEach(n => { n.hidden = n.dataset.hideFor === mode; });
+      g.querySelectorAll('[data-only-for]').forEach(n => { n.hidden = n.dataset.onlyFor !== mode; });
+    }
+  }
+  document.addEventListener('change', e => { if (e.target.matches?.('.tk-runf [name="mode"]')) syncRunFields(e.target.closest('.tk-runf').parentElement); });
   const defAgent = () => agentIds().includes('claude') ? 'claude' : agentIds()[0] || '';
 
   async function paintAutoRun(body) {
@@ -973,6 +982,7 @@
     body.querySelectorAll('[data-file]').forEach(b => b.onclick = () => preview(b.dataset.file));
     body.querySelector('[data-ar="preview"]').onclick = () => { const v = body.querySelector('#arOther').value.trim(); if (v) preview(v); };
     wireRuns(body);
+    syncRunFields(body);
     body.querySelector('.tk-ar-form')?.addEventListener('submit', async e => {
       e.preventDefault();
       const f = new FormData(e.target);
@@ -1094,6 +1104,7 @@
         const tgt = st.type === 'card' ? card : act;
         for (const k of ['title', 'prompt', 'project_path', 'mode', 'agent', 'role', 'preset_id', 'file', 'on_failure']) if (f.has(k)) tgt[k] = String(f.get(k));
       };
+      syncRunFields(form);
       form.querySelector('[name="kind"]').onchange = () => { keep(); draw(); };
       form.querySelectorAll('[data-ty]').forEach(b => b.onclick = () => { keep(); st.type = b.dataset.ty; draw(); });
       form.addEventListener('submit', async e => {
