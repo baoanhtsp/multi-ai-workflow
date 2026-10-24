@@ -432,6 +432,36 @@ function getAuditStats(string $auditFile): array {
     return $stats;
 }
 
+function getCodexModels(string $userProfile): array {
+    $defaultModels = [
+        'gpt-6.1-sol',
+        'gpt-6-astra',
+        'gpt-6-sol',
+        'gpt-reserve',
+        'gpt-6-luna',
+        'gpt-5.6-sol',
+        'gpt-5.6-terra',
+        'gpt-5.6-luna',
+        'codex-auto-review',
+    ];
+    $cacheFile = $userProfile . '\\.codex\\models_cache.json';
+    if (!is_file($cacheFile)) {
+        return $defaultModels;
+    }
+    $raw = @file_get_contents($cacheFile);
+    $data = json_decode((string)$raw, true);
+    if (!is_array($data) || empty($data['models']) || !is_array($data['models'])) {
+        return $defaultModels;
+    }
+    $slugs = [];
+    foreach ($data['models'] as $m) {
+        if (is_array($m) && !empty($m['slug']) && is_string($m['slug'])) {
+            $slugs[] = $m['slug'];
+        }
+    }
+    return !empty($slugs) ? array_values(array_unique($slugs)) : $defaultModels;
+}
+
 if ($action === 'status') {
     if ($method !== 'GET') {
         respondJson(['ok' => false, 'error' => 'Method Not Allowed: Use GET for status.'], 405);
@@ -445,6 +475,7 @@ if ($action === 'status') {
     $claudeInstalled = is_dir($userProfile . '\\.claude');
     $codexInstalled = is_dir($userProfile . '\\.codex');
     $agyInstalled = is_file($antigravityDir . '\\bin\\agentapi.bat');
+    $codexModels = getCodexModels($userProfile);
 
     respondJson([
         'ok' => true,
@@ -455,13 +486,47 @@ if ($action === 'status') {
             'antigravity' => [
                 'installed' => $agyInstalled,
                 'model' => 'Gemini 4 Argon (High)',
+                'models' => [
+                    'gemini-4-argon-high',
+                    'gemini-4-argon-medium',
+                    'gemini-4-argon-low',
+                    'gemini-3.8-flash-high',
+                    'gemini-3.8-flash-medium',
+                    'gemini-3.7-flash-high',
+                    'gemini-3.5-flash-lite',
+                ],
+                'cli_models' => ['pro', 'flash', 'flash_lite'],
                 'command' => '/claude-leader',
                 'role_summary' => 'Backend/Core Dev, Multi-Subagent Branch Coordinator & Context Filter',
             ],
             'claude' => [
                 'installed' => $claudeInstalled,
                 'version' => '2.1.308',
-                'models' => ['Opus 4.6', 'Sonnet 4.6', 'Haiku 4.5'],
+                'models' => [
+                    'claude-opus-5-5',
+                    'claude-sonnet-5-5',
+                    'claude-haiku-5-5',
+                    'claude-fable-5-1',
+                    'claude-opus-4-6',
+                    'claude-sonnet-4-6',
+                    'claude-haiku-4-5',
+                ],
+                'cli_models' => [
+                    'opus',
+                    'sonnet',
+                    'haiku',
+                    'fable',
+                    'claude-opus-5-5',
+                    'claude-sonnet-5-5',
+                    'claude-haiku-5-5',
+                    'claude-fable-5-1',
+                    'claude-opus-4-8',
+                    'claude-opus-4-7',
+                    'claude-opus-4-6',
+                    'claude-sonnet-4-6',
+                    'claude-haiku-4-5',
+                ],
+                'efforts' => ['low', 'medium', 'high', 'xhigh', 'max'],
                 'command' => '/antigravity',
                 'role_summary' => 'Tech Lead, 100% Frontend UI Specialist & Code Grader',
             ],
@@ -469,6 +534,9 @@ if ($action === 'status') {
                 'installed' => $codexInstalled,
                 'version' => '0.163.0',
                 'model' => 'gpt-6-sol (high)',
+                'models' => $codexModels,
+                'cli_models' => $codexModels,
+                'efforts' => ['low', 'medium', 'high', 'xhigh'],
                 'command' => '$multi-ai-leader',
                 'role_summary' => 'Security/Logic Critic, Native Diff Reviewer & Algorithm Coder',
             ],
@@ -636,10 +704,56 @@ if ($action === 'dispatch') {
         }
     }
 
+    $rawModel = $body['model'] ?? '';
+    $rawEffort = $body['effort'] ?? '';
+    if (!is_string($rawModel) || !is_string($rawEffort)) {
+        respondJson(['ok' => false, 'error' => 'Invalid model or effort format: must be strings.'], 400);
+    }
+    $modelOverride = strtolower(trim($rawModel));
+    $effortOverride = strtolower(trim($rawEffort));
+
+    $allowedClaudeModels = [
+        '', 'opus', 'sonnet', 'haiku', 'fable',
+        'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5-5', 'claude-sonnet-5',
+        'claude-haiku-5-5', 'claude-fable-5-1', 'claude-fable-5',
+        'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-opus-4-5',
+        'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5',
+    ];
+    $allowedClaudeEfforts = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
+    $allowedCodexModels = array_merge([''], array_map('strtolower', getCodexModels($userProfile)));
+    $allowedCodexEfforts = ['', 'low', 'medium', 'high', 'xhigh'];
+    $allowedAgyModels = ['', 'pro', 'flash', 'flash_lite'];
+
+    if ($mode === 'claude') {
+        if (!in_array($modelOverride, $allowedClaudeModels, true)) {
+            respondJson(['ok' => false, 'error' => 'Invalid Claude model override.'], 400);
+        }
+        if (!in_array($effortOverride, $allowedClaudeEfforts, true)) {
+            respondJson(['ok' => false, 'error' => 'Invalid Claude effort override.'], 400);
+        }
+    } elseif ($mode === 'codex') {
+        if (!in_array($modelOverride, $allowedCodexModels, true)) {
+            respondJson(['ok' => false, 'error' => 'Invalid Codex model override.'], 400);
+        }
+        if (!in_array($effortOverride, $allowedCodexEfforts, true)) {
+            respondJson(['ok' => false, 'error' => 'Invalid Codex effort override.'], 400);
+        }
+    } elseif ($mode === 'antigravity') {
+        if (!in_array($modelOverride, $allowedAgyModels, true)) {
+            respondJson(['ok' => false, 'error' => 'Invalid Antigravity model tier (allowed: pro, flash, flash_lite).'], 400);
+        }
+    }
+
     $scriptsDir = $userProfile . '\\.gemini\\config\\skills\\claude-leader\\scripts';
 
     if ($mode === 'claude') {
         $extra = ($role === 'reviewer') ? ' -IncludeGitDiff' : '';
+        if ($modelOverride !== '') {
+            $extra .= ' -ModelOverride ' . psq($modelOverride);
+        }
+        if ($effortOverride !== '') {
+            $extra .= ' -EffortOverride ' . psq($effortOverride);
+        }
         $cmd = sprintf(
             'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Role %s -WorkDir %s%s -Prompt %s',
             psq($scriptsDir . '\\invoke-claude.ps1'),
@@ -649,12 +763,20 @@ if ($action === 'dispatch') {
             psq($prompt)
         );
     } elseif ($mode === 'codex') {
+        $extra = '';
+        if ($modelOverride !== '') {
+            $extra .= ' -ModelOverride ' . psq($modelOverride);
+        }
+        if ($effortOverride !== '') {
+            $extra .= ' -EffortOverride ' . psq($effortOverride);
+        }
         $promptArg = ($prompt !== '') ? (' -Prompt ' . psq($prompt)) : '';
         $cmd = sprintf(
-            'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Role %s -WorkDir %s%s',
+            'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Role %s -WorkDir %s%s%s',
             psq($scriptsDir . '\\invoke-codex.ps1'),
             psq($role),
             psq($validatedProjectPath),
+            $extra,
             $promptArg
         );
     } elseif ($mode === 'council') {
@@ -674,11 +796,13 @@ if ($action === 'dispatch') {
                 psq($validatedProjectPath)
             );
         } else {
+            $modelArg = ($role === 'new' && $modelOverride !== '') ? (' -Model ' . psq($modelOverride)) : '';
             $cmd = sprintf(
-                'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Action %s -WorkDir %s -Title %s -Prompt %s',
+                'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Action %s -WorkDir %s%s -Title %s -Prompt %s',
                 psq($scriptsDir . '\\invoke-antigravity.ps1'),
                 psq($role),
                 psq($validatedProjectPath),
+                $modelArg,
                 psq('Task from Mission Control'),
                 psq($prompt)
             );

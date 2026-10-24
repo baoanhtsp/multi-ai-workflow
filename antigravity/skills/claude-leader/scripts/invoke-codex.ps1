@@ -17,6 +17,9 @@ param(
 
     [string]$ModelOverride = "",
 
+    [ValidateSet("", "low", "medium", "high", "xhigh")]
+    [string]$EffortOverride = "",
+
     [switch]$UseWorktree
 )
 
@@ -93,6 +96,9 @@ try {
             if ($ModelOverride) {
                 $argsList += @("-c", "model=`"$ModelOverride`"")
             }
+            if ($EffortOverride) {
+                $argsList += @("-c", "model_reasoning_effort=`"$EffortOverride`"")
+            }
             if ($CommitSha) {
                 $argsList += @("--commit", $CommitSha)
             } elseif ($BaseBranch) {
@@ -121,6 +127,9 @@ try {
             if ($ModelOverride) {
                 $argsList += @("-m", $ModelOverride)
             }
+            if ($EffortOverride) {
+                $argsList += @("-c", "model_reasoning_effort=`"$EffortOverride`"")
+            }
             $outputLines = $Prompt | & $codexExe @argsList - | Tee-Object -Variable capturedOut
             $outputLines
         }
@@ -137,6 +146,9 @@ try {
             }
             if ($ModelOverride) {
                 $argsList += @("-m", $ModelOverride)
+            }
+            if ($EffortOverride) {
+                $argsList += @("-c", "model_reasoning_effort=`"$EffortOverride`"")
             }
             $outputLines = $Prompt | & $codexExe @argsList - | Tee-Object -Variable capturedOut
             $outputLines

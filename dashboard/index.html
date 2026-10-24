@@ -130,6 +130,7 @@ tailwind.config = {
             <text x="320" y="76" text-anchor="middle" fill="#F59E0B" font-size="15" font-weight="800" font-family="Inter">CLAUDE</text>
             <text id="triClVer" x="320" y="94" text-anchor="middle" fill="#D97757" font-size="11" font-family="JetBrains Mono">v—</text>
             <text x="320" y="20" text-anchor="middle" fill="#cbd5e1" font-size="11" font-family="JetBrains Mono">/antigravity</text>
+            <text id="triClModels" x="320" y="156" text-anchor="middle" fill="#F59E0B" font-size="9" font-family="JetBrains Mono"></text>
           </g>
           <!-- Antigravity -->
           <g class="node vertex-node" style="animation-delay:-1.3s" data-mode="antigravity" tabindex="0" role="button" aria-label="Chọn mode Antigravity" onclick="pickMode('antigravity')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pickMode('antigravity')}">
@@ -138,6 +139,7 @@ tailwind.config = {
             <text x="120" y="296" text-anchor="middle" fill="#06B6D4" font-size="13" font-weight="800" font-family="Inter">ANTIGRAVITY</text>
             <text id="triAgVer" x="120" y="313" text-anchor="middle" fill="#3B82F6" font-size="10" font-family="JetBrains Mono">—</text>
             <text x="120" y="376" text-anchor="middle" fill="#cbd5e1" font-size="11" font-family="JetBrains Mono">/claude-leader</text>
+            <text id="triAgModels" x="120" y="228" text-anchor="middle" fill="#3B82F6" font-size="9" font-family="JetBrains Mono"></text>
           </g>
           <!-- Codex -->
           <g class="node vertex-node" style="animation-delay:-2.6s" data-mode="codex" tabindex="0" role="button" aria-label="Chọn mode Codex" onclick="pickMode('codex')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pickMode('codex')}">
@@ -146,6 +148,7 @@ tailwind.config = {
             <text x="520" y="296" text-anchor="middle" fill="#10B981" font-size="15" font-weight="800" font-family="Inter">CODEX</text>
             <text id="triCxVer" x="520" y="313" text-anchor="middle" fill="#34d399" font-size="11" font-family="JetBrains Mono">v—</text>
             <text x="520" y="376" text-anchor="middle" fill="#cbd5e1" font-size="11" font-family="JetBrains Mono">$multi-ai-leader</text>
+            <text id="triCxModels" x="520" y="228" text-anchor="middle" fill="#34d399" font-size="9" font-family="JetBrains Mono"></text>
           </g>
         </svg>
       </div>
@@ -179,9 +182,19 @@ tailwind.config = {
           <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Orchestration Mode</label>
           <div class="grid grid-cols-4 gap-2 mt-1.5" id="modeBtns"></div>
         </div>
-        <div>
-          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Role</label>
-          <select id="roleSel" class="w-full px-3 py-2 text-sm mt-1.5"></select>
+        <div class="grid sm:grid-cols-3 gap-3">
+          <div>
+            <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Role</label>
+            <select id="roleSel" class="w-full px-3 py-2 text-sm mt-1.5"></select>
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Model Override</label>
+            <select id="modelSel" class="w-full px-3 py-2 text-sm mt-1.5 disabled:opacity-40" onchange="resetCmd()"></select>
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Reasoning Effort</label>
+            <select id="effortSel" class="w-full px-3 py-2 text-sm mt-1.5 disabled:opacity-40" onchange="resetCmd()"></select>
+          </div>
         </div>
         <div>
           <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Prompt / Mô tả tác vụ</label>
@@ -280,9 +293,23 @@ function demoData() {
     ok: true, timestamp: iso(now), user_profile: 'C:\\Users\\Admin',
     bridge: { online: true, ls_address: 'localhost:59570', csrf_masked: '80b15d0a...abf6', ls_version: 'hub-2.26.0', updated_at: iso(now) },
     tools: {
-      antigravity: { installed: true, model: 'Gemini 4 Argon (High)', command: '/claude-leader' },
-      claude: { installed: true, version: '2.1.308', models: ['Opus 4.6', 'Sonnet 4.6', 'Haiku 4.5'], command: '/antigravity' },
-      codex: { installed: true, version: '0.163.0', model: 'gpt-6-sol (high)', command: '$multi-ai-leader' }
+      antigravity: {
+        installed: true, model: 'Gemini 4 Argon (High)', command: '/claude-leader',
+        models: ['gemini-4-argon-high', 'gemini-4-argon-medium', 'gemini-4-argon-low', 'gemini-3.8-flash-high', 'gemini-3.8-flash-medium', 'gemini-3.7-flash-high', 'gemini-3.5-flash-lite'],
+        cli_models: ['pro', 'flash', 'flash_lite']
+      },
+      claude: {
+        installed: true, version: '2.1.308', command: '/antigravity',
+        models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+        cli_models: ['opus', 'sonnet', 'haiku', 'fable', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+        efforts: ['low', 'medium', 'high', 'xhigh', 'max']
+      },
+      codex: {
+        installed: true, version: '0.163.0', model: 'gpt-6.1-sol / gpt-6-astra', command: '$multi-ai-leader',
+        models: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-reserve', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'codex-auto-review'],
+        cli_models: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-reserve', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'codex-auto-review'],
+        efforts: ['low', 'medium', 'high', 'xhigh']
+      }
     },
     conversations: [
       { id: '3e164ce1-ef65-434c-ad58-d276a32b3c85', is_active: true, updated_at: '2026-10-24 16:03:32', step_count: 48, last_status: 'DONE', last_preview: 'Đã tích hợp xong Đỉnh thứ 3 — Codex orchestrator và các kiểm tra CI…' },
@@ -399,7 +426,16 @@ function render() {
   const a = d.audit || {};
   $('triTotal').textContent = fmt(a.total_calls);
 
-  const tc = (name, cls, glow, icon, cmd, line1, line2, inst) => `
+  const RICH = {
+    claude: 'Opus 5.5 · Sonnet 5.5 · Haiku 5.5 · Fable 5.1',
+    codex: 'GPT-6.1-Sol · GPT-6-Astra · GPT-6-Sol',
+    antigravity: 'Gemini 4 Argon · 3.8 Flash'
+  };
+  $('triClModels').textContent = RICH.claude;
+  $('triCxModels').textContent = RICH.codex;
+  $('triAgModels').textContent = RICH.antigravity;
+  const chips = (list, col) => `<div class="flex flex-wrap gap-1 mt-1.5">${(list || []).map(m => `<span class="px-1.5 py-0.5 rounded text-[10px] font-mono border ${col}">${esc(m)}</span>`).join('')}</div>`;
+  const tc = (name, cls, glow, icon, cmd, line1, line2, inst, chipHtml = '') => `
     <div class="rounded-xl p-3.5 bg-card/70 ${glow} flex items-start gap-3">
       <div class="w-10 h-10 rounded-lg grid place-items-center ${cls}"><i data-lucide="${icon}" class="w-5 h-5"></i></div>
       <div class="min-w-0 flex-1">
@@ -408,12 +444,13 @@ function render() {
         <div class="font-mono text-xs text-slate-300 mt-1">${esc(cmd)}</div>
         <div class="text-[11px] text-slate-400 mt-0.5 truncate">${esc(line1)}</div>
         <div class="text-[11px] text-slate-500 truncate">${esc(line2)}</div>
+        ${chipHtml}
       </div>
     </div>`;
   $('toolCards').innerHTML =
-    tc('Antigravity', 'bg-ag/15 text-ag', 'glow-ag', 'rocket', t.antigravity?.command, t.antigravity?.model, 'Backend / Core · LS ' + (b.ls_version || '—'), t.antigravity?.installed) +
-    tc('Claude Code', 'bg-cl/15 text-cl', 'glow-cl', 'brain-circuit', t.claude?.command, (t.claude?.models || []).join(' · '), 'CLI v' + (t.claude?.version || '—'), t.claude?.installed) +
-    tc('OpenAI Codex', 'bg-cx/15 text-cx', 'glow-cx', 'code-2', t.codex?.command, t.codex?.model, 'CLI v' + (t.codex?.version || '—'), t.codex?.installed);
+    tc('Antigravity', 'bg-ag/15 text-ag', 'glow-ag', 'rocket', t.antigravity?.command, t.antigravity?.model || RICH.antigravity, 'Backend / Core · LS ' + (b.ls_version || '—'), t.antigravity?.installed, chips(t.antigravity?.models, 'text-ag bg-ag/10 border-ag/30')) +
+    tc('Claude Code', 'bg-cl/15 text-cl', 'glow-cl', 'brain-circuit', t.claude?.command, RICH.claude, 'CLI v' + (t.claude?.version || '—'), t.claude?.installed, chips(t.claude?.models, 'text-cl bg-cl/10 border-cl/30')) +
+    tc('OpenAI Codex', 'bg-cx/15 text-cx', 'glow-cx', 'code-2', t.codex?.command, t.codex?.model || RICH.codex, 'CLI v' + (t.codex?.version || '—'), t.codex?.installed, chips(t.codex?.models, 'text-cx bg-cx/10 border-cx/30'));
 
   // KPI
   const v = a.verdicts || {};
@@ -435,6 +472,7 @@ function render() {
     kpi('Active Sessions', activeSess, `${(d.conversations || []).length} conversations gần đây`, 'radio-tower', '#3B82F6');
 
   renderProjects();
+  populateOverrides();
 
   // sessions
   const cv = d.conversations || [];
@@ -511,11 +549,37 @@ function resetCmd() {
   $('cmdOut').textContent = 'Nhấn "Generate Command" để tạo lệnh…';
   $('cmdState').textContent = '';
 }
-function pickMode(m) { state.mode = m; renderModes(); resetCmd(); }
+const MODELS = {
+  claude: ['opus', 'sonnet', 'haiku', 'fable', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+  codex: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-reserve', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'codex-auto-review'],
+  antigravity: ['pro', 'flash', 'flash_lite'],
+  council: []
+};
+const EFFORTS = {
+  claude: ['low', 'medium', 'high', 'xhigh', 'max'],
+  codex: ['low', 'medium', 'high', 'xhigh'],
+  antigravity: [],
+  council: []
+};
+function populateOverrides() {
+  const fill = (id, first, list) => {
+    const sel = $(id), prev = sel.value;
+    sel.innerHTML = `<option value="">${first}</option>` + list.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
+    sel.value = list.includes(prev) ? prev : '';
+    sel.disabled = !list.length;
+  };
+  const tool = state.data?.tools?.[state.mode];
+  const models = (state.mode === 'claude' || state.mode === 'codex') && tool?.cli_models?.length ? tool.cli_models : MODELS[state.mode];
+  const efforts = (state.mode === 'claude' || state.mode === 'codex') && tool?.efforts?.length ? tool.efforts : EFFORTS[state.mode];
+  fill('modelSel', 'Auto (Default theo Role)', models);
+  fill('effortSel', 'Auto (Default)', efforts);
+}
+function pickMode(m) { state.mode = m; renderModes(); populateOverrides(); resetCmd(); }
 
 function payload(exec) {
   return {
     mode: state.mode, role: $('roleSel').value,
+    model: $('modelSel').value, effort: $('effortSel').value,
     project_path: $('projectSel').value, prompt: $('promptTxt').value.trim(),
     execute_antigravity: !!exec
   };
@@ -526,16 +590,19 @@ function localCommand(p) {
   const s = `${profile}\\.gemini\\config\\skills\\claude-leader\\scripts`;
   const q = s => "'" + String(s).replace(/['‘-‛]/g, m => m + m) + "'";
   const ps = 'powershell -NoProfile -ExecutionPolicy Bypass -File';
+  const model = p.model || $('modelSel')?.value || '';
+  const effort = p.effort || $('effortSel')?.value || '';
   if (p.mode === 'antigravity') {
     const action = ROLES.antigravity.includes(p.role) ? p.role : 'send-latest';
     if (action === 'status' || action === 'wait')
       return `${ps} ${q(s + '\\invoke-antigravity.ps1')} -Action ${action} -WorkDir ${q(p.project_path)}`;
-    return `${ps} ${q(s + '\\invoke-antigravity.ps1')} -Action ${action} -WorkDir ${q(p.project_path)} -Title ${q('Task from Dashboard')} -Prompt ${q(p.prompt)}`;
+    return `${ps} ${q(s + '\\invoke-antigravity.ps1')} -Action ${action} -WorkDir ${q(p.project_path)}${action === 'new' && model ? ' -Model ' + q(model) : ''} -Title ${q('Task from Dashboard')} -Prompt ${q(p.prompt)}`;
   }
+  const ov = `${model ? ' -ModelOverride ' + q(model) : ''}${effort ? ' -EffortOverride ' + q(effort) : ''}`;
   if (p.mode === 'codex')
-    return `${ps} ${q(s + '\\invoke-codex.ps1')} -Role ${p.role} -WorkDir ${q(p.project_path)}${p.prompt ? ` -Prompt ${q(p.prompt)}` : ''}`;
+    return `${ps} ${q(s + '\\invoke-codex.ps1')} -Role ${p.role} -WorkDir ${q(p.project_path)}${ov}${p.prompt ? ` -Prompt ${q(p.prompt)}` : ''}`;
   if (p.mode === 'claude')
-    return `${ps} ${q(s + '\\invoke-claude.ps1')} -Role ${p.role} -WorkDir ${q(p.project_path)}${p.role === 'reviewer' ? ' -IncludeGitDiff' : ''} -Prompt ${q(p.prompt)}`;
+    return `${ps} ${q(s + '\\invoke-claude.ps1')} -Role ${p.role} -WorkDir ${q(p.project_path)}${ov}${p.role === 'reviewer' ? ' -IncludeGitDiff' : ''} -Prompt ${q(p.prompt)}`;
   return `${ps} ${q(s + '\\invoke-council-review.ps1')} -WorkDir ${q(p.project_path)} -Prompt ${q(p.prompt)}`;
 }
 
@@ -628,6 +695,7 @@ function setAuto() {
 }
 
 renderModes();
+populateOverrides();
 setAuto();
 load();
 </script>
