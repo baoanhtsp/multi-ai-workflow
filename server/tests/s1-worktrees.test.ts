@@ -70,6 +70,9 @@ async function setupWorktreeEnv(): Promise<WorktreeTestEnv> {
     mawHome,
   });
   paths.jobsDir = jobsDir;
+  const testScriptsDir = path.win32.join(tempBase, 'scripts');
+  fs.mkdirSync(testScriptsDir, { recursive: true });
+  paths.scriptsDir = testScriptsDir;
 
   const recordedJobs: Array<Record<string, unknown>> = [];
   const ctx: MawFeatureContext = {
@@ -1189,6 +1192,166 @@ test('S1 Worktrees X7: worktree_list and bestof_list throw 400 on invalid projec
     const reqBoEmpty = makeMockRequest(env.ctx, `http://127.0.0.1/api?action=bestof_list`);
     const boEmptyRes = (await bestofHandler(reqBoEmpty, reqBoEmpty)) as Record<string, unknown>;
     assert.equal(boEmptyRes.ok, true);
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees Y1: SPEC Guard blocks merge when branch touches SPEC.md, and only accepts WARN with valid rules', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    fs.writeFileSync(path.win32.join(env.repoDir, 'SPEC.md'), '# Spec Initial\n', 'utf8');
+    await runCommand('git', ['add', 'SPEC.md'], { cwd: env.repoDir });
+    await runCommand('git', ['commit', '-m', 'add SPEC.md'], { cwd: env.repoDir });
+
+    const wt = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'y1-spec-test',
+      owner: 'antigravity',
+      origin: 'job',
+    });
+
+    // 1. Worktree modifies SPEC.md
+    fs.writeFileSync(path.win32.join(wt.worktree.worktree_path, 'SPEC.md'), '# Spec Modified by Branch\n', 'utf8');
+    await runCommand('git', ['add', '.'], { cwd: wt.worktree.worktree_path });
+    await runCommand('git', ['commit', '-m', 'modify SPEC.md'], { cwd: wt.worktree.worktree_path });
+
+    // Merge must be blocked because SPEC.md was touched
+    const blockRes = await handleWorktreeMerge(env.ctx, {
+      id: wt.worktree.id,
+      strategy: 'merge',
+      confirm: true,
+    });
+    assert.equal(blockRes.ok, true);
+    assert.equal(blockRes.merged, false);
+    assert.equal(blockRes.blocked, 'spec_guard');
+    assert.match(String((blockRes as any).reason), /SPEC\.md/i);
+
+    // Merge with force: true must proceed
+    const forceRes = await handleWorktreeMerge(env.ctx, {
+      id: wt.worktree.id,
+      strategy: 'merge',
+      force: true,
+      confirm: true,
+    });
+    assert.equal(forceRes.ok, true);
+    assert.equal(forceRes.merged, true);
+
+    // 2. Test WARN without ownership_rules: must be blocked
+    const wt2 = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'y1-warn-test',
+      owner: 'antigravity',
+      origin: 'job',
+    });
+    fs.writeFileSync(path.win32.join(wt2.worktree.worktree_path, 'code.txt'), 'clean code\n', 'utf8');
+    await runCommand('git', ['add', '.'], { cwd: wt2.worktree.worktree_path });
+    await runCommand('git', ['commit', '-m', 'add code'], { cwd: wt2.worktree.worktree_path });
+
+    // Mock script returning WARN but has_spec: false / empty ownership_rules
+    fs.mkdirSync(env.paths.scriptsDir, { recursive: true });
+    const sgScript = path.win32.join(env.paths.scriptsDir, 'invoke-spec-guard.ps1');
+    fs.writeFileSync(
+      sgScript,
+      'Write-Output \'{"ok":true,"verdict":"WARN","has_spec":false,"ownership_rules":[]}\'\n',
+      'utf8'
+    );
+
+    const warnBlockRes = await handleWorktreeMerge(env.ctx, {
+      id: wt2.worktree.id,
+      strategy: 'merge',
+      confirm: true,
+    });
+    assert.equal(warnBlockRes.ok, true);
+    assert.equal(warnBlockRes.merged, false);
+    assert.equal(warnBlockRes.blocked, 'spec_guard');
+
+    // Mock script returning WARN with has_spec: true and ownership_rules: must proceed
+    fs.writeFileSync(
+      sgScript,
+      'Write-Output \'{"ok":true,"verdict":"WARN","has_spec":true,"ownership_rules":["rule1"]}\'\n',
+      'utf8'
+    );
+    const warnAllowRes = await handleWorktreeMerge(env.ctx, {
+      id: wt2.worktree.id,
+      strategy: 'merge',
+      confirm: true,
+    });
+    assert.equal(warnAllowRes.ok, true);
+    assert.equal(warnAllowRes.merged, true);
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees Y3: Reject duplicate worktree name across any status with 409 "Worktree name already used."', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    const wt = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'y3-dup-test',
+    });
+
+    // Discard worktree so status becomes 'discarded'
+    await handleWorktreeDiscard(env.ctx, {
+      id: 'y3-dup-test',
+      confirm: true,
+    });
+
+    const store = await loadWorktreesStore(env.paths.featureDataDir('worktrees'));
+    const rec = store.worktrees.find((w) => w.id === 'y3-dup-test');
+    assert.equal(rec?.status, 'discarded');
+
+    // Attempting to reuse 'y3-dup-test' must throw 409 "Worktree name already used."
+    let caughtErr: any = null;
+    try {
+      await createWorktreeRecord(env.ctx, {
+        project_path: env.repoDir,
+        name: 'y3-dup-test',
+      });
+    } catch (err: any) {
+      caughtErr = err;
+    }
+    assert.ok(caughtErr, 'Should reject reused name');
+    assert.equal(caughtErr.statusCode, 409);
+    assert.equal(caughtErr.message, 'Worktree name already used.');
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees Y4: job_fork with base:"result" fails with 409 when source worktree is gone', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    const forkHandler = feature.routes.job_fork!.handler;
+    const fakeJobId = 'job_20261025_forky4';
+
+    fs.writeFileSync(
+      path.win32.join(env.jobsDir, `${fakeJobId}.json`),
+      JSON.stringify({ job_id: fakeJobId, project_path: env.repoDir, agent: 'antigravity', role: 'backend' }),
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.win32.join(env.jobsDir, `${fakeJobId}.prompt.txt`),
+      'original prompt\n',
+      'utf8'
+    );
+
+    const req = makeMockRequest(env.ctx, 'http://127.0.0.1/api?action=job_fork', {
+      job_id: fakeJobId,
+      base: 'result',
+    });
+
+    let caughtErr: any = null;
+    try {
+      await forkHandler(req, req);
+    } catch (err: any) {
+      caughtErr = err;
+    }
+
+    assert.ok(caughtErr, 'job_fork with base: result should throw 409 when source worktree missing');
+    assert.equal(caughtErr.statusCode, 409);
+    assert.equal(caughtErr.message, "The source job's worktree is gone; fork from the project instead.");
   } finally {
     cleanupWorktreeEnv(env);
   }

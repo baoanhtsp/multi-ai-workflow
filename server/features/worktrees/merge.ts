@@ -154,6 +154,26 @@ export async function handleWorktreeMerge(
       const mbRes = await gitRun(['merge-base', record.base, 'HEAD'], { cwd: wtPath, allowFailure: true });
       const mergeBase = mbRes.code === 0 && mbRes.stdout.trim() ? mbRes.stdout.trim() : record.base_commit;
 
+      // Y1 (a): If branch diff (merge-base -> worktree snapshot) touches SPEC.md, block unless force
+      const currentTree = await snapshotTree(wtPath);
+      const diffFilesRes = await gitRun(['diff', '--name-only', mergeBase, currentTree], { cwd: wtPath });
+      const touchedFiles = diffFilesRes.stdout.split(/\r?\n/).map((f) => f.trim()).filter(Boolean);
+      const touchesSpec = touchedFiles.some((f) => f.toLowerCase() === 'spec.md');
+
+      if (touchesSpec && body.force !== true) {
+        return {
+          ok: true,
+          merged: false,
+          blocked: 'spec_guard',
+          reason: 'Branch modified or deleted SPEC.md, which defines ownership rules.',
+          spec_guard: {
+            verdict: 'FAIL',
+            reason: 'Branch modified or deleted SPEC.md.',
+            files: ['SPEC.md'],
+          },
+        };
+      }
+
       await gitRun(['reset', '--soft', mergeBase], { cwd: wtPath });
       try {
         const specGuardScript = path.win32.join(ctx.paths.scriptsDir, 'invoke-spec-guard.ps1');
@@ -197,9 +217,18 @@ export async function handleWorktreeMerge(
           specGuardResult = { error: tail || 'SPEC Guard produced no JSON output.' };
         }
 
-        const isAllowed =
-          specGuardResult &&
-          (specGuardResult.verdict === 'PASS' || specGuardResult.verdict === 'WARN');
+        let isAllowed = false;
+        if (specGuardResult && specGuardResult.verdict === 'PASS') {
+          isAllowed = true;
+        } else if (specGuardResult && specGuardResult.verdict === 'WARN') {
+          // Y1 (b): Accept WARN only when the guard JSON has has_spec: true and non-empty ownership_rules
+          const hasSpec = specGuardResult.has_spec === true;
+          const hasOwnershipRules =
+            Array.isArray(specGuardResult.ownership_rules) &&
+            specGuardResult.ownership_rules.length > 0;
+          isAllowed = hasSpec && hasOwnershipRules;
+        }
+
         if (!isAllowed && body.force !== true) {
           return {
             ok: true,

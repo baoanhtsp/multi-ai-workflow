@@ -824,7 +824,7 @@ export async function createCheckpoint(
     500,
     Math.max(5, options.retention ?? options.configRetention ?? 50)
   );
-  await pruneCheckpoints(top, normTop, retention);
+  await pruneCheckpoints(top, normTop, retention, createdRef);
 
   const unixNow = Math.floor(Date.now() / 1000);
   const checkpointRecord: CheckpointRecord = {
@@ -854,12 +854,14 @@ export async function createCheckpoint(
 }
 
 /**
- * C2: Prunes checkpoints using creatordate:unix integer comparison.
+ * C2, Y2: Prunes checkpoints using creatordate:unix integer comparison.
+ * Never deletes excludeRef (the newly created ref).
  */
 export async function pruneCheckpoints(
   cwd: string,
   normalizedWorkdir: string,
-  retention: number
+  retention: number,
+  excludeRef?: string
 ): Promise<number> {
   const top = await resolveGitTopLevel(cwd);
   const listRes = await gitRun(
@@ -875,14 +877,18 @@ export async function pruneCheckpoints(
     return 0;
   }
 
-  const entries: Array<{ ref: string; commit: string; unix: number; n: number; workdir: string }> = [];
+  const entries: Array<{ ref: string; commit: string; unix: number; n: number; workdir: string; order: number }> = [];
   const rawEntries = listRes.stdout.split('\0@@MAW_END@@\n').map((s) => s.replace(/^\n+/, ''));
 
+  let orderIndex = 0;
   for (const raw of rawEntries) {
     if (!raw.trim()) continue;
     const parts = raw.split('\0');
     if (parts.length < 4) continue;
     const ref = parts[0]!.trim();
+    if (excludeRef && ref === excludeRef) {
+      continue;
+    }
     const commit = parts[1]!.trim();
     const unix = Number.parseInt(parts[2]!.trim(), 10) || 0;
     const contents = parts.slice(3).join('\0');
@@ -893,16 +899,17 @@ export async function pruneCheckpoints(
     const n = match ? Number.parseInt(match[1]!, 10) : 0;
 
     if (itemWorkdir === normalizedWorkdir) {
-      entries.push({ ref, commit, unix, n, workdir: itemWorkdir });
+      entries.push({ ref, commit, unix, n, workdir: itemWorkdir, order: orderIndex++ });
     }
   }
 
-  // C2: Sort newest first by unix timestamp, tie-break by n
-  entries.sort((a, b) => (b.unix !== a.unix ? b.unix - a.unix : b.n - a.n));
+  // Y2: Sort by (unix time desc, then ref creation order desc)
+  entries.sort((a, b) => (b.unix !== a.unix ? b.unix - a.unix : b.order - a.order));
 
   let deletedCount = 0;
-  if (entries.length > retention) {
-    const toDelete = entries.slice(retention);
+  const maxOthers = Math.max(0, retention - 1);
+  if (entries.length > maxOthers) {
+    const toDelete = entries.slice(maxOthers);
     for (const item of toDelete) {
       await gitRun(['update-ref', '-d', item.ref], { cwd: top, allowFailure: true });
       deletedCount++;

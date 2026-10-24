@@ -73,6 +73,40 @@ Describe "S1 Checkpoints PowerShell Library" {
             $id2 = New-MawCheckpoint -WorkDir $script:tempRoot -JobKey $jobKey -Event "round-start" -Label "second"
             $id2 | Should -Be "job_test_inc/0002"
         }
+
+        It "Y5: preserves and restores GIT_TERMINAL_PROMPT and GIT_OPTIONAL_LOCKS" {
+            $env:GIT_TERMINAL_PROMPT = "custom_prompt_val"
+            $env:GIT_OPTIONAL_LOCKS = "custom_locks_val"
+            try {
+                Add-Content -LiteralPath (Join-Path $script:tempRoot "README.md") -Value "y5 change"
+                $id = New-MawCheckpoint -WorkDir $script:tempRoot -JobKey "job_y5" -Event "manual" -Label "y5 env test"
+                $id | Should -Not -BeNullOrEmpty
+                $env:GIT_TERMINAL_PROMPT | Should -Be "custom_prompt_val"
+                $env:GIT_OPTIONAL_LOCKS | Should -Be "custom_locks_val"
+            } finally {
+                Remove-Item Env:\GIT_TERMINAL_PROMPT -ErrorAction SilentlyContinue
+                Remove-Item Env:\GIT_OPTIONAL_LOCKS -ErrorAction SilentlyContinue
+            }
+        }
+
+        It "Y2: retention never prunes the newly created checkpoint even when timestamps tie" {
+            # Create 5 checkpoints with old_job
+            for ($i = 1; $i -le 5; $i++) {
+                Add-Content -LiteralPath (Join-Path $script:tempRoot "README.md") -Value "change $i"
+                New-MawCheckpoint -WorkDir $script:tempRoot -JobKey "old_job" -Event "job-start" -Label "cp $i" -Retention 5 | Out-Null
+            }
+
+            # Create 6th checkpoint under a new job key 'safety' with retention=5
+            Add-Content -LiteralPath (Join-Path $script:tempRoot "README.md") -Value "safety change"
+            $safetyId = New-MawCheckpoint -WorkDir $script:tempRoot -JobKey "safety" -Event "safety" -Label "restore safety" -Retention 5
+            $safetyId | Should -Be "safety/0001"
+
+            # The newly created safety/0001 must exist and not have been pruned
+            $ref = "refs/maw/checkpoints/$safetyId"
+            $exists = & git -C $script:tempRoot rev-parse --verify -q $ref
+            $LASTEXITCODE | Should -Be 0
+            $exists | Should -Not -BeNullOrEmpty
+        }
     }
 
     Context "Non-git directory and safety handling" {

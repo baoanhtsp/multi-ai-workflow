@@ -488,3 +488,33 @@ test('S1 Checkpoints X3: restoreTree throws 500 mentioning safety checkpoint if 
     cleanupTestEnv(env);
   }
 });
+
+test('S1 Checkpoints Y2: retention never prunes the newly created checkpoint even when timestamps tie and n is 1', async () => {
+  const env = await setupTestEnv();
+  try {
+    for (let i = 1; i <= 5; i++) {
+      fs.writeFileSync(path.win32.join(env.repoDir, 'file1.txt'), `content ${i}\n`, 'utf8');
+      await createCheckpoint(env.repoDir, {
+        jobKey: 'old_job',
+        label: `cp ${i}`,
+        retention: 5,
+      });
+    }
+
+    fs.writeFileSync(path.win32.join(env.repoDir, 'file1.txt'), 'safety content\n', 'utf8');
+    const safetyRes = await createCheckpoint(env.repoDir, {
+      jobKey: 'safety',
+      label: 'safety checkpoint',
+      retention: 5,
+    });
+
+    assert.equal(safetyRes.checkpoint.id, 'safety/0001');
+
+    const checkRes = await runCommand('git', ['rev-parse', '--verify', 'refs/maw/checkpoints/safety/0001'], {
+      cwd: env.repoDir,
+    });
+    assert.equal(checkRes.code, 0, 'safety/0001 must exist and not be pruned');
+  } finally {
+    cleanupTestEnv(env);
+  }
+});

@@ -129,6 +129,8 @@ function New-MawCheckpoint {
         $msgFile = Join-Path $tempDir "maw-cp-msg-$randHex.txt"
 
         $origIndex = $env:GIT_INDEX_FILE
+        $origTerminalPrompt = $env:GIT_TERMINAL_PROMPT
+        $origOptionalLocks = $env:GIT_OPTIONAL_LOCKS
         $origAuthorName = $env:GIT_AUTHOR_NAME
         $origAuthorEmail = $env:GIT_AUTHOR_EMAIL
         $origCommitterName = $env:GIT_COMMITTER_NAME
@@ -269,15 +271,18 @@ function New-MawCheckpoint {
                 return $null
             }
 
-            # Retention pruning: sort by creatordate:unix integer comparison (C2)
+            # Retention pruning: sort by creatordate:unix integer comparison (C2, Y2)
             $rawCheckpointsRes = Invoke-NativeProcess -FilePath "git" -ArgumentList @("-C", $top, "for-each-ref", "--format=%(refname)%00%(creatordate:unix)%00%(contents)%00@@MAW_END@@%0a", "refs/maw/checkpoints/") -WorkingDirectory $top -TimeoutMs 15000
             if ($rawCheckpointsRes.ExitCode -eq 0 -and $rawCheckpointsRes.StdOut) {
                 $allCheckpoints = @($rawCheckpointsRes.StdOut -split "\0@@MAW_END@@`r?`n")
                 $matched = @()
+                $newRef = "refs/maw/checkpoints/$createdId"
                 foreach ($entry in $allCheckpoints) {
                     $parts = $entry -split [char]0
                     if ($parts.Count -ge 3) {
                         $rName = $parts[0].Trim()
+                        # Exclude newly created ref so it is never pruned (Y2)
+                        if ($rName -eq $newRef) { continue }
                         $rUnix = 0
                         [int64]::TryParse($parts[1].Trim(), [ref]$rUnix) | Out-Null
                         $rContent = $parts[2]
@@ -294,9 +299,10 @@ function New-MawCheckpoint {
                     }
                 }
 
-                if ($matched.Count -gt $effectiveRetention) {
+                $maxOthers = [Math]::Max(0, $effectiveRetention - 1)
+                if ($matched.Count -gt $maxOthers) {
                     $sorted = @($matched | Sort-Object -Property Unix -Descending)
-                    $toDelete = $sorted | Select-Object -Skip $effectiveRetention
+                    $toDelete = $sorted | Select-Object -Skip $maxOthers
                     foreach ($del in $toDelete) {
                         Invoke-NativeProcess -FilePath "git" -ArgumentList @("-C", $top, "update-ref", "-d", $del.Ref) -WorkingDirectory $top -TimeoutMs 5000 | Out-Null
                     }
@@ -307,6 +313,8 @@ function New-MawCheckpoint {
         } finally {
             $ErrorActionPreference = $prevEap
             $env:GIT_INDEX_FILE = $origIndex
+            $env:GIT_TERMINAL_PROMPT = $origTerminalPrompt
+            $env:GIT_OPTIONAL_LOCKS = $origOptionalLocks
             $env:GIT_AUTHOR_NAME = $origAuthorName
             $env:GIT_AUTHOR_EMAIL = $origAuthorEmail
             $env:GIT_COMMITTER_NAME = $origCommitterName

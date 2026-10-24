@@ -534,8 +534,14 @@ export const feature: MawFeature = {
         let forkStartPoint: string | undefined = undefined;
         let projectPath = String(meta.project_path ?? ctx.paths.repoRoot).trim();
 
-        // W4: Result fork passes sourceWt.base as base and snapshot commit as start_point
-        if (baseOption === 'result' && sourceWt && isDirectorySafe(sourceWt.worktree_path)) {
+        // W4, Y4: Result fork passes sourceWt.base as base and snapshot commit as start_point
+        if (baseOption === 'result') {
+          if (!sourceWt || !isDirectorySafe(sourceWt.worktree_path)) {
+            throw new ApiValidationError(
+              "The source job's worktree is gone; fork from the project instead.",
+              409
+            );
+          }
           projectPath = sourceWt.project_path;
           forkBase = sourceWt.base;
           try {
@@ -545,8 +551,11 @@ export const feature: MawFeature = {
               label: `snapshot before fork of job ${jobId}`,
             });
             forkStartPoint = snapRes.checkpoint.commit;
-          } catch {
-            forkStartPoint = undefined;
+          } catch (err: any) {
+            throw new ApiValidationError(
+              `Failed to snapshot source worktree for fork: ${err?.message || 'unknown error'}`,
+              500
+            );
           }
         }
 

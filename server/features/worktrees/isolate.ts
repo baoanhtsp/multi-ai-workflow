@@ -123,8 +123,8 @@ export async function createWorktreeRecord(
   const { record, port } = await withStoreLock(async () => {
     const store = await loadWorktreesStore(dataDir);
 
-    if (store.worktrees.some((w) => w.status === 'active' && w.id === name)) {
-      throw new ApiValidationError(`Worktree '${name}' already exists.`, 409);
+    if (store.worktrees.some((w) => w.id === name)) {
+      throw new ApiValidationError('Worktree name already used.', 409);
     }
     if (
       store.worktrees.some(
