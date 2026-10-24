@@ -9,7 +9,7 @@
     s4cTab: 'Kiểm tra', s4cGate: 'Cổng chất lượng', s4cGreen: 'XANH — được merge', s4cRed: 'ĐỎ — chặn merge', s4cRunning: 'Đang chạy kiểm tra…',
     s4cPick: 'Chọn một dự án để xem kiểm tra.', s4cRun: 'Chạy kiểm tra', s4cCancel: 'Dừng', s4cRefresh: 'Làm mới', s4cOverride: 'Bỏ qua cổng…',
     s4cItem_git: 'Git sạch', s4cItem_spec_guard: 'SPEC Guard', s4cItem_review: 'Điểm review gần nhất', s4cItem_todo: 'TODO còn mở',
-    s4cState_pass: 'đạt', s4cState_fail: 'lỗi', s4cState_warn: 'chú ý', s4cState_skip: 'bỏ qua', s4cState_running: 'đang chạy', s4cState_untrusted: 'chưa tin cậy', s4cState_timeout: 'quá giờ',
+    s4cState_pass: 'đạt', s4cState_fail: 'lỗi', s4cState_warn: 'chú ý', s4cState_skip: 'bỏ qua', s4cState_running: 'đang chạy', s4cState_untrusted: 'chưa tin cậy', s4cState_timeout: 'quá giờ', s4cState_stale: 'cũ — chạy lại', s4cState_pending: 'chưa chạy',
     s4cConfig: 'Cấu hình kiểm tra (.maw/checks.json)', s4cNoConfig: 'Dự án chưa có .maw/checks.json. Bấm "Dò tự động" để đề xuất, rồi Lưu.',
     s4cDetect: 'Dò tự động', s4cAddCheck: '+ Thêm lệnh', s4cSave: 'Lưu cấu hình', s4cTrust: 'Tin cậy cấu hình này',
     s4cUntrusted: 'Cấu hình trong repo đã thay đổi (sha {sha}). Xem lại các lệnh rồi bấm "Tin cậy" trước khi chạy.',
@@ -25,7 +25,7 @@
     s4cTab: 'Checks', s4cGate: 'Quality gate', s4cGreen: 'GREEN — ok to merge', s4cRed: 'RED — merge blocked', s4cRunning: 'Running checks…',
     s4cPick: 'Pick a project to see its checks.', s4cRun: 'Run checks', s4cCancel: 'Stop', s4cRefresh: 'Refresh', s4cOverride: 'Override gate…',
     s4cItem_git: 'Git clean', s4cItem_spec_guard: 'SPEC Guard', s4cItem_review: 'Last review score', s4cItem_todo: 'Open TODOs',
-    s4cState_pass: 'pass', s4cState_fail: 'fail', s4cState_warn: 'warn', s4cState_skip: 'skip', s4cState_running: 'running', s4cState_untrusted: 'untrusted', s4cState_timeout: 'timeout',
+    s4cState_pass: 'pass', s4cState_fail: 'fail', s4cState_warn: 'warn', s4cState_skip: 'skip', s4cState_running: 'running', s4cState_untrusted: 'untrusted', s4cState_timeout: 'timeout', s4cState_stale: 'stale — re-run', s4cState_pending: 'not run yet',
     s4cConfig: 'Check configuration (.maw/checks.json)', s4cNoConfig: 'This project has no .maw/checks.json yet. Click "Detect" for a proposal, then Save.',
     s4cDetect: 'Detect', s4cAddCheck: '+ Add command', s4cSave: 'Save config', s4cTrust: 'Trust this config',
     s4cUntrusted: 'The config in the repo changed (sha {sha}). Review the commands, then click "Trust" before running them.',
@@ -38,8 +38,8 @@
     s4cInvalid: 'Invalid config: {f}', s4cDetected: 'Config proposed — review it, then click Save.', s4cNothingDetected: 'No command could be detected.',
   });
 
-  const STATE_CLS = { pass: 'b-ok', fail: 'b-err', timeout: 'b-err', untrusted: 'b-err', warn: 'b-warn', running: 'b-info', skip: '' };
-  const DOT_CLS = { pass: 'ok', fail: 'err', timeout: 'err', untrusted: 'err', warn: 'warn', running: 'warn live', skip: '' };
+  const STATE_CLS = { pass: 'b-ok', fail: 'b-err', timeout: 'b-err', untrusted: 'b-err', stale: 'b-warn', pending: 'b-warn', warn: 'b-warn', running: 'b-info', skip: '' };
+  const DOT_CLS = { pass: 'ok', fail: 'err', timeout: 'err', untrusted: 'err', stale: 'warn', pending: 'warn', warn: 'warn', running: 'warn live', skip: '' };
   const ID_RE = /^[a-z][a-z0-9_-]{0,31}$/;
 
   const hhmm = iso => {
@@ -224,7 +224,8 @@
       seen.add(ck.id);
       if (!ck.command.length) bad.push(`${ck.id || '?'}: ${t('s4cCommand').split(' (')[0]}`);
       if (ck.timeout_s < 5 || ck.timeout_s > 3600) bad.push(`${ck.id}: ${t('s4cTimeout')}`);
-      if (!ck.label) ck.label = toLine(ck.command);
+      // An auto-filled label follows its command when the command is edited.
+      if (!ck.label || (old && ck.label === toLine(old.command))) ck.label = toLine(ck.command);
       return ck;
     });
     if (d.checks.length > 20) bad.push('max 20');

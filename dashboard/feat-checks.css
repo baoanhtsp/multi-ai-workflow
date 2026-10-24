@@ -19,7 +19,7 @@
 .s4c-item { display: flex; gap: 10px; align-items: flex-start; padding: 9px 2px; border-bottom: 1px solid var(--border); min-width: 0; }
 .s4c-item:last-child { border-bottom: 0; }
 .s4c-item > .dot { margin-top: 5px; }
-.s4c-item[data-state="fail"], .s4c-item[data-state="untrusted"], .s4c-item[data-state="timeout"] { background: linear-gradient(90deg, var(--err-soft), transparent 60%); }
+.s4c-item[data-state="fail"], .s4c-item[data-state="untrusted"], .s4c-item[data-state="timeout"], .s4c-item[data-state="stale"], .s4c-item[data-state="pending"] { background: linear-gradient(90deg, var(--err-soft), transparent 60%); }
 .s4c-main { flex: 1; min-width: 0; }
 .s4c-detail { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .s4c-more { font-size: 12px; }

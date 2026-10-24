@@ -299,12 +299,12 @@ The UI shows **"Đang chờ hồi phục (đến 14:05)"** in the job header fro
 | Item | Pass when | Fail when |
 | :--- | :--- | :--- |
 | `git` | `git status --porcelain` is empty | dirty and `require_clean_git` (else `warn` with the count). Not a git repo ⇒ `skip` |
-| each check `<id>` | exit 0 in the last run, and that run happened at the **current `HEAD` + current dirty-file signature** | exit ≠ 0, timeout, cannot start. A stale result (code changed since) ⇒ `warn` "stale, re-run". A `required: false` failure ⇒ `warn` |
+| each check `<id>` | exit 0 in the last run, and that run happened at the **current `HEAD` + current dirty-file signature** | exit ≠ 0, timeout, cannot start. A result from older code ⇒ `stale`; never run ⇒ `pending`. For a `required` check both count as **not green** (a gate is only green when every required check passed on the current code). A `required: false` failure / stale / pending ⇒ `warn` |
 | `spec_guard` | SPEC Guard verdict ok (reuse `server/actions/specGuard.ts` `handleSpecGuard` with `owner: ""`; never edit it) | violations. No `SPEC.md` ⇒ `skip` |
 | `review` | the last reviewer score for this project (ledger `review`, else the last audit reviewer row with `WorkDir` inside the project) ≥ `min_review_score` and verdict APPROVED | below the threshold / CHANGES_REQUESTED. No review yet ⇒ `warn` |
 | `todo` | count of `todo_patterns` matches (word boundary) in **tracked** text files (`git ls-files`, skip files > 512 KB and binaries, max 5000 files) ≤ `todo_max` | above it. `todo_max = -1` ⇒ `warn`/`pass`, report only. Shows the top 20 `file:line` |
 
-`green` = no item is in `fail` / `untrusted` / `running`.
+`green` = no item is in `fail` / `timeout` / `untrusted` / `running`, and no required check is `stale` / `pending`. Item states: `pass | fail | warn | skip | running | untrusted | timeout | stale | pending`.
 
 ### 3.4 Enforcement
 - **Auto-Gate**: the `before-review` hook (CLI `before-review`) runs the configured checks **synchronously** in `workdir` (same runner code, same timeouts), saves the result and blocks the review when the gate is not green. The reason is `Test gate red: test (exit 1), todo (3 > 0) [S4:gate]`.
@@ -565,3 +565,6 @@ All four are bilingual through `MAW.addI18n` and use the theme CSS variables onl
 8. **S3 inbox**: pull `s4_attention` (§6.1), or tell S4 the `inbox_add` contract.
 9. **S1 `worktree_merge` / S6 handoff merge**: call `checks_gate` and refuse when `green: false` unless the request carries an `override_token` from `checks_override` (§3.4).
 10. **S5**: store the review verdict in the job meta as `review: { verdict, score }`, which the S4 ledger reads.
+11. **Job ownership**: `%TEMP%\maw_jobs` is shared by every dashboard process (main server, stream test servers, api-smoke), so a feature cannot tell which server started a job.
+    - Request: add `server_id` (for example `pid@port`) and `projects_root` to the job meta.
+    - Until then, S4 limits recovery to jobs inside its own projects root and claims each failed job with an exclusive file (`%TEMP%\maw_s4_claims\<job_id>`), so only one process ever retries it.
