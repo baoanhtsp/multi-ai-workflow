@@ -568,3 +568,9 @@ All four are bilingual through `MAW.addI18n` and use the theme CSS variables onl
 11. **Job ownership**: `%TEMP%\maw_jobs` is shared by every dashboard process (main server, stream test servers, api-smoke), so a feature cannot tell which server started a job.
     - Request: add `server_id` (for example `pid@port`) and `projects_root` to the job meta.
     - Until then, S4 limits recovery to jobs inside its own projects root and claims each failed job with an exclusive file (`%TEMP%\maw_s4_claims\<job_id>`), so only one process ever retries it.
+12. **S1 best-of-N judge**: S1's notes say it reads `.maw/checks.json` itself, as `{ name, command: string|array }`.
+    - It must use S4's shape (`id` / `label` / array `command`), and better still call `checks_run` / `checks_status` / `checks_gate`. Running the file directly bypasses S4's sha256 trust check.
+    - S1 was told so (message + `s4-contracts.md` in the shared notes).
+13. **S3 inbox at merge**: S4's bridge feature-detects `server/features/inbox/store.ts` and uses `addInboxItem(paths, input, { onlyIfAbsent })`, `onInboxResolved(item)` and `updateInboxItemStatus`.
+    - If S3 renames any of these, `status.feature_data.policy.inbox_bridge` turns `false`.
+    - The test `inbox bridge: integration with real S3 store.ts` covers it once both streams are merged.
