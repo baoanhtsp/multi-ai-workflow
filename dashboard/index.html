@@ -192,6 +192,16 @@ tailwind.config = {
           </div>
           <div id="projMeta" class="flex flex-wrap gap-2 mt-2 text-[11px]"></div>
         </div>
+        <div id="presetBar" class="rounded-xl p-3 bg-amber-500/5 border border-amber-500/30">
+          <div class="text-[11px] font-bold text-amber-300 tracking-wide" data-i18n="presetLbl"></div>
+          <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2 mt-2">
+            <button type="button" data-preset="1" class="btn px-3 py-2 rounded-lg text-xs font-bold text-left bg-cl/10 border border-cl/40 text-cl hover:bg-cl/20" data-i18n="preset1"></button>
+            <button type="button" data-preset="2" class="btn px-3 py-2 rounded-lg text-xs font-bold text-left bg-cl/10 border border-cl/40 text-cl hover:bg-cl/20" data-i18n="preset2"></button>
+            <button type="button" data-preset="3" class="btn px-3 py-2 rounded-lg text-xs font-bold text-left bg-ag/10 border border-ag/40 text-ag hover:bg-ag/20" data-i18n="preset3"></button>
+            <button type="button" data-preset="4" class="btn px-3 py-2 rounded-lg text-xs font-bold text-left bg-violet-400/10 border border-violet-400/40 text-violet-300 hover:bg-violet-400/20" data-i18n="preset4"></button>
+            <button type="button" data-preset="5" class="btn px-3 py-2 rounded-lg text-xs font-bold text-left bg-amber-500/15 border border-amber-500/50 text-amber-300 hover:bg-amber-500/25 sm:col-span-2 xl:col-span-2" data-i18n="preset5"></button>
+          </div>
+        </div>
         <div>
           <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="lblMode"></label>
           <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-1.5" id="modeBtns"></div>
@@ -224,20 +234,25 @@ tailwind.config = {
           <span id="cmdState" class="text-[11px] text-slate-500"></span>
         </div>
         <pre id="cmdOut" class="flex-1 min-h-[180px] max-h-[300px] overflow-auto scroll p-4 rounded-xl bg-black/50 border border-slate-700/60 text-[12px] font-mono text-emerald-300 whitespace-pre-wrap break-all"></pre>
-        <div class="flex flex-wrap gap-2">
-          <button id="genBtn" class="btn flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-cl to-cla text-black hover:brightness-110">
-            <i data-lucide="wand-2" class="w-4 h-4"></i> <span data-i18n="genBtn"></span>
-          </button>
-          <button id="copyBtn" class="btn flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-slate-700/60 border border-slate-500/40 hover:bg-slate-700">
-            <i data-lucide="copy" class="w-4 h-4"></i> <span data-i18n="copyBtn"></span>
-          </button>
-          <button id="sendBtn" class="btn flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-ag to-agb text-white hover:brightness-110">
-            <i data-lucide="send" class="w-4 h-4"></i> <span data-i18n="sendBtn"></span>
-          </button>
+        <!-- Tier 1: primary actions -->
+        <div class="space-y-2.5">
+          <div>
+            <button id="runWebBtn" class="btn disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 w-full px-5 py-2.5 rounded-lg text-sm font-extrabold bg-gradient-to-r from-emerald-500 to-cx text-black hover:brightness-110 ring-1 ring-emerald-300/40" data-i18n="runWebBtn"></button>
+            <p class="text-[11px] text-slate-500 mt-1" data-i18n="runWebHint"></p>
+          </div>
+          <div id="sendWrap" class="hidden">
+            <button id="sendBtn" class="btn disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 w-full px-5 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-ag to-agb text-white hover:brightness-110" data-i18n="sendBtn"></button>
+            <p class="text-[11px] text-slate-500 mt-1" data-i18n="sendHint"></p>
+          </div>
         </div>
-        <div class="flex flex-wrap gap-2">
-          <button id="runWebBtn" class="btn disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-emerald-500 to-cx text-black hover:brightness-110 ring-1 ring-emerald-300/40" data-i18n="runWebBtn"></button>
-          <button id="specGuardBtn" class="btn disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-violet-500/15 text-violet-200 border border-violet-400/40 hover:bg-violet-500/25" data-i18n="specGuardBtn"></button>
+        <!-- Tier 2: helper tools -->
+        <div class="rounded-lg p-2.5 bg-slate-800/40 border border-slate-700/50">
+          <div class="text-[10px] font-semibold uppercase tracking-wider text-slate-400 mb-2" data-i18n="toolsLbl"></div>
+          <div class="flex flex-wrap gap-2">
+            <button id="genBtn" class="btn disabled:opacity-50 px-3 py-1.5 rounded-lg text-[11px] font-bold bg-slate-700/60 border border-slate-500/40 hover:bg-slate-700" data-i18n="genBtn"></button>
+            <button id="copyBtn" class="btn px-3 py-1.5 rounded-lg text-[11px] font-bold bg-slate-700/60 border border-slate-500/40 hover:bg-slate-700" data-i18n="copyBtn"></button>
+            <button id="specGuardBtn" class="btn disabled:opacity-50 disabled:cursor-not-allowed px-3 py-1.5 rounded-lg text-[11px] font-bold bg-violet-500/15 text-violet-200 border border-violet-400/40 hover:bg-violet-500/25" data-i18n="specGuardBtn"></button>
+          </div>
         </div>
         <p class="text-[11px] text-slate-500" data-i18n-html="sendNote"></p>
         <pre id="dispOut" class="hidden max-h-32 overflow-auto scroll p-3 rounded-lg bg-slate-900/80 border border-slate-700/60 text-[11px] font-mono text-slate-300 whitespace-pre-wrap"></pre>
@@ -380,9 +395,26 @@ const I18N = {
     chars: '{n} / 4000 ký tự',
     lblPreview: 'Xem trước lệnh PowerShell',
     cmdPlaceholder: 'Nhấn "Tạo lệnh PowerShell" để tạo lệnh…',
-    genBtn: 'Tạo lệnh PowerShell',
-    copyBtn: 'Sao chép lệnh',
-    sendBtn: 'Gửi thẳng vào Antigravity IDE',
+    genBtn: '🪄 Xem lệnh PowerShell',
+    copyBtn: '📋 Copy lệnh PowerShell',
+    sendBtn: '🚀 Gửi thẳng vào Antigravity IDE',
+    sendHint: 'Chỉ dùng cho mode Antigravity: đẩy việc vào cửa sổ IDE đang mở, không chờ kết quả.',
+    runWebHint: 'Chạy ngay trên trang này và xem kết quả ở Terminal bên dưới — dùng được với mọi AI.',
+    toolsLbl: 'Công cụ phụ / Terminal',
+    presetLbl: '⚡ BẮT ĐẦU NHANH (BẤM 1 NÚT ĐỂ ĐIỀN SẴN QUY TRÌNH MẪU):',
+    preset1: '📐 Bước 1: Thiết kế SPEC.md',
+    preset2: '🎨 Bước 2A: Code Giao diện UI',
+    preset3: '⚙️ Bước 2B: Code Backend & API',
+    preset4: '⚖️ Bước 3: Chấm điểm Code',
+    preset5: '🔄 Tự động A-Z: Code ➔ Chấm ➔ Sửa',
+    presetPrompts: {
+      1: 'Hãy phân tích dự án và thiết kế kiến trúc tổng thể, Database Schema, API Contract và danh sách phân quyền file vào SPEC.md.',
+      2: 'Đọc SPEC.md và viết 100% code giao diện Frontend (HTML/CSS/JS) hiện đại, chuẩn responsive cho dự án.',
+      3: 'Đọc SPEC.md và triển khai toàn bộ phần Backend, Database, API và chạy kiểm thử tự động.',
+      4: 'Kiểm tra toàn bộ thay đổi code (git diff) so với SPEC.md, rà soát lỗi bảo mật/logic và chấm điểm X/10.',
+      5: 'Triển khai tính năng theo SPEC.md, sau đó tự động chạy SPEC Guard và Hội đồng chấm điểm sửa lỗi cho đến khi đạt APPROVED.'
+    },
+    presetProject: 'Dự án',
     sendNote: '"Gửi thẳng" chỉ hoạt động với mode <span class="font-mono text-ag">antigravity</span> — gửi tác vụ vào cửa sổ Antigravity đang mở (<span class="font-mono">-NoWait</span>).',
     autoModel: 'Tự động (mặc định theo Role)',
     autoEffort: 'Tự động (mặc định)',
@@ -408,8 +440,8 @@ const I18N = {
     kSaveUsdSub: '{n} token tiết kiệm',
     tokUnit: 'tok',
     charsUnit: 'ký tự',
-    runWebBtn: '▶ Chạy Trực Tiếp Trên Web',
-    specGuardBtn: '🛡️ Kiểm tra SPEC Guard',
+    runWebBtn: '▶ BẤM ĐỂ CHẠY NGAY TRÊN WEB (Mọi AI)',
+    specGuardBtn: '🛡️ Kiểm tra SPEC.md',
     liveJobTitle: 'Terminal Job Trực Tiếp',
     cancelJob: '⏹ Dừng Job',
     jobRunning: 'ĐANG CHẠY',
@@ -522,9 +554,26 @@ const I18N = {
     chars: '{n} / 4000 chars',
     lblPreview: 'PowerShell Command Preview',
     cmdPlaceholder: 'Click "Generate Command" to build the command…',
-    genBtn: 'Generate Command',
-    copyBtn: 'Copy Command',
-    sendBtn: 'Send Directly to Antigravity IDE',
+    genBtn: '🪄 View PowerShell Command',
+    copyBtn: '📋 Copy PowerShell Command',
+    sendBtn: '🚀 Send Directly to Antigravity IDE',
+    sendHint: 'Antigravity mode only: pushes the task into the open IDE window without waiting for the result.',
+    runWebHint: 'Runs right on this page and streams the result into the Terminal below — works with every AI.',
+    toolsLbl: 'Helper Tools / Terminal',
+    presetLbl: '⚡ QUICK START PRESETS (1-CLICK WORKFLOW TEMPLATES):',
+    preset1: '📐 Step 1: Design SPEC.md',
+    preset2: '🎨 Step 2A: Build Frontend UI',
+    preset3: '⚙️ Step 2B: Build Backend & API',
+    preset4: '⚖️ Step 3: Score the Code',
+    preset5: '🔄 Auto A-Z: Code ➔ Review ➔ Fix',
+    presetPrompts: {
+      1: 'Analyze the project and design the system architecture, Database Schema, API Contract, and file ownership matrix in SPEC.md.',
+      2: 'Read SPEC.md and implement 100% of the Frontend UI (HTML/CSS/JS) with a modern responsive design.',
+      3: 'Read SPEC.md and implement all Backend, Database, and API logic, then run automated verification tests.',
+      4: 'Audit all uncommitted code changes (git diff) against SPEC.md for security/logic bugs and score X/10.',
+      5: 'Implement features per SPEC.md, then automatically run SPEC Guard and Council Review loop until APPROVED.'
+    },
+    presetProject: 'Project',
     sendNote: '"Send Directly" only works with mode <span class="font-mono text-ag">antigravity</span> — it sends the task into the open Antigravity window (<span class="font-mono">-NoWait</span>).',
     autoModel: 'Auto (Default per Role)',
     autoEffort: 'Auto (Default)',
@@ -550,8 +599,8 @@ const I18N = {
     kSaveUsdSub: '{n} tokens saved',
     tokUnit: 'tok',
     charsUnit: 'chars',
-    runWebBtn: '▶ Run Live on Web',
-    specGuardBtn: '🛡️ Run SPEC Guard',
+    runWebBtn: '▶ RUN LIVE ON WEB NOW (All Modes)',
+    specGuardBtn: '🛡️ Check SPEC.md',
     liveJobTitle: 'Live Job Terminal',
     cancelJob: '⏹ Cancel Job',
     jobRunning: 'RUNNING',
@@ -1016,6 +1065,7 @@ function renderModes() {
     <button data-m="${k}" class="btn flex flex-col items-center gap-1 py-2.5 rounded-lg border text-[11px] font-bold ${state.mode === k ? m.c + ' ring-1 ring-current' : 'border-slate-700 text-slate-400 hover:border-slate-500'}">
       <i data-lucide="${m.icon}" class="w-4 h-4"></i><span class="font-bold text-xs">${m.label}</span><span class="text-[10px] font-normal opacity-80">${m.sub[LANG]}</span></button>`).join('');
   document.querySelectorAll('#modeBtns button').forEach(b => b.onclick = () => pickMode(b.dataset.m));
+  $('sendWrap').classList.toggle('hidden', state.mode !== 'antigravity');
   const prev = $('roleSel').value;
   $('roleSel').innerHTML = ROLES[state.mode].map(r => `<option value="${r}">${roleLabel(state.mode, r)}</option>`).join('');
   if (ROLES[state.mode].includes(prev)) $('roleSel').value = prev;
@@ -1060,6 +1110,30 @@ function populateOverrides() {
   fill('effortSel', t('autoEffort'), efforts);
 }
 function pickMode(m) { state.mode = m; renderModes(); populateOverrides(); resetCmd(); }
+
+const PRESETS = {
+  1: { mode: 'claude', role: 'architect' },
+  2: { mode: 'claude', role: 'frontend' },
+  3: { mode: 'antigravity', role: 'send-latest' },
+  4: { mode: 'council', role: 'parallel-review' },
+  5: { mode: 'auto-gate', role: 'auto-loop' }
+};
+function applyPreset(n) {
+  const ps = PRESETS[n];
+  if (!ps) return;
+  state.mode = ps.mode;
+  renderModes();
+  $('roleSel').value = ps.role;
+  populateOverrides();
+  updateHint();
+  const name = $('projectSel').selectedOptions[0]?.dataset.name;
+  const text = I18N[LANG].presetPrompts[n];
+  $('promptTxt').value = name ? `${t('presetProject')} "${name}": ${text}` : text;
+  updateChars();
+  resetCmd();
+  generate(false);
+}
+document.querySelectorAll('#presetBar [data-preset]').forEach(b => b.onclick = () => applyPreset(b.dataset.preset));
 
 function payload(exec) {
   return {
