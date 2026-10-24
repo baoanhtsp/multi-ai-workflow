@@ -75,11 +75,12 @@ function createTempEnv() {
 }
 
 test('inbox bridge: feature-detects missing inbox module without throwing', async () => {
-  const { ctx, cleanup } = createTempEnv();
+  const { tmp, ctx, cleanup } = createTempEnv();
   try {
     resetInboxBridgeForTest();
+    // Simulate a tree without S3: point the bridge at a module that does not exist (S3 may be merged in).
+    setInboxModulePathForTest(path.win32.join(tmp, 'no-such-inbox', 'store.ts'));
 
-    // With no custom path and no server/features/inbox/store.ts, loadInbox should return null
     const mod = await loadInbox(ctx);
     assert.equal(mod, null);
 
