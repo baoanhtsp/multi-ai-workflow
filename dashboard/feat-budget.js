@@ -140,6 +140,7 @@
   const waitingFor = j => (S.fb?.waiting || []).find(w => w.source_job_id === j.id) ||
     (S.jobItems[j.id] || []).find(w => w.status === 'waiting' && w.source_job_id === j.id);
   const rerunOf = j => (S.jobItems[j.id] || []).find(w => w.source_job_id === j.id && w.new_job_id);
+  const suggestedFor = j => (S.jobItems[j.id] || []).find(w => w.source_job_id === j.id && w.status === 'suggested');
 
   M.addJobAction({
     id: 's4-recovery-wait',
@@ -152,6 +153,15 @@
     when: j => j.status !== 'RUNNING' && !!waitingFor(j),
     label: () => '✕ ' + t('s4bCancel'),
     run: j => { const w = waitingFor(j); if (w) cancelItem(w); },
+  });
+  M.addJobAction({
+    id: 's4-recovery-suggested',
+    when: j => j.status !== 'RUNNING' && !waitingFor(j) && !!suggestedFor(j),
+    label: j => {
+      const s = suggestedFor(j);
+      return '↪ ' + (s.fallback_agent ? t('s4bWith', { agent: agentLabel(s.fallback_agent) }) : t('s4bRunNow'));
+    },
+    run: j => { const s = suggestedFor(j); if (s) runNow(s, s.fallback_agent || undefined); },
   });
   M.addJobAction({
     id: 's4-recovery-rerun',
