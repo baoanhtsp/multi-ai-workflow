@@ -886,3 +886,231 @@ test('Codex Review #4 Item 3: items.json store-level lock with withItemsLock', a
     cleanup();
   }
 });
+
+test('Codex Review #5 Item 1: stale-lock TOCTOU protection restores live lock if swapped before rename', () => {
+  const { paths, cleanup } = createTempTestPaths();
+  const dataDir = paths.featureDataDir('inbox');
+  fs.mkdirSync(dataDir, { recursive: true });
+  const lockFile = path.join(dataDir, 'items.lock');
+
+  try {
+    // Write dead PID lock
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: 999999, ts: 1000 }) + '\n', 'utf8');
+
+    // Simulate TOCTOU swap: right before fs.renameSync runs in withItemsLock,
+    // another process swapped the dead PID lock with a live PID lock.
+    const origRenameSync = fs.renameSync;
+    let swapSimulated = false;
+    (fs as any).renameSync = (oldPath: string, newPath: string) => {
+      if (String(oldPath).includes('items.lock') && !swapSimulated) {
+        swapSimulated = true;
+        // Swap file content with a live lock just before rename
+        fs.writeFileSync(oldPath, JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n', 'utf8');
+      }
+      return origRenameSync(oldPath, newPath);
+    };
+
+    try {
+      // Calling addInboxItem triggers withItemsLock.
+      // It judges the lock stale based on { pid: 999999 }, then renames it.
+      // After rename, it inspects the renamed file, sees it was swapped to process.pid,
+      // puts it back via fs.linkSync, and does NOT unlink it.
+      // Then it retries 'wx' acquisition and fails with 503 because the live lock survives!
+      assert.throws(
+        () => {
+          addInboxItem(paths, {
+            kind: 'failed',
+            title: 'Should fail because live lock was restored',
+          });
+        },
+        (err: any) => err.statusCode === 503 && err.message.includes('Inbox is busy')
+      );
+
+      // Verify the live lock survived on disk!
+      assert.equal(fs.existsSync(lockFile), true, 'Live lock must survive on disk');
+      const liveData = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+      assert.equal(liveData.pid, process.pid, 'Live lock must be owned by process.pid');
+    } finally {
+      fs.renameSync = origRenameSync;
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #5 Item 2: job started but store update fails keeps claim and reconciles later (retry and reply)', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+
+  let startedJobId = '';
+  ctx.startJob = async () => {
+    startedJobId = 'job_started_review5_' + Math.random().toString(36).slice(2);
+    return { ok: true, job_id: startedJobId };
+  };
+
+  const dataDir = paths.featureDataDir('inbox');
+  fs.mkdirSync(dataDir, { recursive: true });
+  const lockFile = path.join(dataDir, 'items.lock');
+
+  try {
+    // --- 1. Test RETRY ---
+    const { item: retryItem } = addInboxItem(paths, {
+      kind: 'failed',
+      title: 'Retry pending store update test',
+      actions: ['retry', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Fix server',
+      },
+    });
+
+    // Hold items.lock with live process PID to force store updates to fail (503)
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n', 'utf8');
+
+    // performInboxAction on retry: startJob succeeds, store update retries and fails,
+    // claim file is KEPT and pending_store_update is returned!
+    const resRetry = await performInboxAction(ctx, retryItem.id, 'retry', undefined, 'ui');
+    assert.equal(resRetry.ok, true);
+    assert.equal(resRetry.job_id, startedJobId);
+    assert.equal(resRetry.pending_store_update, true);
+
+    // Verify claim file is kept on disk and records resolution with job_id
+    const claimFile = path.join(paths.featureDataDir('inbox'), 'claims', `${retryItem.id}.lock`);
+    assert.equal(fs.existsSync(claimFile), true, 'Claim file must be kept');
+    const claimData = JSON.parse(fs.readFileSync(claimFile, 'utf8'));
+    assert.equal(claimData.resolution?.job_id, startedJobId);
+    assert.equal(claimData.resolution?.action, 'retry');
+
+    // Now release items.lock
+    fs.unlinkSync(lockFile);
+
+    // Reconcile via later action or get:
+    // A later action should apply the pending resolution, remove claim, and throw 409
+    await assert.rejects(
+      async () => await performInboxAction(ctx, retryItem.id, 'dismiss', undefined, 'ui'),
+      (err: any) => err.statusCode === 409 && err.message.includes('already resolved')
+    );
+    assert.equal(fs.existsSync(claimFile), false, 'Claim file must be unlinked after reconciliation');
+    const updatedRetryItem = getInboxItem(paths, retryItem.id);
+    assert.equal(updatedRetryItem?.status, 'done');
+    assert.equal(updatedRetryItem?.resolution?.job_id, startedJobId);
+
+    // --- 2. Test REPLY ---
+    const { item: replyItem } = addInboxItem(paths, {
+      kind: 'needs_input',
+      title: 'Reply pending store update test',
+      actions: ['reply', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'architect',
+        prompt: 'Provide clarification',
+      },
+    });
+
+    // Hold items.lock again
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n', 'utf8');
+
+    const resReply = await performInboxAction(ctx, replyItem.id, 'reply', 'Here is the answer', 'ui');
+    assert.equal(resReply.ok, true);
+    assert.equal(resReply.pending_store_update, true);
+    assert.equal(resReply.job_id, startedJobId);
+
+    // Claim file kept
+    const replyClaimFile = path.join(paths.featureDataDir('inbox'), 'claims', `${replyItem.id}.lock`);
+    assert.equal(fs.existsSync(replyClaimFile), true, 'Reply claim file must be kept');
+    const replyClaimData = JSON.parse(fs.readFileSync(replyClaimFile, 'utf8'));
+    assert.equal(replyClaimData.resolution?.job_id, startedJobId);
+    assert.equal(replyClaimData.resolution?.text, 'Here is the answer');
+
+    // Release items.lock
+    fs.unlinkSync(lockFile);
+
+    // Reconcile via runJobScanner
+    await runJobScanner(paths);
+    assert.equal(fs.existsSync(replyClaimFile), false, 'Reply claim file must be removed by scanner');
+    const updatedReplyItem = getInboxItem(paths, replyItem.id);
+    assert.equal(updatedReplyItem?.status, 'done', 'Item must be reconciled as done, never rolled back to open');
+    assert.equal(updatedReplyItem?.resolution?.job_id, startedJobId);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #5 Item 3: scanner deletes tracker only after store write succeeds and retries on 503', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  fs.mkdirSync(paths.jobsDir, { recursive: true });
+
+  const jobId = 'job_scan_tracker_5';
+  const metaPath = path.join(paths.jobsDir, `${jobId}.json`);
+  const logPath = path.join(paths.jobsDir, `${jobId}.log`);
+
+  try {
+    // 1. Initial RUNNING job with log waiting for input
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify({
+        job_id: jobId,
+        agent: 'claude',
+        mode: 'task',
+        role: 'backend',
+        status: 'RUNNING',
+      }),
+      'utf8'
+    );
+    fs.writeFileSync(logPath, 'Waiting for your input?\n', 'utf8');
+
+    const { item } = addInboxItem(paths, {
+      kind: 'needs_input',
+      title: 'Waiting for answer',
+      job_id: jobId,
+      actions: ['reply', 'dismiss'],
+    });
+
+    // First scan while RUNNING establishes the tracker
+    await runJobScanner(paths);
+
+    // 2. Now job transitions to DONE
+    fs.writeFileSync(
+      metaPath,
+      JSON.stringify({
+        job_id: jobId,
+        agent: 'claude',
+        mode: 'task',
+        role: 'backend',
+        status: 'DONE',
+        exit_code: 0,
+      }),
+      'utf8'
+    );
+
+    // Hold items.lock with live PID so scanner encounters 503
+    const dataDir = paths.featureDataDir('inbox');
+    fs.mkdirSync(dataDir, { recursive: true });
+    const lockFile = path.join(dataDir, 'items.lock');
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n', 'utf8');
+
+    // Run scanner: withItemsLock will time out (503).
+    // Scanner must catch 503 and NOT delete the runningTracker!
+    await runJobScanner(paths);
+
+    // Verify item is STILL open because lock timed out
+    const openData = JSON.parse(fs.readFileSync(path.join(dataDir, 'items.json'), 'utf8'));
+    const pendingItem = openData.items.find((it: any) => it.id === item.id);
+    assert.equal(pendingItem?.status, 'open', 'Item must remain open after 503');
+
+    // Release lock
+    fs.unlinkSync(lockFile);
+
+    // Run scanner again: tracker was preserved, so store write succeeds!
+    await runJobScanner(paths);
+
+    const resolvedData = JSON.parse(fs.readFileSync(path.join(dataDir, 'items.json'), 'utf8'));
+    const doneItem = resolvedData.items.find((it: any) => it.id === item.id);
+    assert.equal(doneItem?.status, 'done', 'Item must be resolved to done after lock released');
+  } finally {
+    cleanup();
+  }
+});

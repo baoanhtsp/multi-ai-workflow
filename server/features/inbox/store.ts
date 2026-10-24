@@ -198,10 +198,15 @@ export function withItemsLock<T>(paths: ServerPaths, fn: () => T): T {
       if (err?.code === 'EEXIST') {
         // Check if stale (stale only when pid is dead, or corrupt/unreadable > 10m)
         let isStale = false;
+        let judgedPid: number | undefined;
+        let judgedTs: number | undefined;
+        let judgedRaw: string | undefined;
         try {
-          const raw = fs.readFileSync(lockFile, 'utf8');
-          const parsed = JSON.parse(raw);
+          judgedRaw = fs.readFileSync(lockFile, 'utf8');
+          const parsed = JSON.parse(judgedRaw);
           const pid = Number(parsed?.pid);
+          judgedPid = pid;
+          judgedTs = Number(parsed?.ts);
           if (pid > 0) {
             if (!isProcessRunning(pid)) {
               isStale = true;
@@ -227,10 +232,42 @@ export function withItemsLock<T>(paths: ServerPaths, fn: () => T): T {
           const staleFile = `${lockFile}.stale.${Date.now()}.${Math.random().toString(36).slice(2)}`;
           try {
             fs.renameSync(lockFile, staleFile);
+
+            // Stale-lock TOCTOU protection (Codex Review #5 Item 1):
+            // Between judging stale and renaming, another process may have replaced the file
+            // with a live lock. After renaming, read the renamed file: if its pid/ts differ
+            // from what was judged stale (i.e. it is someone's fresh lock), put it back
+            // with fs.linkSync(staleFile, lockFile) (fails if a new lock already exists — then leave it)
+            // and unlink the stale name only when it really was the stale one; then retry.
+            let isSameAsJudged = false;
             try {
-              fs.unlinkSync(staleFile);
+              const checkRaw = fs.readFileSync(staleFile, 'utf8');
+              const checkParsed = JSON.parse(checkRaw);
+              if (judgedPid !== undefined && judgedTs !== undefined) {
+                isSameAsJudged = checkParsed?.pid === judgedPid && checkParsed?.ts === judgedTs;
+              } else if (judgedRaw !== undefined) {
+                isSameAsJudged = checkRaw === judgedRaw;
+              } else {
+                const stat = fs.statSync(staleFile);
+                isSameAsJudged = Date.now() - stat.mtimeMs > 600_000;
+              }
             } catch {
-              // ignore
+              isSameAsJudged = (judgedPid === undefined);
+            }
+
+            if (isSameAsJudged) {
+              try {
+                fs.unlinkSync(staleFile);
+              } catch {
+                // ignore
+              }
+            } else {
+              // File was replaced by a fresh lock before rename! Restore it.
+              try {
+                fs.linkSync(staleFile, lockFile);
+              } catch {
+                // Fails if a new lock already exists — then leave it
+              }
             }
             continue;
           } catch {

@@ -5,6 +5,7 @@ import type { ServerPaths } from '../../lib/paths.ts';
 import { isDirectorySafe, isFileSafe } from '../../lib/paths.ts';
 import { AUTH_PATTERNS, RATE_PATTERNS, classifyLog } from '../health/patterns.ts';
 import { redactSecrets } from '../health/probes.ts';
+import { reconcilePendingClaims } from './actions.ts';
 import {
   addInboxItem,
   readInboxData,
@@ -136,6 +137,9 @@ const INPUT_PROMPT_REGEX =
   /(\?|\(y\/n\)|\[y\/N\]|\[Y\/n\]|press enter|waiting for (your )?input|continue\?)\s*$/i;
 
 export async function runJobScanner(paths: ServerPaths): Promise<void> {
+  // First apply any pending claim that records a job_id (Codex Review #5 Item 2)
+  reconcilePendingClaims(paths);
+
   if (!isDirectorySafe(paths.jobsDir)) {
     return;
   }
@@ -237,21 +241,29 @@ export async function runJobScanner(paths: ServerPaths): Promise<void> {
 
     // Job ended: clean up running tracker and resolve any needs_input
     if (runningTrackers.has(jobId)) {
-      runningTrackers.delete(jobId);
-      withItemsLock(paths, () => {
-        const inboxData = readInboxData(paths);
-        let changed = false;
-        for (const item of inboxData.items) {
-          if (item.job_id === jobId && item.kind === 'needs_input' && item.status === 'open') {
-            item.status = 'done';
-            item.updated_at = new Date().toISOString();
-            changed = true;
+      try {
+        withItemsLock(paths, () => {
+          const inboxData = readInboxData(paths);
+          let changed = false;
+          for (const item of inboxData.items) {
+            if (item.job_id === jobId && item.kind === 'needs_input' && item.status === 'open') {
+              item.status = 'done';
+              item.updated_at = new Date().toISOString();
+              changed = true;
+            }
           }
+          if (changed) {
+            writeInboxData(paths, inboxData);
+          }
+        });
+        // Delete tracker only after store write succeeded (Codex Review #5 Item 3)
+        runningTrackers.delete(jobId);
+      } catch (err: any) {
+        if (err?.statusCode !== 503) {
+          throw err;
         }
-        if (changed) {
-          writeInboxData(paths, inboxData);
-        }
-      });
+        // Lock busy (503): tracker remains in runningTrackers so next tick retries
+      }
     }
 
     // A job that becomes DONE auto-resolves older inbox items for that job (Item 13: memoized)
@@ -261,21 +273,28 @@ export async function runJobScanner(paths: ServerPaths): Promise<void> {
       if (memo && memo.status === 'DONE') {
         continue;
       }
-      withItemsLock(paths, () => {
-        const inboxData = readInboxData(paths);
-        let changed = false;
-        for (const item of inboxData.items) {
-          if (item.job_id === jobId && item.status === 'open') {
-            item.status = 'done';
-            item.updated_at = new Date().toISOString();
-            changed = true;
+      try {
+        withItemsLock(paths, () => {
+          const inboxData = readInboxData(paths);
+          let changed = false;
+          for (const item of inboxData.items) {
+            if (item.job_id === jobId && item.status === 'open') {
+              item.status = 'done';
+              item.updated_at = new Date().toISOString();
+              changed = true;
+            }
           }
+          if (changed) {
+            writeInboxData(paths, inboxData);
+          }
+        });
+        memoMap.set(jobId, { status: 'DONE', logSize, lastScannedAt: now });
+      } catch (err: any) {
+        if (err?.statusCode !== 503) {
+          throw err;
         }
-        if (changed) {
-          writeInboxData(paths, inboxData);
-        }
-      });
-      memoMap.set(jobId, { status: 'DONE', logSize, lastScannedAt: now });
+        // Lock busy: memo is not set so next tick retries
+      }
       continue;
     }
 
