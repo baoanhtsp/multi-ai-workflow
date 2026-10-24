@@ -14,7 +14,7 @@ description: >-
   - Scan the workspace, read existing files/database schemas, and prepare ultra-compact context summaries (`SPEC.md`) so Claude and Codex NEVER waste tokens running `Grep`, `Glob`, or exploring the repo.
   - Write **Backend, API, Database, Core Logic, and Automated Tests** (using parallel Subagents on separate branches when appropriate).
   - **NEVER write or edit Frontend files yourself** (`*.html`, `*.css`, frontend `*.js`/`*.jsx`/`*.tsx`/`*.vue`/`*.blade.php`/`*.ejs`). **100% of Frontend MUST be delegated to Claude Code** (`-Role frontend` or `-Role ui-tweak`).
-  - Merge branches, run tests, and submit diffs to Claude (`-Role reviewer`) and/or Codex (`-Role review-diff` / `-Role critic`) for grading and bug hunting before committing (`git commit`).
+  - **Automatic Callback & Review Submission**: As soon as you finish Backend/Test tasks (including when woken up by `"Task from Claude Leader"`), automatically notify Claude and submit your `git diff` + test logs via `invoke-claude.ps1 -Role reviewer -IncludeGitDiff` (add `-ContinueSession` to push your report directly into the latest Claude conversation in that project directory) and/or Codex (`-Role review-diff` / `-Role critic`) for grading (`X/10`) before committing (`git commit`).
 
 - **Claude Code (`claude.exe` - Tech Lead, Reviewer & 100% Frontend)**:
   - **Opus (`architect` role)**: Designs overall architecture, Database/API Contracts (`SPEC.md`), delegates Backend tasks, and defines the Frontend Design System.
@@ -33,7 +33,7 @@ description: >-
 
 ### A. Calling Claude Code ([invoke-claude.ps1](./scripts/invoke-claude.ps1))
 
-> **Tip**: Pass `-IncludeGitDiff` or `-PromptFile "<path>"` when sending code/diffs so PowerShell does not interpolate `$variables` in PHP/JS/Bash snippets.
+> **Tip**: Pass `-IncludeGitDiff` or `-PromptFile "<path>"` when sending code/diffs so PowerShell does not interpolate `$variables` in PHP/JS/Bash snippets. Add `-ContinueSession` to push a completion report straight into the latest Claude conversation in `$WorkDir`.
 
 ```powershell
 # 1. Standard architecture / frontend delegation:
@@ -42,12 +42,14 @@ description: >-
   -WorkDir "<project_path>" `
   -Prompt "<compact_prompt_with_precollected_context>"
 
-# 2. Safe Code Review with automatic git diff piping (avoids PowerShell $ variable interpolation):
+# 2. Safe Code Review / Completion Callback with automatic git diff piping:
+#    Add -ContinueSession to append directly to the most recent Claude session in <project_path>
 & "$env:USERPROFILE\.gemini\config\skills\claude-leader\scripts\invoke-claude.ps1" `
   -Role "reviewer" `
   -WorkDir "<project_path>" `
   -IncludeGitDiff `
-  -Prompt "Review Backend changes against SPEC.md and score X/10."
+  -ContinueSession `
+  -Prompt "Backend & Tests completed. Please review the changes against SPEC.md and score X/10."
 
 # 3. Passing a large prompt from a file:
 & "$env:USERPROFILE\.gemini\config\skills\claude-leader\scripts\invoke-claude.ps1" `
@@ -91,7 +93,7 @@ description: >-
 2. **Parallel Implementation by File Boundaries**:
    - **Backend/Core**: Antigravity (or parallel Subagents / Codex `-Role coder`) implements Backend/API/DB/Tests on isolated branches.
    - **100% Frontend**: Claude (`invoke-claude.ps1 -Role frontend` or `ui-tweak`) implements all UI/Frontend files.
-3. **Bounded Review Loop (Max 2 Rounds)**:
+3. **Bounded Review Loop & Automatic Callback (Max 2 Rounds)**:
    - Run automated tests first.
-   - Submit `git diff` + test logs to Claude (`invoke-claude.ps1 -Role reviewer -IncludeGitDiff`) and/or Codex (`invoke-codex.ps1 -Role review-diff` / `critic`).
+   - Submit `git diff` + test logs to Claude (`invoke-claude.ps1 -Role reviewer -IncludeGitDiff`, optionally with `-ContinueSession`) and/or Codex (`invoke-codex.ps1 -Role review-diff` / `critic`).
    - Fix all blocking findings until `APPROVED`, then merge branches and `git commit`.

@@ -29,5 +29,7 @@ Chỉ khi người dùng **chủ động yêu cầu** bằng cách gõ lệnh `/
     - `-Role review-diff` / `-Role critic`: Chấm chéo `git diff`, kiểm tra lỗ hổng bảo mật, race-condition và logic thuật toán độc lập.
     - `-Role coder`: Hỗ trợ viết thuật toán phức tạp hoặc viết Unit/Integration Test trên nhánh `git worktree` riêng.
   - **Antigravity (Bạn)**: **Thợ code chính (Backend/Core Developer)**, **Điều phối viên nhánh** và **Bộ lọc Context**. Trong chế độ này, bạn **TUYỆT ĐỐI KHÔNG tự viết hoặc sửa file Frontend** — 100% Frontend phải giao cho Claude Code.
+- **Tự động Báo cáo & Chấm điểm với Claude sau khi làm xong**:
+  - Ngay khi bạn hoàn tất phần Backend/Test (hoặc khi nhận được yêu cầu `"Task from Claude Leader"` từ Claude gửi sang), bạn **luôn chủ động thông báo và nộp kết quả ngược lại cho Claude** bằng lệnh `invoke-claude.ps1 -Role reviewer -WorkDir "<project_path>" -IncludeGitDiff` (kèm `-ContinueSession` nếu muốn đẩy báo cáo nối tiếp thẳng vào phiên hội thoại gần nhất của Claude tại thư mục dự án đó) để nhận điểm chấm (`X/10`) và sửa lỗi cho đến khi đạt `APPROVED`.
 - **Sau khi hoàn tất mỗi vòng**: Luôn gộp nhánh và `git commit` lại toàn bộ thay đổi đã được duyệt.
 - **Chi tiết quy trình**: Xem `C:\Users\Admin\.gemini\config\skills\claude-leader\SKILL.md`.

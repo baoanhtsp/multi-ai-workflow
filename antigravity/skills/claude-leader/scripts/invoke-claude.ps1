@@ -10,6 +10,8 @@ param(
 
     [switch]$IncludeGitDiff,
 
+    [switch]$ContinueSession,
+
     [string]$WorkDir = (Get-Location).Path,
 
     [string]$ModelOverride = "",
@@ -82,6 +84,8 @@ $commonFlags = @(
     "--exclude-dynamic-system-prompt-sections"
 )
 
+$sessionFlag = if ($ContinueSession) { "--continue" } else { "--no-session-persistence" }
+
 switch ($Role) {
     "architect" {
         # Opus: Pure architecture, API contract, task delegation & UI design system seed (No tool overhead)
@@ -92,7 +96,7 @@ switch ($Role) {
             "--effort", $effort,
             "--tools", "",
             "--append-system-prompt", "CRITICAL: All tools are disabled in this session to save tokens. Do NOT output <invoke> or attempt to call any tools (no Read, Grep, Glob, Bash). Provide your complete response directly based solely on the user prompt.",
-            "--no-session-persistence"
+            $sessionFlag
         )
     }
     "frontend" {
@@ -107,7 +111,7 @@ switch ($Role) {
             "--append-system-prompt", "CRITICAL: Only Read, Edit, and Write tools are enabled. Do NOT use Grep, Glob, or Bash. Work only on the exact file paths specified in the prompt.",
             "--permission-mode", "bypassPermissions",
             "--dangerously-skip-permissions",
-            "--no-session-persistence"
+            $sessionFlag
         )
     }
     "reviewer" {
@@ -119,7 +123,7 @@ switch ($Role) {
             "--effort", $effort,
             "--tools", "",
             "--append-system-prompt", "CRITICAL: All tools are disabled in this session to save tokens. Do NOT output <invoke> or attempt to call any tools (no Read, Grep, Glob, Bash). Grade and review directly using ONLY the code/diff provided in the prompt.",
-            "--no-session-persistence"
+            $sessionFlag
         )
     }
     "ui-tweak" {
@@ -134,7 +138,7 @@ switch ($Role) {
             "--append-system-prompt", "CRITICAL: Only Read, Edit, and Write tools are enabled. Do NOT use Grep, Glob, or Bash. Work only on the exact file paths specified in the prompt.",
             "--permission-mode", "bypassPermissions",
             "--dangerously-skip-permissions",
-            "--no-session-persistence"
+            $sessionFlag
         )
     }
 }
