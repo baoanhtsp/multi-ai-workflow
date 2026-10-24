@@ -5,3 +5,4 @@ Thumbs.db
 *.bak-*
 testResults.xml
 SESSION_MEMORY.md
+node_modules/

@@ -728,7 +728,8 @@
 <div id="toasts" class="toasts" aria-live="polite"></div>
 
 <script>
-const API = 'api.php';
+// Node server (v3) serves the page at / and the API at /api; the old PHP page lived under /dashboard/.
+const API = /\/dashboard\//.test(location.pathname) ? 'api.php' : 'api';
 const IS_FILE = location.protocol === 'file:';
 const PROMPT_MAX = 20000;
 const $ = id => document.getElementById(id);
@@ -938,7 +939,7 @@ const I18N = {
     dispatched: 'đã gửi',
     cmdOnly: 'chỉ tạo lệnh',
     noOutput: '(không có kết quả)',
-    noDirect: 'Không thể chạy (backend không khả dụng).',
+    noDirect: 'Không thể chạy: server chưa bật. Chạy start-dashboard.ps1 rồi mở http://127.0.0.1:4317/.',
     offlineCmd: 'ngoại tuyến · lệnh dựng cục bộ',
     cmdOk: 'Đã tạo lệnh PowerShell.',
     copyOk: 'Đã sao chép lệnh.',
@@ -1163,7 +1164,7 @@ const I18N = {
     dispatched: 'dispatched',
     cmdOnly: 'command only',
     noOutput: '(no output)',
-    noDirect: 'Cannot run (backend unavailable).',
+    noDirect: 'Cannot run: the server is not running. Run start-dashboard.ps1, then open http://127.0.0.1:4317/.',
     offlineCmd: 'offline · built locally',
     cmdOk: 'PowerShell command generated.',
     copyOk: 'Command copied.',
@@ -1970,18 +1971,71 @@ function exitInfo(j) {
 
 function stopJobPoll() {
   if (state.job?.timer) { clearInterval(state.job.timer); state.job.timer = null; }
+  if (state.job?.es) { state.job.es.close(); state.job.es = null; }
+}
+
+function appendJobLog(chunk) {
+  if (!chunk) return;
+  const pre = $('liveJobLog');
+  const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24;
+  pre.textContent += chunk;
+  if (pre.textContent.length > 300000) pre.textContent = pre.textContent.slice(-200000);
+  if (stick) pre.scrollTop = pre.scrollHeight;
+}
+
+function startJobPolling(j) {
+  pollJob();
+  j.timer = setInterval(pollJob, 1500);
+}
+
+// SSE log stream (SPEC §3.11). Any stream error drops back to job_status polling from the
+// current offset — EventSource's own reconnect would replay the log from the original offset.
+function startJobStream(j) {
+  const es = new EventSource(`${API}?action=job_stream&job_id=${encodeURIComponent(j.id)}&offset=${j.offset}`);
+  j.es = es;
+  // The stream only reports status changes, so the elapsed counter ticks locally in between.
+  let t0 = Date.now() - j.elapsed * 1000;
+  j.timer = setInterval(() => {
+    if (state.job !== j || j.status !== 'RUNNING') return;
+    j.elapsed = Math.floor((Date.now() - t0) / 1000);
+    renderJobHead();
+  }, 1000);
+  const parse = ev => { try { return JSON.parse(ev.data); } catch { return null; } };
+  es.addEventListener('log', ev => {
+    const d = parse(ev);
+    if (state.job !== j || !d) return;
+    appendJobLog(d.chunk);
+    if (d.next_offset != null) j.offset = d.next_offset;
+  });
+  es.addEventListener('status', ev => {
+    const d = parse(ev);
+    if (state.job !== j || !d) return;
+    j.status = String(d.status || 'RUNNING').toUpperCase();
+    if ('exit_code' in d) j.exitCode = d.exit_code;
+    if (d.elapsed_sec != null) { j.elapsed = d.elapsed_sec; t0 = Date.now() - j.elapsed * 1000; }
+    renderJobHead();
+    if (JOB_END.includes(j.status)) { es.close(); j.es = null; finishJob(j); }
+  });
+  es.onerror = () => {
+    if (state.job !== j || j.es !== es) return;
+    es.close();
+    j.es = null;
+    clearInterval(j.timer);
+    j.timer = null;
+    if (j.status === 'RUNNING') startJobPolling(j);
+  };
 }
 
 function startJob(r) {
   stopJobPoll();
-  state.job = { id: r.job_id, pid: r.pid || 0, status: 'RUNNING', exitCode: undefined, offset: 0, elapsed: 0, timer: null, busy: false, fails: 0 };
+  state.job = { id: r.job_id, pid: r.pid || 0, status: 'RUNNING', exitCode: undefined, offset: 0, elapsed: 0, timer: null, es: null, busy: false, fails: 0 };
   $('liveJobBox').classList.remove('hidden');
   $('liveJobLog').textContent = '';
   $('cancelJobBtn').disabled = false;
   setRunBusy(true);
   renderJobHead();
-  pollJob();
-  state.job.timer = setInterval(pollJob, 1500);
+  if (typeof EventSource === 'function' && state.data?.features?.includes('sse')) startJobStream(state.job);
+  else startJobPolling(state.job);
 }
 
 async function pollJob() {
@@ -1997,13 +2051,7 @@ async function pollJob() {
     j.status = String(r.status || 'RUNNING').toUpperCase();
     if ('exit_code' in r) j.exitCode = r.exit_code;
     j.offset = r.next_offset ?? j.offset;
-    if (r.log_chunk) {
-      const pre = $('liveJobLog');
-      const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 24;
-      pre.textContent += r.log_chunk;
-      if (pre.textContent.length > 300000) pre.textContent = pre.textContent.slice(-200000);
-      if (stick) pre.scrollTop = pre.scrollHeight;
-    }
+    appendJobLog(r.log_chunk);
     renderJobHead();
     if (JOB_END.includes(j.status)) finishJob(j);
   } catch (e) {
@@ -2055,10 +2103,10 @@ async function cancelJob() {
   try {
     await api('cancel_job', { job_id: j.id });
     toast(t('jobCancelled'), 'warn');
-    pollJob();
+    if (!j.es) pollJob();  // with SSE the stream delivers the CANCELLED status itself
   } catch (e) {
     // 409: the job already ended on its own — just pick up its final status.
-    if (e.status === 409) { toast(e.message, 'info'); pollJob(); return; }
+    if (e.status === 409) { toast(e.message, 'info'); if (!j.es) pollJob(); return; }
     $('cancelJobBtn').disabled = false;
     toast(e.message, 'err');
   }

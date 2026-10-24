@@ -1,4 +1,4 @@
-name: PowerShell Syntax, Pester & API Smoke CI
+name: Node 24 TypeScript, PowerShell AST, Pester & API Smoke CI
 
 on:
   push:
@@ -12,25 +12,35 @@ on:
 
 jobs:
   validate-and-test:
-    name: Validate PowerShell AST, Installer, Pester 5 & API Smoke Tests
+    name: Validate Node 24 TS Server, PowerShell AST, Installer, Pester 5 & API Smoke Tests
     runs-on: windows-latest
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup PHP 8.3
-        if: env.PHP_INSTALLED != 'true'
-        uses: shivammathur/setup-php@v2
+      - name: Setup Node.js 24 LTS
+        uses: actions/setup-node@v4
         with:
-          php-version: '8.3'
-          coverage: none
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Install Dev Dependencies, Typecheck & Run Node Unit Tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          npm ci
+          if ($LASTEXITCODE -ne 0) { throw "npm ci failed with exit code $LASTEXITCODE" }
+          npm run typecheck
+          if ($LASTEXITCODE -ne 0) { throw "npm run typecheck failed with exit code $LASTEXITCODE" }
+          npm test
+          if ($LASTEXITCODE -ne 0) { throw "npm test failed with exit code $LASTEXITCODE" }
 
       - name: Validate PowerShell Scripts Syntax
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $scripts = Get-ChildItem -Path . -Recurse -Filter "*.ps1" -File
+          $scripts = Get-ChildItem -Path . -Recurse -Filter "*.ps1" -File | Where-Object { $_.FullName -notmatch '\\node_modules\\' }
           if (-not $scripts) {
               throw "No PowerShell (*.ps1) scripts found in repository."
           }
@@ -61,8 +71,13 @@ jobs:
           $requiredFiles = @(
               "README.md",
               "LICENSE",
+              "package.json",
+              "tsconfig.json",
               "install.ps1",
               "doctor.ps1",
+              "start-dashboard.ps1",
+              "server/main.ts",
+              "server/http.ts",
               "templates/SPEC.template.md",
               "antigravity/rules/claude-leader-workflow.md",
               "antigravity/skills/claude-leader/SKILL.md",
@@ -80,7 +95,6 @@ jobs:
               "codex/skills/multi-ai-leader/SKILL.md",
               "codex/skills/multi-ai-leader/agents/openai.yaml",
               "dashboard/index.html",
-              "dashboard/api.php",
               "tests/MawCommon.Tests.ps1",
               "tests/SpecGuard.Tests.ps1",
               "tests/InvokeAgent.Tests.ps1",
@@ -113,6 +127,7 @@ jobs:
           $installedFiles = @(
               "$env:USERPROFILE\.gemini\config\skills\claude-leader\SKILL.md",
               "$env:USERPROFILE\.gemini\config\skills\claude-leader\scripts\lib\maw-common.ps1",
+              "$env:USERPROFILE\.gemini\config\skills\claude-leader\scripts\start-dashboard.ps1",
               "$env:USERPROFILE\.claude\CLAUDE.md",
               "$env:USERPROFILE\.codex\AGENTS.md",
               "$env:USERPROFILE\.codex\skills\multi-ai-leader\SKILL.md"
@@ -136,7 +151,7 @@ jobs:
           Import-Module Pester -MinimumVersion 5.5 -Force
           Invoke-Pester -Path .\tests -CI
 
-      - name: Run PHP Backend API Smoke Tests
+      - name: Run Node.js Backend API Smoke Tests
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'

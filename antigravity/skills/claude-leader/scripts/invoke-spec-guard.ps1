@@ -401,6 +401,9 @@ try {
                 Write-Output "  [FAIL] $v"
             }
         }
+        if ($verdict -eq "FAIL") {
+            exit 1
+        }
     }
 } finally {
     Pop-Location

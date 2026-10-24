@@ -5,22 +5,14 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Net.Http
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$dashboardDir = Join-Path $repoRoot "dashboard"
+$serverMain = Join-Path $repoRoot "server\main.ts"
 
-$phpCmd = Get-Command php -ErrorAction SilentlyContinue
-if ($phpCmd) {
-    $phpExe = $phpCmd.Source
-} else {
-    $laragonPhp = Get-ChildItem -Path "C:\laragon\bin\php\*\php.exe" -ErrorAction SilentlyContinue |
-        Sort-Object FullName -Descending |
-        Select-Object -First 1
-    if ($laragonPhp) {
-        $phpExe = $laragonPhp.FullName
-    } else {
-        Write-Error "Could not locate php.exe in PATH or C:\laragon\bin\php\*\php.exe"
-        exit 1
-    }
+$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+if (-not $nodeCmd) {
+    Write-Error "Could not locate node.exe in PATH"
+    exit 1
 }
+$nodeExe = $nodeCmd.Source
 
 $origTmp  = $env:TMP
 $origTemp = $env:TEMP
@@ -29,17 +21,34 @@ $spaceTempDir = Join-Path $baseTemp ("maw smoke space " + [guid]::NewGuid().ToSt
 New-Item -ItemType Directory -Path $spaceTempDir -Force | Out-Null
 
 $port = Get-Random -Minimum 18100 -Maximum 18999
-$baseUrl = "http://127.0.0.1:$port/api.php"
+$rootUrl = "http://127.0.0.1:$port"
+$baseUrl = "http://127.0.0.1:$port/api"
 
-Write-Host "[api-smoke] Starting PHP built-in server using $phpExe on 127.0.0.1:$port (TMP='$spaceTempDir')..." -ForegroundColor Cyan
-$env:TMP  = $spaceTempDir
-$env:TEMP = $spaceTempDir
-$serverProc = Start-Process -FilePath $phpExe -ArgumentList @("-S", "127.0.0.1:$port", "-t", $dashboardDir) -PassThru -WindowStyle Hidden
-$env:TMP  = $origTmp
-$env:TEMP = $origTemp
+function Start-SmokeNodeServer {
+    param(
+        [string]$ProjectsRootArg = ""
+    )
+    $env:TMP  = $spaceTempDir
+    $env:TEMP = $spaceTempDir
+    try {
+        $qMain = if ($serverMain -match '\s') { '"' + $serverMain + '"' } else { $serverMain }
+        $argList = @($qMain, "--port", "$port")
+        if ($ProjectsRootArg) {
+            $qRoot = if ($ProjectsRootArg -match '\s') { '"' + $ProjectsRootArg + '"' } else { $ProjectsRootArg }
+            $argList += @("--projects-root", $qRoot)
+        }
+        return Start-Process -FilePath $nodeExe -ArgumentList $argList -WorkingDirectory $repoRoot -PassThru -WindowStyle Hidden
+    } finally {
+        $env:TMP  = $origTmp
+        $env:TEMP = $origTemp
+    }
+}
+
+Write-Host "[api-smoke] Starting Node.js v3.0 server using $nodeExe on 127.0.0.1:$port (TMP='$spaceTempDir')..." -ForegroundColor Cyan
+$serverProc = Start-SmokeNodeServer
 
 $httpClient = New-Object System.Net.Http.HttpClient
-$httpClient.Timeout = [TimeSpan]::FromSeconds(15)
+$httpClient.Timeout = [TimeSpan]::FromSeconds(25)
 
 function Invoke-SmokeRequest {
     param(
@@ -54,7 +63,11 @@ function Invoke-SmokeRequest {
     $req = New-Object System.Net.Http.HttpRequestMessage($httpMethod, $Url)
 
     foreach ($k in $Headers.Keys) {
-        [void]$req.Headers.TryAddWithoutValidation($k, [string]$Headers[$k])
+        if ($k -ieq "Host") {
+            $req.Headers.Host = [string]$Headers[$k]
+        } else {
+            [void]$req.Headers.TryAddWithoutValidation($k, [string]$Headers[$k])
+        }
     }
 
     if ($Method -eq "POST") {
@@ -67,18 +80,25 @@ function Invoke-SmokeRequest {
     $resp = $httpClient.SendAsync($req).GetAwaiter().GetResult()
     $respBody = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
     $code = [int]$resp.StatusCode
+    $respHeaders = @{}
+    foreach ($h in $resp.Headers) {
+        $respHeaders[$h.Key.ToLowerInvariant()] = ($h.Value -join ", ")
+    }
+    foreach ($h in $resp.Content.Headers) {
+        $respHeaders[$h.Key.ToLowerInvariant()] = ($h.Value -join ", ")
+    }
     $resp.Dispose()
     $req.Dispose()
 
     return @{
         StatusCode = $code
+        Headers    = $respHeaders
         Body       = $respBody
     }
 }
 
-try {
-    # Wait for server readiness
-    Start-Sleep -Milliseconds 500
+function Wait-SmokeServerReady {
+    Start-Sleep -Milliseconds 250
     $ready = $false
     $lastErr = ""
     for ($i = 0; $i -lt 30; $i++) {
@@ -92,19 +112,48 @@ try {
         } catch {
             $lastErr = $_.Exception.ToString()
         }
-        Start-Sleep -Milliseconds 250
+        Start-Sleep -Milliseconds 200
     }
     if (-not $ready) {
-        throw "PHP server on 127.0.0.1:$port did not become ready in time. Last error: $lastErr"
+        throw "Node server on 127.0.0.1:$port did not become ready in time. Last error: $lastErr"
     }
+}
 
-    # 1. GET status -> 200, api_version 2.2, features contains 'agents', no raw telegram_bot_token, honest telemetry
+function Invoke-RawTcpPathRequest {
+    param(
+        [int]$Port,
+        [string]$RawPath
+    )
+    $client = New-Object System.Net.Sockets.TcpClient("127.0.0.1", $Port)
+    try {
+        $stream = $client.GetStream()
+        $reqText = "GET $RawPath HTTP/1.1`r`nHost: 127.0.0.1:$Port`r`nConnection: close`r`n`r`n"
+        $reqBytes = [System.Text.Encoding]::ASCII.GetBytes($reqText)
+        $stream.Write($reqBytes, 0, $reqBytes.Length)
+        $stream.Flush()
+        $reader = New-Object System.IO.StreamReader($stream, [System.Text.Encoding]::UTF8)
+        $rawResp = $reader.ReadToEnd()
+        if ($rawResp -match '^HTTP/1\.[01]\s+(\d{3})') {
+            return [int]$Matches[1]
+        }
+        return 0
+    } finally {
+        $client.Close()
+    }
+}
+
+try {
+    Wait-SmokeServerReady
+
+    # 1. GET status -> 200, api_version 3.0, features contains 'agents' and 'sse', tools.node.version present, no raw telegram_bot_token, honest telemetry
     $r1 = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=status"
     if ($r1.StatusCode -ne 200) { throw "Test 1 failed: expected 200, got $($r1.StatusCode)" }
     $j1 = $r1.Body | ConvertFrom-Json
     if (-not $j1.ok) { throw "Test 1 failed: ok is false" }
-    if ($j1.api_version -ne "2.2") { throw "Test 1 failed: expected api_version 2.2, got $($j1.api_version)" }
+    if ($j1.api_version -ne "3.0") { throw "Test 1 failed: expected api_version 3.0, got $($j1.api_version)" }
     if (@($j1.features) -notcontains "agents") { throw "Test 1 failed: status.features does not contain 'agents'" }
+    if (@($j1.features) -notcontains "sse") { throw "Test 1 failed: status.features does not contain 'sse'" }
+    if (-not $j1.tools.node.version) { throw "Test 1 failed: tools.node.version is missing" }
     $notifyProps = @($j1.notify_config.PSObject.Properties.Name)
     if ($notifyProps -contains "telegram_bot_token") {
         throw "Test 1 failed: notify_config leaked raw telegram_bot_token key!"
@@ -119,7 +168,30 @@ try {
     if ($auditProps -notcontains "avg_cost_per_call_usd") {
         throw "Test 1 failed: audit missing avg_cost_per_call_usd!"
     }
-    Write-Host "  [PASS] 1. GET status -> 200, api_version 2.2, features=['agents'], honest telemetry" -ForegroundColor Green
+    Write-Host "  [PASS] 1. GET status -> 200, api_version 3.0, features=['agents','sse'], tools.node, honest telemetry" -ForegroundColor Green
+
+    # 1b. Wrong Host header -> 403 (DNS-rebinding guard, SPEC §3.0 & §6.2)
+    $rHost = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=status" -Headers @{ "Host" = "evil.example.com" }
+    if ($rHost.StatusCode -ne 403) { throw "Test 1b failed: wrong Host header expected 403, got $($rHost.StatusCode)" }
+    Write-Host "  [PASS] 1b. Wrong Host header -> 403 (DNS-rebinding guard)" -ForegroundColor Green
+
+    # 1c. GET / -> 200 dashboard HTML with Content-Security-Policy header (SPEC §3.0 & §6.2)
+    $rIndex = Invoke-SmokeRequest -Method "GET" -Url "${rootUrl}/"
+    if ($rIndex.StatusCode -ne 200) { throw "Test 1c failed: GET / expected 200, got $($rIndex.StatusCode)" }
+    if (-not $rIndex.Headers["content-security-policy"] -or $rIndex.Headers["content-security-policy"] -notmatch "default-src 'self'") {
+        throw "Test 1c failed: missing or invalid Content-Security-Policy header on GET /"
+    }
+    if ($rIndex.Body -notmatch "<!DOCTYPE html>") {
+        throw "Test 1c failed: GET / did not return dashboard HTML"
+    }
+    Write-Host "  [PASS] 1c. GET / -> 200 dashboard HTML + Content-Security-Policy header" -ForegroundColor Green
+
+    # 1d. Path traversal & source protection: GET /../SPEC.md and GET /server/main.ts -> 404 (SPEC §1 & §6.2)
+    $rawTravStatus = Invoke-RawTcpPathRequest -Port $port -RawPath "/../SPEC.md"
+    if ($rawTravStatus -ne 404) { throw "Test 1d failed: raw GET /../SPEC.md expected 404, got $rawTravStatus" }
+    $rServerTs = Invoke-SmokeRequest -Method "GET" -Url "${rootUrl}/server/main.ts"
+    if ($rServerTs.StatusCode -ne 404) { throw "Test 1d failed: GET /server/main.ts expected 404, got $($rServerTs.StatusCode)" }
+    Write-Host "  [PASS] 1d. GET /../SPEC.md and GET /server/main.ts -> 404" -ForegroundColor Green
 
     $validBody = (@{ project_path = $repoRoot } | ConvertTo-Json -Compress)
 
@@ -225,7 +297,7 @@ try {
     if ($r11.StatusCode -ne 400) { throw "Test 11 failed: empty team expected 400, got $($r11.StatusCode)" }
     Write-Host "  [PASS] 11. POST dispatch with empty team -> 400" -ForegroundColor Green
 
-    # 12. R1: Run a real spec-guard job when sys_get_temp_dir() contains a space and verify it reaches DONE with exit_code: 0
+    # 12. C1: Space-path run_job (spec-guard) + SSE job_stream + job_status -> DONE, exit_code: 0, AND real SPEC.md CONTRACT GUARD REPORT in log
     $jobBody = (@{
         mode         = "spec-guard"
         project_path = $repoRoot
@@ -236,28 +308,121 @@ try {
     $jobId = [string]$j12.job_id
     if (-not $jobId) { throw "Test 12 failed: missing job_id" }
 
-    $finalJob = $null
-    for ($poll = 0; $poll -lt 40; $poll++) {
-        Start-Sleep -Milliseconds 300
-        $rj = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=job_status&job_id=$jobId&offset=0"
-        if ($rj.StatusCode -ne 200) {
-            throw "Test 12 failed: job_status returned HTTP $($rj.StatusCode) ($($rj.Body))"
-        }
-        $jj = $rj.Body | ConvertFrom-Json
-        if ($jj.status -in @("DONE", "FAILED", "CANCELLED")) {
-            $finalJob = $jj
-            break
-        }
+    # Consume SSE job_stream until stream closes on terminal status
+    $rStream = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=job_stream&job_id=$jobId&offset=0"
+    if ($rStream.StatusCode -ne 200) {
+        throw "Test 12 failed: job_stream returned HTTP $($rStream.StatusCode) ($($rStream.Body))"
     }
-    if ($null -eq $finalJob) {
-        throw "Test 12 failed: spec-guard job $jobId did not finish within timeout"
+    if ($rStream.Body -notmatch "event: log") {
+        throw "Test 12 failed: job_stream did not emit 'event: log'. Body: $($rStream.Body)"
     }
-    if ($finalJob.status -ne "DONE" -or $finalJob.exit_code -ne 0) {
-        throw "Test 12 failed: expected DONE with exit_code 0 from space-path temp dir '$spaceTempDir', got status=$($finalJob.status) exit_code=$($finalJob.exit_code) log=$($finalJob.log_chunk)"
+    if ($rStream.Body -notmatch "SPEC\.md CONTRACT GUARD REPORT") {
+        throw "Test 12 failed (C1): job_stream log did not contain 'SPEC.md CONTRACT GUARD REPORT'. Body: $($rStream.Body)"
     }
-    Write-Host "  [PASS] 12. R1 space-path run_job (spec-guard) -> DONE with exit_code: 0" -ForegroundColor Green
+    if ($rStream.Body -notmatch "event: status") {
+        throw "Test 12 failed: job_stream did not emit 'event: status'. Body: $($rStream.Body)"
+    }
+    if ($rStream.Body -notmatch '"status"\s*:\s*"DONE"' -or $rStream.Body -notmatch '"exit_code"\s*:\s*0') {
+        throw "Test 12 failed: job_stream did not end with status DONE and exit_code 0. Body: $($rStream.Body)"
+    }
 
-    Write-Host "[api-smoke] All 12 API security, v2.2 agent/team & space-path job assertions PASSED!" -ForegroundColor Cyan
+    # Also verify job_status fallback returns DONE + exit_code 0 + full report in log_chunk
+    $rj = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=job_status&job_id=$jobId&offset=0"
+    if ($rj.StatusCode -ne 200) {
+        throw "Test 12 failed: job_status returned HTTP $($rj.StatusCode) ($($rj.Body))"
+    }
+    $jj = $rj.Body | ConvertFrom-Json
+    if ($jj.status -ne "DONE" -or $jj.exit_code -ne 0) {
+        throw "Test 12 failed: expected DONE with exit_code 0 from space-path temp dir '$spaceTempDir', got status=$($jj.status) exit_code=$($jj.exit_code)"
+    }
+    if ($jj.log_chunk -notmatch "SPEC\.md CONTRACT GUARD REPORT") {
+        throw "Test 12 failed (C1): job_status log_chunk missing 'SPEC.md CONTRACT GUARD REPORT'. Log: $($jj.log_chunk)"
+    }
+    Write-Host "  [PASS] 12. C1 space-path run_job + SSE job_stream + job_status -> DONE (exit 0) with full SPEC Guard report" -ForegroundColor Green
+
+    # 13. C2: Job survives server stop/restart (run_job -> kill server immediately -> wait -> restart server -> job DONE with exit 0 & report)
+    $r13 = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=run_job" -Headers @{ "X-MAW-Request" = "1" } -Body $jobBody
+    if ($r13.StatusCode -ne 200) { throw "Test 13 failed: run_job expected 200, got $($r13.StatusCode)" }
+    $surviveJobId = [string]($r13.Body | ConvertFrom-Json).job_id
+    if (-not $surviveJobId) { throw "Test 13 failed: missing surviveJobId" }
+
+    # Kill Node server immediately while job is still running
+    if ($serverProc -and -not $serverProc.HasExited) {
+        Stop-Process -Id $serverProc.Id -Force -ErrorAction SilentlyContinue
+        $serverProc.WaitForExit(5000) | Out-Null
+    }
+
+    # Wait for the independent grandchild PowerShell runner to finish while server is offline
+    Start-Sleep -Milliseconds 1500
+
+    # Restart Node server (with --projects-root $spaceTempDir so Test 14 can run against a temp repo inside $spaceTempDir)
+    $serverProc = Start-SmokeNodeServer -ProjectsRootArg $spaceTempDir
+    Wait-SmokeServerReady
+
+    $rj13 = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=job_status&job_id=$surviveJobId&offset=0"
+    if ($rj13.StatusCode -ne 200) {
+        throw "Test 13 failed: job_status after restart returned HTTP $($rj13.StatusCode) ($($rj13.Body))"
+    }
+    $jj13 = $rj13.Body | ConvertFrom-Json
+    if ($jj13.status -ne "DONE" -or $jj13.exit_code -ne 0) {
+        throw "Test 13 failed (C2): job $surviveJobId did not survive server restart! Expected DONE/0, got status=$($jj13.status) exit_code=$($jj13.exit_code) log=$($jj13.log_chunk)"
+    }
+    if ($jj13.log_chunk -notmatch "SPEC\.md CONTRACT GUARD REPORT") {
+        throw "Test 13 failed (C2): survived job log missing 'SPEC.md CONTRACT GUARD REPORT'. Log: $($jj13.log_chunk)"
+    }
+    Write-Host "  [PASS] 13. C2 server-restart survival: run_job -> kill server -> restart -> DONE (exit 0) with full report" -ForegroundColor Green
+
+    # 14. Deterministic non-zero exit_code test: spec-guard with -Owner antigravity on a temp git repo with a forbidden file modified -> FAILED, exit_code: 1
+    $failRepoDir = Join-Path $spaceTempDir "fail-project"
+    New-Item -ItemType Directory -Path (Join-Path $failRepoDir "dashboard") -Force | Out-Null
+    & git -C $failRepoDir init 2>$null | Out-Null
+    & git -C $failRepoDir config user.email "smoke@example.com"
+    & git -C $failRepoDir config user.name "Smoke"
+    $specContent = @"
+# Project Specification: Fail Test
+
+## Strict File Ownership Matrix
+
+| Layer | Owner AI | Allowed File Paths | Forbidden Files |
+| :--- | :--- | :--- | :--- |
+| Frontend | Claude (Frontend) | ``dashboard/index.html`` | ``server/**`` |
+| Backend | Antigravity | ``server/**`` | ``SPEC.md``, ``dashboard/*.html`` |
+"@
+    [System.IO.File]::WriteAllText((Join-Path $failRepoDir "SPEC.md"), $specContent, (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText((Join-Path $failRepoDir "dashboard\index.html"), "<html>v1</html>", (New-Object System.Text.UTF8Encoding($false)))
+    & git -C $failRepoDir add -A
+    & git -C $failRepoDir commit -m "initial" 2>$null | Out-Null
+    # Modify forbidden frontend file and run spec-guard with role='antigravity'
+    [System.IO.File]::WriteAllText((Join-Path $failRepoDir "dashboard\index.html"), "<html>forbidden edit</html>", (New-Object System.Text.UTF8Encoding($false)))
+
+    $failJobBody = (@{
+        mode         = "spec-guard"
+        role         = "antigravity"
+        project_path = $failRepoDir
+    } | ConvertTo-Json -Compress)
+    $r14 = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=run_job" -Headers @{ "X-MAW-Request" = "1" } -Body $failJobBody
+    if ($r14.StatusCode -ne 200) { throw "Test 14 failed: run_job expected 200, got $($r14.StatusCode) ($($r14.Body))" }
+    $failJobId = [string]($r14.Body | ConvertFrom-Json).job_id
+
+    $rFailStream = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=job_stream&job_id=$failJobId&offset=0"
+    if ($rFailStream.StatusCode -ne 200) {
+        throw "Test 14 failed: job_stream returned HTTP $($rFailStream.StatusCode)"
+    }
+    if ($rFailStream.Body -notmatch '"status"\s*:\s*"FAILED"' -or $rFailStream.Body -notmatch '"exit_code"\s*:\s*1') {
+        throw "Test 14 failed: expected FAILED and exit_code 1 in SSE stream, got: $($rFailStream.Body)"
+    }
+
+    $rj14 = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=job_status&job_id=$failJobId&offset=0"
+    $jj14 = $rj14.Body | ConvertFrom-Json
+    if ($jj14.status -ne "FAILED" -or $jj14.exit_code -ne 1) {
+        throw "Test 14 failed: expected job_status FAILED with exit_code 1, got status=$($jj14.status) exit_code=$($jj14.exit_code)"
+    }
+    if ($jj14.log_chunk -notmatch "SPEC\.md CONTRACT GUARD REPORT" -or $jj14.log_chunk -notmatch "\[FAIL\]") {
+        throw "Test 14 failed: expected violation report in log_chunk, got: $($jj14.log_chunk)"
+    }
+    Write-Host "  [PASS] 14. Non-zero exit_code: spec-guard violation -> FAILED with exit_code: 1 and [FAIL] report" -ForegroundColor Green
+
+    Write-Host "[api-smoke] All 17 v3.0 Node.js API security, C1/C2 runner survival, non-zero exit_code & SSE assertions PASSED!" -ForegroundColor Cyan
     exit 0
 } catch {
     Write-Error "[api-smoke] FAILED: $($_.Exception.Message)"

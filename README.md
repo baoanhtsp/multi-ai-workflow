@@ -58,9 +58,9 @@ flowchart TD
 
 ---
 
-## 🖥️ 2. Bảng Điều Khiển Web Song Ngữ (`dashboard/` — Tiếng Việt & Tiếng Anh)
+## 🖥️ 2. Bảng Điều Khiển Web Song Ngữ (`dashboard/` + `server/` — Tiếng Việt & Tiếng Anh)
 
-Mở `http://multi-ai-workflow.test/dashboard/` (hoặc `http://localhost/multi-ai-workflow/dashboard/`) trên Laragon để sử dụng **Multi-AI Mission Control Dashboard** hỗ trợ chuyển đổi **2 ngôn ngữ (`🇻🇳 VI | 🇬🇧 EN`)** ngay trên thanh Header:
+Chạy `.\start-dashboard.ps1` (hoặc `npm start` -> `http://127.0.0.1:4317/`) để khởi động **Multi-AI Mission Control Dashboard v3.0** (Node.js 24 LTS + native TypeScript, hỗ trợ luồng log thời gian thực qua Server-Sent Events `SSE`, không cần cài PHP/Laragon) và chuyển đổi **2 ngôn ngữ (`🇻🇳 VI | 🇬🇧 EN`)** ngay trên thanh Header:
 
 ### Hướng dẫn sử dụng mục **Command Dispatcher & `SPEC.md` Generator**:
 1. **Chọn Dự Án & Nút `Init SPEC.md`**:
@@ -101,19 +101,21 @@ Mở `http://multi-ai-workflow.test/dashboard/` (hoặc `http://localhost/multi-
 ## 🛠️ 4. Hướng dẫn Cài đặt & Kiểm tra Sức khỏe Hệ thống (1 Click trên Windows)
 
 ### Yêu cầu cài sẵn trên máy:
-1. **Google Antigravity** (IDE hoặc Desktop App).
-2. **Claude Code CLI** (`claude.exe`) — Đã đăng nhập một lần bằng lệnh `claude auth login`.
-3. **OpenAI Codex CLI / Desktop** (`npm i -g @openai/codex`) — Đã đăng nhập bằng lệnh `codex login`.
-4. **Git** (`git --version`).
+1. **Node.js 24 LTS** (tối thiểu `>= 22.18` để chạy TypeScript trực tiếp không cần bước build).
+2. **Google Antigravity** (IDE hoặc Desktop App).
+3. **Claude Code CLI** (`claude.exe`) — Đã đăng nhập một lần bằng lệnh `claude auth login`.
+4. **OpenAI Codex CLI / Desktop** (`npm i -g @openai/codex`) — Đã đăng nhập bằng lệnh `codex login`.
+5. **Git** (`git --version`).
 
-### Các bước cài đặt:
-Clone repository này về máy, chạy `install.ps1` để cài đặt và chạy `doctor.ps1` để kiểm tra sức khỏe hệ thống:
+### Các bước cài đặt & khởi chạy Dashboard:
+Clone repository này về máy, chạy `install.ps1` để cài đặt, `doctor.ps1` để kiểm tra sức khỏe hệ thống, và `start-dashboard.ps1` để mở bảng điều khiển tại `http://127.0.0.1:4317/`:
 
 ```powershell
 git clone https://github.com/baoanhtsp/multi-ai-workflow.git
 cd multi-ai-workflow
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 powershell -ExecutionPolicy Bypass -File .\doctor.ps1
+powershell -ExecutionPolicy Bypass -File .\start-dashboard.ps1
 ```
 
 ---
@@ -132,9 +134,16 @@ multi-ai-workflow/
 ├── README.en.md                                           # Tài liệu hướng dẫn Tiếng Anh (English Documentation)
 ├── install.ps1                                            # Script cài đặt tự động 1-click
 ├── doctor.ps1                                             # Công cụ chẩn đoán hệ thống & thống kê Audit Log
+├── start-dashboard.ps1                                    # Khởi động / dừng Mission Control Server (http://127.0.0.1:4317/)
+├── package.json                                           # Cấu hình Node.js 24 LTS + native TypeScript (0 runtime deps)
+├── tsconfig.json                                          # Cấu hình TypeScript strict erasableSyntaxOnly
+├── server/
+│   ├── main.ts                                            # Điểm vào HTTP Server (127.0.0.1:4317) & quản lý vòng đời Job
+│   ├── http.ts                                            # Định tuyến API, bảo mật Host/Origin/CSP & phục vụ file tĩnh
+│   ├── actions/                                           # Các xử lý API (status, git, specGuard, dispatch, jobs, jobStream SSE, notify)
+│   └── lib/                                               # Thư viện lõi (paths, commands, validate, proc, audit, versions)
 ├── dashboard/
-│   ├── index.html                                         # Giao diện Web Mission Control Song ngữ VI/EN (100% bởi Claude Sonnet)
-│   └── api.php                                            # Backend Telemetry & Command Dispatch API
+│   └── index.html                                         # Giao diện Web Mission Control Song ngữ VI/EN (100% bởi Claude)
 ├── templates/
 │   └── SPEC.template.md                                   # Mẫu hợp đồng SPEC.md chuẩn Spec-Driven Development
 ├── antigravity/

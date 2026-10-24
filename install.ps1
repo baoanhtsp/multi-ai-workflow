@@ -93,6 +93,12 @@ Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-spe
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-auto-gate.ps1" "$geminiScriptsDir\invoke-auto-gate.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\send-notification.ps1" "$geminiScriptsDir\send-notification.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\save-agentapi-env.ps1" "$geminiScriptsDir\save-agentapi-env.ps1"
+if (Test-Path -LiteralPath "$repoRoot\start-dashboard.ps1") {
+    $startDashContent = Get-Content -LiteralPath "$repoRoot\start-dashboard.ps1" -Raw -Encoding UTF8
+    $startDashContent = $startDashContent.Replace("C:\Users\Admin", $env:USERPROFILE)
+    $startDashContent = $startDashContent.Replace("C:\laragon\www\multi-ai-workflow", $repoRoot)
+    Write-ManagedFile -dest "$geminiScriptsDir\start-dashboard.ps1" -content $startDashContent -useBom $true
+}
 
 $rolesSrcDir = "$repoRoot\antigravity\skills\claude-leader\templates\roles"
 if (Test-Path -LiteralPath $rolesSrcDir) {

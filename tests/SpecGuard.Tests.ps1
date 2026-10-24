@@ -6,13 +6,13 @@ BeforeAll {
 }
 
 Describe "invoke-spec-guard.ps1" {
-    It "Extracts GET api.php?action=status and ownership rules from the repository SPEC.md" {
+    It "Extracts GET /api?action=status and ownership rules from the repository SPEC.md" {
         $raw = (& $script:GuardScript -WorkDir $script:RepoRoot -Json) -join "`n"
         $res = $raw | ConvertFrom-Json
         $res.ok | Should -BeTrue
         $res.has_spec | Should -BeTrue
         $res.has_git | Should -BeTrue
-        $res.spec_endpoints | Should -Contain "GET api.php?action=status"
+        $res.spec_endpoints | Should -Contain "GET /api?action=status"
         $res.ownership_rules.Count | Should -BeGreaterOrEqual 3
     }
 

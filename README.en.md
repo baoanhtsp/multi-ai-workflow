@@ -9,7 +9,7 @@
 ![Gemini 4 Argon](https://img.shields.io/badge/Antigravity-Gemini_4_Argon_%7C_3.8_Flash-4285F4)
 ![OpenAI Codex](https://img.shields.io/badge/OpenAI_Codex-GPT--6.1--Sol_%7C_GPT--6--Astra_%7C_GPT--6--Sol-10A37F)
 
-A production-grade **3-Way Omni-Directional Multi-AI Coding Orchestration** framework built around **Spec-Driven Development (SDD)**, **Git Branch Isolation**, and a **Bounded 2-Round Review Loop**. It combines **Google Antigravity**, **Claude Code CLI**, and **OpenAI Codex CLI** while saving **70%–85% of Claude tokens**, and includes a bilingual (**English / Vietnamese**) **Web Mission Control Dashboard** (`dashboard/index.html` + `dashboard/api.php`).
+A production-grade **3-Way Omni-Directional Multi-AI Coding Orchestration** framework built around **Spec-Driven Development (SDD)**, **Git Branch Isolation**, and a **Bounded 2-Round Review Loop**. It combines **Google Antigravity**, **Claude Code CLI**, and **OpenAI Codex CLI** while saving **70%–85% of Claude tokens**, and includes a bilingual (**English / Vietnamese**) **Web Mission Control Dashboard** (`dashboard/index.html` + Node.js 24 native TypeScript `server/`).
 
 ---
 
@@ -58,9 +58,9 @@ flowchart TD
 
 ---
 
-## 🖥️ 2. Bilingual Web Mission Control Dashboard (`dashboard/`)
+## 🖥️ 2. Bilingual Web Mission Control Dashboard (`dashboard/` + `server/`)
 
-Open `http://multi-ai-workflow.test/dashboard/` (or `http://localhost/multi-ai-workflow/dashboard/`) on Laragon/Apache/PHP to access the **Multi-AI Mission Control Dashboard** featuring a **1-click `🇻🇳 VI | 🇬🇧 EN` Language Switcher** in the top header:
+Run `.\start-dashboard.ps1` (or `npm start` -> `http://127.0.0.1:4317/`) to launch the **Multi-AI Mission Control Dashboard v3.0** (Node.js 24 LTS + native TypeScript with real-time Server-Sent Events `SSE` job streaming and zero runtime dependencies—no PHP/Laragon required) featuring a **1-click `🇻🇳 VI | 🇬🇧 EN` Language Switcher** in the top header:
 
 ### How to Use the **Command Dispatcher & `SPEC.md` Generator**:
 1. **Select Project & `Init SPEC.md`**:
@@ -102,7 +102,9 @@ git clone https://github.com/baoanhtsp/multi-ai-workflow.git
 cd multi-ai-workflow
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 powershell -ExecutionPolicy Bypass -File .\doctor.ps1
+powershell -ExecutionPolicy Bypass -File .\start-dashboard.ps1
 ```
 
-- **`install.ps1`**: Installs Global Rules, `/claude-leader` skills & scripts into `~/.gemini/config/`, `CLAUDE.md` & `/antigravity` into `~/.claude/`, and `AGENTS.md` & `$multi-ai-leader` into `~/.codex/`.
-- **`doctor.ps1`**: Verifies Git, Claude CLI, Codex CLI, the Live Self-Healing Bridge (`agentapi-bridge.json` + live `language_server*.exe` process), global files, and Audit Log statistics.
+- **`install.ps1`**: Installs Global Rules, `/claude-leader` skills & scripts (including `start-dashboard.ps1`) into `~/.gemini/config/`, `CLAUDE.md` & `/antigravity` into `~/.claude/`, and `AGENTS.md` & `$multi-ai-leader` into `~/.codex/`.
+- **`doctor.ps1`**: Verifies Node.js >= 22.18, Git, Claude CLI, Codex CLI, the Live Self-Healing Bridge (`agentapi-bridge.json` + live `language_server*.exe` process), global files, and Audit Log statistics.
+- **`start-dashboard.ps1`**: Starts the Node.js 24 + native TypeScript Mission Control server on `http://127.0.0.1:4317/` (use `-Stop` to stop it).

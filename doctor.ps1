@@ -90,8 +90,26 @@ if ($codexExe -and (Test-Path -LiteralPath $codexExe)) {
     Write-Host "  [FAIL] codex CLI NOT found in PATH or $env:APPDATA\npm\codex.ps1" -ForegroundColor Red
 }
 
-# 4. Git & GitHub CLI
-Write-Host "`n[4/6] Git & GitHub CLI" -ForegroundColor Yellow
+# 4. Node.js (>= 22.18), Git & GitHub CLI
+Write-Host "`n[4/6] Node.js, Git & GitHub CLI" -ForegroundColor Yellow
+$nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+if ($nodeCmd) {
+    $nodeVerRaw = (& $nodeCmd.Source --version 2>$null | Out-String).Trim()
+    if ($nodeVerRaw -match '^v?(\d+)\.(\d+)\.(\d+)') {
+        $nMajor = [int]$Matches[1]
+        $nMinor = [int]$Matches[2]
+        if ($nMajor -gt 22 -or ($nMajor -eq 22 -and $nMinor -ge 18)) {
+            Write-Host "  [OK] Node.js found: $($nodeCmd.Source) ($nodeVerRaw >= 22.18)" -ForegroundColor Green
+        } else {
+            Write-Host "  [FAIL] Node.js $nodeVerRaw is too old (requires >= 22.18 for native TypeScript)" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "  [WARN] Node.js found ($($nodeCmd.Source)), could not parse version '$nodeVerRaw'" -ForegroundColor DarkYellow
+    }
+} else {
+    Write-Host "  [FAIL] Node.js NOT found in PATH (requires Node.js >= 22.18 / 24 LTS)" -ForegroundColor Red
+}
+
 $gitCmd = Get-Command git -ErrorAction SilentlyContinue
 if ($gitCmd) {
     $gitVer = (& git --version 2>$null) -join " "
@@ -124,6 +142,7 @@ $expectedFiles = @(
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-auto-gate.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\send-notification.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\save-agentapi-env.ps1"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\start-dashboard.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\templates\roles\architect.md"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\templates\roles\leader.md"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\templates\roles\backend.md"),
