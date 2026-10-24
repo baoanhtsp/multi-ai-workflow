@@ -140,7 +140,12 @@ function saveLineCountCache(array $cache): void {
     if (count($cache) > 64) {
         $cache = array_slice($cache, -64, null, true);
     }
-    @file_put_contents($cacheFile, json_encode($cache, JSON_UNESCAPED_SLASHES));
+    $tmpFile = $cacheFile . '.' . bin2hex(random_bytes(4)) . '.tmp';
+    if (@file_put_contents($tmpFile, json_encode($cache, JSON_UNESCAPED_SLASHES)) !== false) {
+        @rename($tmpFile, $cacheFile);
+    } else {
+        @unlink($tmpFile);
+    }
 }
 
 /**
@@ -315,7 +320,7 @@ function getConversations(string $presenceDir, string $brainDir, array &$lineCac
             'updated_at' => date('Y-m-d H:i:s', $mtime),
             'step_count' => $stepCount,
             'last_status' => $lastStatus,
-            'last_preview' => $lastPreview ?: 'Waiting for response or tool execution...',
+            'last_preview' => $lastPreview,
         ];
     }
 
@@ -411,7 +416,7 @@ function getAuditStats(string $auditFile): array {
         $stats['verdicts'][$verdict] = ($stats['verdicts'][$verdict] ?? 0) + 1;
 
         $recentRing[] = [
-            'Timestamp' => $entry['Timestamp'] ?? date('c'),
+            'Timestamp' => $entry['Timestamp'] ?? '',
             'Tool' => $tool,
             'Role' => $role,
             'Model' => $entry['Model'] ?? 'default',
@@ -827,11 +832,13 @@ if ($action === 'dispatch') {
             respondJson(['ok' => false, 'error' => 'Failed to create temporary prompt file.'], 500);
         }
 
+        $modelExecArg = ($role === 'new' && $modelOverride !== '') ? (' -Model ' . escapeshellarg($modelOverride)) : '';
         $execCmd = sprintf(
-            'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Action %s -WorkDir %s -NoWait -Title %s -PromptFile %s 2>&1',
+            'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Action %s -WorkDir %s%s -NoWait -Title %s -PromptFile %s 2>&1',
             escapeshellarg($scriptsDir . '\\invoke-antigravity.ps1'),
             escapeshellarg($role),
             escapeshellarg($validatedProjectPath),
+            $modelExecArg,
             escapeshellarg('Task from Mission Control'),
             escapeshellarg($tempPromptFile)
         );

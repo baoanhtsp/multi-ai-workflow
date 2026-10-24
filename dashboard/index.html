@@ -284,7 +284,7 @@ const API = 'api.php';
 const IS_FILE = location.protocol === 'file:';
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmt = n => Number(n || 0).toLocaleString('en-US');
+const fmt = n => Number(n || 0).toLocaleString(LANG === 'vi' ? 'vi-VN' : 'en-US');
 
 const I18N = {
   vi: {
@@ -633,7 +633,7 @@ async function load(manual) {
     state.demo = false;
   } catch (e) {
     if (state.data && !state.demo && !IS_FILE) {
-      toast(t('apiLost', { msg: e.message }), 'err');
+      if (!state.demo || manual) toast(t('apiLost', { msg: e.message }), 'warn');
     } else {
       state.data = demoData();
       state.demo = true;
@@ -680,10 +680,10 @@ function render() {
   $('bridgeBadge').title = `LS ${b.ls_version || '—'} · CSRF ${b.csrf_masked || '—'} · ${b.updated_at || ''}`;
 
   // triangle
-  const t = d.tools || {};
-  $('triClVer').textContent = 'v' + (t.claude?.version || '—');
+  const tools = d.tools || {};
+  $('triClVer').textContent = 'v' + (tools.claude?.version || '—');
   $('triAgVer').textContent = b.ls_version || 'Gemini';
-  $('triCxVer').textContent = 'v' + (t.codex?.version || '—');
+  $('triCxVer').textContent = 'v' + (tools.codex?.version || '—');
   const a = d.audit || {};
   $('triTotal').textContent = fmt(a.total_calls);
 
@@ -709,9 +709,9 @@ function render() {
       </div>
     </div>`;
   $('toolCards').innerHTML =
-    tc('Antigravity', 'bg-ag/15 text-ag', 'glow-ag', 'rocket', t.antigravity?.command, t.antigravity?.model || RICH.antigravity, 'Backend / Core · LS ' + (b.ls_version || '—'), t.antigravity?.installed, chips(t.antigravity?.models, 'text-ag bg-ag/10 border-ag/30')) +
-    tc('Claude Code', 'bg-cl/15 text-cl', 'glow-cl', 'brain-circuit', t.claude?.command, RICH.claude, 'CLI v' + (t.claude?.version || '—'), t.claude?.installed, chips(t.claude?.models, 'text-cl bg-cl/10 border-cl/30')) +
-    tc('OpenAI Codex', 'bg-cx/15 text-cx', 'glow-cx', 'code-2', t.codex?.command, t.codex?.model || RICH.codex, 'CLI v' + (t.codex?.version || '—'), t.codex?.installed, chips(t.codex?.models, 'text-cx bg-cx/10 border-cx/30'));
+    tc('Antigravity', 'bg-ag/15 text-ag', 'glow-ag', 'rocket', tools.antigravity?.command, tools.antigravity?.model || RICH.antigravity, 'Backend / Core · LS ' + (b.ls_version || '—'), tools.antigravity?.installed, chips(tools.antigravity?.models, 'text-ag bg-ag/10 border-ag/30')) +
+    tc('Claude Code', 'bg-cl/15 text-cl', 'glow-cl', 'brain-circuit', tools.claude?.command, RICH.claude, 'CLI v' + (tools.claude?.version || '—'), tools.claude?.installed, chips(tools.claude?.models, 'text-cl bg-cl/10 border-cl/30')) +
+    tc('OpenAI Codex', 'bg-cx/15 text-cx', 'glow-cx', 'code-2', tools.codex?.command, tools.codex?.model || RICH.codex, 'CLI v' + (tools.codex?.version || '—'), tools.codex?.installed, chips(tools.codex?.models, 'text-cx bg-cx/10 border-cx/30'));
 
   // KPI
   const v = a.verdicts || {};
@@ -786,8 +786,12 @@ function renderProjects() {
   const sel = $('projectSel');
   const prev = sel.value;
   const ps = state.data.projects || [];
-  sel.innerHTML = ps.map(p => `<option value="${esc(p.path)}" data-name="${esc(p.name)}">${esc(p.name)}</option>`).join('');
-  if (prev && ps.some(p => p.path === prev)) sel.value = prev;
+  const sig = ps.map(p => p.path + ':' + p.name).join('|');
+  if (sel.dataset.sig !== sig) {
+    sel.innerHTML = ps.map(p => `<option value="${esc(p.path)}" data-name="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+    if (prev && ps.some(p => p.path === prev)) sel.value = prev;
+    sel.dataset.sig = sig;
+  }
   projMeta();
 }
 function projMeta() {
@@ -812,6 +816,7 @@ function resetCmd() {
   state.lastCmd = '';
   $('cmdOut').textContent = t('cmdPlaceholder');
   $('cmdState').textContent = '';
+  $('dispOut').classList.add('hidden'); $('dispOut').textContent = '';
 }
 const MODELS = {
   claude: ['opus', 'sonnet', 'haiku', 'fable', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
@@ -828,14 +833,18 @@ const EFFORTS = {
 function populateOverrides() {
   const fill = (id, first, list) => {
     const sel = $(id), prev = sel.value;
-    sel.innerHTML = `<option value="">${first}</option>` + list.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
-    sel.value = list.includes(prev) ? prev : '';
+    const sig = first + '|' + list.join('|');
+    if (sel.dataset.sig !== sig) {
+      sel.innerHTML = `<option value="">${first}</option>` + list.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
+      sel.value = list.includes(prev) ? prev : '';
+      sel.dataset.sig = sig;
+    }
     sel.disabled = !list.length;
   };
   const tool = state.data?.tools?.[state.mode];
   const models = (state.mode === 'claude' || state.mode === 'codex') && tool?.cli_models?.length ? tool.cli_models : MODELS[state.mode];
   const efforts = (state.mode === 'claude' || state.mode === 'codex') && tool?.efforts?.length ? tool.efforts : EFFORTS[state.mode];
-  fill('modelSel', t('autoModel'), models);
+  fill('modelSel', t('autoModel'), state.mode === 'antigravity' && $('roleSel').value !== 'new' ? [] : models);
   fill('effortSel', t('autoEffort'), efforts);
 }
 function pickMode(m) { state.mode = m; renderModes(); populateOverrides(); resetCmd(); }
@@ -860,14 +869,15 @@ function localCommand(p) {
     const action = ROLES.antigravity.includes(p.role) ? p.role : 'send-latest';
     if (action === 'status' || action === 'wait')
       return `${ps} ${q(s + '\\invoke-antigravity.ps1')} -Action ${action} -WorkDir ${q(p.project_path)}`;
-    return `${ps} ${q(s + '\\invoke-antigravity.ps1')} -Action ${action} -WorkDir ${q(p.project_path)}${action === 'new' && model ? ' -Model ' + q(model) : ''} -Title ${q('Task from Dashboard')} -Prompt ${q(p.prompt)}`;
+    return `${ps} ${q(s + '\\invoke-antigravity.ps1')} -Action ${action} -WorkDir ${q(p.project_path)}${action === 'new' && model ? ' -Model ' + q(model) : ''} -Title ${q('Task from Mission Control')} -Prompt ${q(p.prompt)}`;
   }
   const ov = `${model ? ' -ModelOverride ' + q(model) : ''}${effort ? ' -EffortOverride ' + q(effort) : ''}`;
   if (p.mode === 'codex')
     return `${ps} ${q(s + '\\invoke-codex.ps1')} -Role ${p.role} -WorkDir ${q(p.project_path)}${ov}${p.prompt ? ` -Prompt ${q(p.prompt)}` : ''}`;
   if (p.mode === 'claude')
     return `${ps} ${q(s + '\\invoke-claude.ps1')} -Role ${p.role} -WorkDir ${q(p.project_path)}${ov}${p.role === 'reviewer' ? ' -IncludeGitDiff' : ''} -Prompt ${q(p.prompt)}`;
-  return `${ps} ${q(s + '\\invoke-council-review.ps1')} -WorkDir ${q(p.project_path)} -Prompt ${q(p.prompt)}`;
+  const cp = p.prompt || 'Review uncommitted changes against SPEC.md and score X/10.';
+  return `${ps} ${q(s + '\\invoke-council-review.ps1')} -WorkDir ${q(p.project_path)} -Prompt ${q(cp)}`;
 }
 
 async function generate(exec) {
@@ -918,6 +928,8 @@ $('copyBtn').onclick = async () => {
 $('sendBtn').onclick = async () => {
   if (state.mode !== 'antigravity' || !['send-latest', 'new'].includes($('roleSel').value)) {
     pickMode('antigravity');
+    $('roleSel').value = 'send-latest';
+    updateHint(); populateOverrides();
     toast(t('switchedAg'), 'ok');
     return;
   }
@@ -931,7 +943,7 @@ $('initSpecBtn').onclick = async () => {
   const name = sel.selectedOptions[0].dataset.name;
   try {
     const r = await api('init_spec', { project_path: sel.value, project_name: name });
-    toast(r.created ? t('specCreated', { name }) : (r.message || t('specExists')),r.created ? 'ok' : 'info');
+    toast(r.created ? t('specCreated', { name }) : t('specExists'), r.created ? 'ok' : 'info');
     load();
   } catch (e) {
     if (!e.offline) { toast(e.message, 'err'); return; }
@@ -940,7 +952,7 @@ $('initSpecBtn').onclick = async () => {
   }
 };
 $('projectSel').onchange = () => { projMeta(); resetCmd(); };
-$('roleSel').onchange = () => { resetCmd(); updateHint(); };
+$('roleSel').onchange = () => { updateHint(); populateOverrides(); resetCmd(); };
 $('promptTxt').oninput = () => { updateChars(); resetCmd(); };
 $('guideBtn').onclick = () => {
   const box = $('guideBox');
@@ -955,7 +967,6 @@ function setAuto() {
   if ($('autoToggle').checked) state.timer = setInterval(() => load(), 10000);
 }
 
-renderModes();
 setLang(LANG);
 setAuto();
 load();
