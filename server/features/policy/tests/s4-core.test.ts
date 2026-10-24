@@ -107,8 +107,8 @@ test('classifyFailure: classifies all kinds with reset time parsing', () => {
     assert.equal(cOver.code, 'overloaded');
   }
 
-  // Transient only in older lines (>40 lines ago) should NOT match
-  const longLog = '429 Too Many Requests\n' + new Array(45).fill('All operations normal').join('\n');
+  // Transient only in older lines (>60 lines ago) should NOT match
+  const longLog = '429 Too Many Requests\n' + new Array(65).fill('All operations normal').join('\n');
   const cOldTransient = classifyFailure(longLog, 1, fixedNow);
   assert.equal(cOldTransient.kind, 'other');
 
@@ -199,8 +199,12 @@ test('matchCommand: ordered tokens, re:, allow patterns', () => {
   assert.ok(matchCommand('rm -rf /var/data', 're:^rm\\s+-rf'));
   assert.ok(!matchCommand('git rm -rf file', 're:^rm\\s+-rf'));
 
+  // Whole token matching (Item 10)
+  assert.ok(!matchCommand('perform x -rfoo', 'rm -rf'));
+  assert.ok(!matchCommand('digit pushed', 'git push'));
+
   // Allow pattern bypasses match
-  assert.ok(!matchCommand('git push origin feature-branch', 'git push', ['git push origin feature']));
+  assert.ok(!matchCommand('git push origin feature', 'git push', ['git push origin feature']));
   assert.ok(matchCommand('git push origin main', 'git push', ['git push origin feature']));
 });
 

@@ -23,7 +23,10 @@ export interface BudgetConfig {
     project?: { usd?: { warn: number; block: number }; period?: 'day' | 'week' | 'month' | 'all' };
     agent_day?: { usd?: { warn: number; block: number } };
   };
-  projects?: Record<string, { project?: { usd?: { warn: number; block: number }; period?: 'day' | 'week' | 'month' | 'all' } }>;
+  projects?: Record<
+    string,
+    { project?: { usd?: { warn: number; block: number }; period?: 'day' | 'week' | 'month' | 'all' } }
+  >;
   estimate_next_call?: boolean;
 }
 
@@ -175,6 +178,12 @@ export function readJsonSafe<T>(filePath: string, fallback: T): { data: T; warni
   }
 }
 
+export function createAttentionId(ts: string, kind: string, jobId?: string, scope?: string): string {
+  const seed = `${ts}_${kind}_${jobId || ''}_${scope || ''}`;
+  const hash = crypto.createHash('sha1').update(seed).digest('hex').slice(0, 16);
+  return `att_${hash}`;
+}
+
 // ============================================================================
 // 3. Defaults & Validation (Budget, Fallback, Policy)
 // ============================================================================
@@ -213,7 +222,6 @@ function validateThreshold(
     return { errorField: `${fieldPath}.block`, errorMessage: `${fieldPath}.block must be a number >= 0.` };
   }
 
-  // At most 4 decimals
   const warnDecimals = (warn.toString().split('.')[1] || '').length;
   const blockDecimals = (block.toString().split('.')[1] || '').length;
   if (warnDecimals > 4) {
@@ -242,11 +250,13 @@ export function validateBudgetConfig(raw: unknown): {
 
   const obj = raw as Record<string, unknown>;
   const enabled = obj.enabled !== undefined ? Boolean(obj.enabled) : defaults.enabled;
-  const estimate_next_call = obj.estimate_next_call !== undefined ? Boolean(obj.estimate_next_call) : defaults.estimate_next_call;
+  const estimate_next_call =
+    obj.estimate_next_call !== undefined ? Boolean(obj.estimate_next_call) : defaults.estimate_next_call;
 
-  const capsRaw = (obj.caps && typeof obj.caps === 'object' && !Array.isArray(obj.caps))
-    ? (obj.caps as Record<string, unknown>)
-    : {};
+  const capsRaw =
+    obj.caps && typeof obj.caps === 'object' && !Array.isArray(obj.caps)
+      ? (obj.caps as Record<string, unknown>)
+      : {};
 
   const validatedCaps: BudgetConfig['caps'] = {
     job: { usd: { warn: 0, block: 0 }, tokens: { warn: 0, block: 0 } },
@@ -281,16 +291,21 @@ export function validateBudgetConfig(raw: unknown): {
       if (scope === 'project' && scopeVal.period !== undefined) {
         const p = String(scopeVal.period);
         if (p !== 'day' && p !== 'week' && p !== 'month' && p !== 'all') {
-          return { config: defaults, errorField: `caps.project.period`, errorMessage: `caps.project.period must be day, week, month, or all.` };
+          return {
+            config: defaults,
+            errorField: `caps.project.period`,
+            errorMessage: `caps.project.period must be day, week, month, or all.`,
+          };
         }
         validatedCaps.project!.period = p as 'day' | 'week' | 'month' | 'all';
       }
     }
   }
 
-  const projectsRaw = (obj.projects && typeof obj.projects === 'object' && !Array.isArray(obj.projects))
-    ? (obj.projects as Record<string, unknown>)
-    : {};
+  const projectsRaw =
+    obj.projects && typeof obj.projects === 'object' && !Array.isArray(obj.projects)
+      ? (obj.projects as Record<string, unknown>)
+      : {};
   const validatedProjects: BudgetConfig['projects'] = {};
 
   for (const [rawProjKey, rawProjVal] of Object.entries(projectsRaw)) {
@@ -302,7 +317,11 @@ export function validateBudgetConfig(raw: unknown): {
     const pProj = pVal.project as Record<string, unknown> | undefined;
     if (pProj) {
       if (typeof pProj !== 'object' || Array.isArray(pProj)) {
-        return { config: defaults, errorField: `projects.${rawProjKey}.project`, errorMessage: `Project override 'project' must be an object.` };
+        return {
+          config: defaults,
+          errorField: `projects.${rawProjKey}.project`,
+          errorMessage: `Project override 'project' must be an object.`,
+        };
       }
       const pEntry: { usd?: { warn: number; block: number }; period?: 'day' | 'week' | 'month' | 'all' } = {};
       if (pProj.usd !== undefined) {
@@ -315,7 +334,11 @@ export function validateBudgetConfig(raw: unknown): {
       if (pProj.period !== undefined) {
         const p = String(pProj.period);
         if (p !== 'day' && p !== 'week' && p !== 'month' && p !== 'all') {
-          return { config: defaults, errorField: `projects.${rawProjKey}.project.period`, errorMessage: `Period must be day, week, month, or all.` };
+          return {
+            config: defaults,
+            errorField: `projects.${rawProjKey}.project.period`,
+            errorMessage: `Period must be day, week, month, or all.`,
+          };
         }
         pEntry.period = p as 'day' | 'week' | 'month' | 'all';
       }
@@ -332,6 +355,22 @@ export function validateBudgetConfig(raw: unknown): {
       estimate_next_call,
     },
   };
+}
+
+export function loadBudgetConfig(budgetDir: string): { config: BudgetConfig; warnings: string[] } {
+  const filePath = path.win32.join(budgetDir, 'budgets.json');
+  const defaults = createDefaultBudgetConfig();
+  const warnings: string[] = [];
+  if (!fs.existsSync(filePath)) {
+    return { config: defaults, warnings };
+  }
+  const readRes = readJsonSafe<unknown>(filePath, defaults);
+  if (readRes.warning) warnings.push(readRes.warning);
+  const valRes = validateBudgetConfig(readRes.data);
+  if (valRes.errorField) {
+    warnings.push(`budgets.json validation warning: ${valRes.errorField} - ${valRes.errorMessage}`);
+  }
+  return { config: valRes.config, warnings };
 }
 
 export function createDefaultFallbackConfig(): FallbackConfig {
@@ -369,15 +408,21 @@ export function validateFallbackConfig(
   const defaults = createDefaultFallbackConfig();
   const warnings: string[] = [];
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { config: defaults, warnings: ['Invalid fallback config: not an object.'], errorField: 'config', errorMessage: 'Must be an object' };
+    return {
+      config: defaults,
+      warnings: ['Invalid fallback config: not an object.'],
+      errorField: 'config',
+      errorMessage: 'Must be an object',
+    };
   }
 
   const obj = raw as Record<string, unknown>;
-  const rolesRaw = (obj.roles && typeof obj.roles === 'object' && !Array.isArray(obj.roles))
-    ? (obj.roles as Record<string, unknown>)
-    : defaults.roles;
+  const rolesRaw =
+    obj.roles && typeof obj.roles === 'object' && !Array.isArray(obj.roles)
+      ? (obj.roles as Record<string, unknown>)
+      : defaults.roles;
 
-  const validatedRoles: Record<string, FallbackRoleConfig> = {};
+  const validatedRoles: Record<string, FallbackRoleConfig> = { ...defaults.roles };
   for (const [roleName, roleVal] of Object.entries(rolesRaw)) {
     if (!roleVal || typeof roleVal !== 'object' || Array.isArray(roleVal)) {
       continue;
@@ -402,9 +447,10 @@ export function validateFallbackConfig(
     };
   }
 
-  const recRaw = (obj.recovery && typeof obj.recovery === 'object' && !Array.isArray(obj.recovery))
-    ? (obj.recovery as Record<string, unknown>)
-    : defaults.recovery;
+  const recRaw =
+    obj.recovery && typeof obj.recovery === 'object' && !Array.isArray(obj.recovery)
+      ? (obj.recovery as Record<string, unknown>)
+      : defaults.recovery;
 
   const rawBackoff = Array.isArray(recRaw.backoff_s) ? recRaw.backoff_s.map(Number) : defaults.recovery.backoff_s;
   const backoff_s = rawBackoff.filter((n) => Number.isFinite(n) && n >= 5 && n <= 86400);
@@ -425,10 +471,14 @@ export function validateFallbackConfig(
     enabled: recRaw.enabled !== undefined ? Boolean(recRaw.enabled) : defaults.recovery.enabled,
     backoff_s: backoff_s.length > 0 ? backoff_s : defaults.recovery.backoff_s,
     max_attempts: maxAttempts,
-    wait_for_reset: recRaw.wait_for_reset !== undefined ? Boolean(recRaw.wait_for_reset) : defaults.recovery.wait_for_reset,
+    wait_for_reset:
+      recRaw.wait_for_reset !== undefined ? Boolean(recRaw.wait_for_reset) : defaults.recovery.wait_for_reset,
     reset_grace_s: resetGrace,
     max_wait_s: maxWait,
-    prefer_fallback_on_limit: recRaw.prefer_fallback_on_limit !== undefined ? Boolean(recRaw.prefer_fallback_on_limit) : defaults.recovery.prefer_fallback_on_limit,
+    prefer_fallback_on_limit:
+      recRaw.prefer_fallback_on_limit !== undefined
+        ? Boolean(recRaw.prefer_fallback_on_limit)
+        : defaults.recovery.prefer_fallback_on_limit,
   };
 
   return {
@@ -439,6 +489,23 @@ export function validateFallbackConfig(
     },
     warnings,
   };
+}
+
+export function loadFallbackConfig(
+  fallbackDir: string,
+  knownAgents?: string[]
+): { config: FallbackConfig; warnings: string[] } {
+  const filePath = path.win32.join(fallbackDir, 'routing.json');
+  const defaults = createDefaultFallbackConfig();
+  const warnings: string[] = [];
+  if (!fs.existsSync(filePath)) {
+    return { config: defaults, warnings };
+  }
+  const readRes = readJsonSafe<unknown>(filePath, defaults);
+  if (readRes.warning) warnings.push(readRes.warning);
+  const valRes = validateFallbackConfig(readRes.data, knownAgents);
+  warnings.push(...valRes.warnings);
+  return { config: valRes.config, warnings };
 }
 
 export function createDefaultPolicyConfig(): PolicyConfig {
@@ -483,9 +550,10 @@ export function validatePolicyConfig(raw: unknown): {
   const obj = raw as Record<string, unknown>;
   const enabled = obj.enabled !== undefined ? Boolean(obj.enabled) : defaults.enabled;
 
-  const gRaw = (obj.global && typeof obj.global === 'object' && !Array.isArray(obj.global))
-    ? (obj.global as Record<string, unknown>)
-    : defaults.global;
+  const gRaw =
+    obj.global && typeof obj.global === 'object' && !Array.isArray(obj.global)
+      ? (obj.global as Record<string, unknown>)
+      : defaults.global;
 
   const validSecretPatterns: string[] = [];
   if (Array.isArray(gRaw.secret_patterns)) {
@@ -501,18 +569,26 @@ export function validatePolicyConfig(raw: unknown): {
   }
 
   const globalConfig: PolicyGlobalConfig = {
-    protected_paths: Array.isArray(gRaw.protected_paths) ? gRaw.protected_paths.map(String) : defaults.global.protected_paths,
+    protected_paths: Array.isArray(gRaw.protected_paths)
+      ? gRaw.protected_paths.map(String)
+      : defaults.global.protected_paths,
     deny_commands: Array.isArray(gRaw.deny_commands) ? gRaw.deny_commands.map(String) : defaults.global.deny_commands,
-    approve_commands: Array.isArray(gRaw.approve_commands) ? gRaw.approve_commands.map(String) : defaults.global.approve_commands,
-    allow_commands: Array.isArray(gRaw.allow_commands) ? gRaw.allow_commands.map(String) : defaults.global.allow_commands,
+    approve_commands: Array.isArray(gRaw.approve_commands)
+      ? gRaw.approve_commands.map(String)
+      : defaults.global.approve_commands,
+    allow_commands: Array.isArray(gRaw.allow_commands)
+      ? gRaw.allow_commands.map(String)
+      : defaults.global.allow_commands,
     redact_secrets: gRaw.redact_secrets !== undefined ? Boolean(gRaw.redact_secrets) : defaults.global.redact_secrets,
     secret_patterns: validSecretPatterns,
-    redact_env_files: gRaw.redact_env_files !== undefined ? Boolean(gRaw.redact_env_files) : defaults.global.redact_env_files,
+    redact_env_files:
+      gRaw.redact_env_files !== undefined ? Boolean(gRaw.redact_env_files) : defaults.global.redact_env_files,
   };
 
-  const rolesRaw = (obj.roles && typeof obj.roles === 'object' && !Array.isArray(obj.roles))
-    ? (obj.roles as Record<string, unknown>)
-    : defaults.roles;
+  const rolesRaw =
+    obj.roles && typeof obj.roles === 'object' && !Array.isArray(obj.roles)
+      ? (obj.roles as Record<string, unknown>)
+      : defaults.roles;
   const rolesConfig: Record<string, PolicyRoleConfig> = {};
 
   for (const [rName, rVal] of Object.entries(rolesRaw)) {
@@ -539,8 +615,22 @@ export function validatePolicyConfig(raw: unknown): {
   };
 }
 
+export function loadPolicyConfig(policyDir: string): { config: PolicyConfig; warnings: string[] } {
+  const filePath = path.win32.join(policyDir, 'policies.json');
+  const defaults = createDefaultPolicyConfig();
+  const warnings: string[] = [];
+  if (!fs.existsSync(filePath)) {
+    return { config: defaults, warnings };
+  }
+  const readRes = readJsonSafe<unknown>(filePath, defaults);
+  if (readRes.warning) warnings.push(readRes.warning);
+  const valRes = validatePolicyConfig(readRes.data);
+  warnings.push(...valRes.warnings);
+  return { config: valRes.config, warnings };
+}
+
 // ============================================================================
-// 4. Path inside project check
+// 4. Path inside project check & Project Overrides Lookup
 // ============================================================================
 
 export function isPathInsideProject(childPath: string, parentPath: string): boolean {
@@ -548,6 +638,20 @@ export function isPathInsideProject(childPath: string, parentPath: string): bool
   const normChild = childPath.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
   const normParent = parentPath.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
   return normChild === normParent || normChild.startsWith(normParent + '\\');
+}
+
+export function findProjectOverride(
+  projects: BudgetConfig['projects'],
+  candidatePath: string
+): { usd?: { warn: number; block: number }; period?: 'day' | 'week' | 'month' | 'all' } | undefined {
+  if (!projects || !candidatePath) return undefined;
+  const normCandidate = candidatePath.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  for (const [projKey, projVal] of Object.entries(projects)) {
+    if (isPathInsideProject(normCandidate, projKey) || isPathInsideProject(projKey, normCandidate)) {
+      return projVal.project;
+    }
+  }
+  return undefined;
 }
 
 // ============================================================================
@@ -581,7 +685,6 @@ export function readAuditRows(
     const text = chunk.toString('utf8');
     const lastNewline = text.lastIndexOf('\n');
     if (lastNewline === -1) {
-      // No complete line yet
       return { rows: [], endByteOffset: startByteOffset };
     }
 
@@ -599,7 +702,7 @@ export function readAuditRows(
         const entry: S4AuditEntry = {
           Timestamp: String(raw.Timestamp ?? ''),
           Tool: String(raw.Tool ?? ''),
-          Agent: raw.Agent ? String(raw.Agent) : (raw.Tool ? String(raw.Tool) : undefined),
+          Agent: raw.Agent ? String(raw.Agent) : raw.Tool ? String(raw.Tool) : undefined,
           Role: String(raw.Role ?? ''),
           Model: String(raw.Model ?? ''),
           WorkDir: String(raw.WorkDir ?? ''),
@@ -643,17 +746,38 @@ export function isWithinPeriod(
 ): boolean {
   if (!isoString) return false;
   if (period === 'all') return true;
-  if (period === 'day') return isLocalToday(isoString, now);
   const d = new Date(isoString);
   if (Number.isNaN(d.getTime())) return false;
-  const diffMs = now.getTime() - d.getTime();
-  if (diffMs < 0) return true; // future timestamps count
+
+  const t = d.getTime();
+
+  if (period === 'day') {
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0).getTime();
+    return t >= startOfDay;
+  }
+
   if (period === 'week') {
-    return diffMs <= 7 * 86400000;
+    // Current week since Monday 00:00:00 local
+    const dayOfWeek = now.getDay();
+    const diffDays = (dayOfWeek + 6) % 7;
+    const startOfWeek = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate() - diffDays,
+      0,
+      0,
+      0,
+      0
+    ).getTime();
+    return t >= startOfWeek;
   }
+
   if (period === 'month') {
-    return diffMs <= 30 * 86400000;
+    // Current LOCAL calendar month (1st 00:00:00 -> now)
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0).getTime();
+    return t >= startOfMonth;
   }
+
   return true;
 }
 
@@ -665,7 +789,7 @@ export function calculateDaySpend(
   let tokens = 0;
   let calls = 0;
   for (const r of rows) {
-    if (isLocalToday(r.Timestamp, now)) {
+    if (isWithinPeriod(r.Timestamp, 'day', now)) {
       usd += r.cost_usd;
       tokens += r.in_tokens + r.out_tokens;
       calls += 1;
@@ -711,7 +835,7 @@ export function calculateAgentDaySpend(
   let calls = 0;
   const normAgent = agent.trim().toLowerCase();
   for (const r of rows) {
-    if (isLocalToday(r.Timestamp, now)) {
+    if (isWithinPeriod(r.Timestamp, 'day', now)) {
       const rowAgent = (r.Agent || r.Tool).trim().toLowerCase();
       if (rowAgent === normAgent) {
         usd += r.cost_usd;
@@ -824,7 +948,6 @@ export function parseResetTime(text: string, now = new Date()): string | null {
       const target = new Date(now.getTime());
       target.setHours(hours, mins, 0, 0);
       if (target.getTime() <= now.getTime()) {
-        // Time has already passed today -> tomorrow
         target.setDate(target.getDate() + 1);
       }
       return target.toISOString();
@@ -832,7 +955,8 @@ export function parseResetTime(text: string, now = new Date()): string | null {
   }
 
   // 3. (try again|retry|resets?) in 2h 13m / in 45 minutes / in 30s
-  const durationMatch = /(?:try again|retry|resets?)\s+in\s+((?:(?:\d+\s*(?:h|hours?|m|minutes?|s|seconds?))\s*)+)/i.exec(text);
+  const durationMatch =
+    /(?:try again|retry|resets?)\s+in\s+((?:(?:\d+\s*(?:h|hours?|m|minutes?|s|seconds?))\s*)+)/i.exec(text);
   if (durationMatch && durationMatch[1]) {
     const durStr = durationMatch[1];
     let totalSec = 0;
@@ -875,16 +999,34 @@ export function classifyFailure(
   exitCode: number,
   now = new Date()
 ): ClassifiedFailure {
-  // 1. Blocked: hook exit 5 or HOOK_BLOCKED in log
-  if (exitCode === 5 || logTail.includes('HOOK_BLOCKED')) {
-    const tagMatch = /\[S4:([a-z_]+)\s+agent=([^\s\]]+)\s+fallback=([^\s\]]+)\]/i.exec(logTail);
-    const reasonMatch = /HOOK_BLOCKED(?:\s*\([^)]*\))?:\s*(.+)$/m.exec(logTail);
+  // S4 Design 0.6 & Item 9:
+  // Extract last 60 non-empty lines for usage_limit, auth, transient, blocked
+  const nonEmpties = logTail
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const last60 = nonEmpties.slice(-60).join('\n');
+
+  // 1. Blocked check
+  const isBlocked =
+    exitCode === 5 ||
+    logTail.includes('HOOK_BLOCKED') ||
+    logTail.includes('[Auto-Gate HOOK BLOCKED') ||
+    logTail.includes('[HOOK BLOCKED: job-start]') ||
+    /\[S4:(?:gate|policy|budget|cooldown|approval)/i.test(logTail);
+
+  if (isBlocked) {
+    // Generalized S4 tag: [S4:<code>( agent=<id>)?( fallback=<fb>)?]
+    const tagMatch = /\[S4:([a-z_]+)(?:\s+agent=([^\s\]]+))?(?:\s+fallback=([^\s\]]+))?\]/i.exec(logTail);
+    const reasonMatch = /(?:HOOK_BLOCKED(?:\s*\([^)]*\))?|\[Auto-Gate HOOK BLOCKED(?::\s*[^\]]+)?\]):\s*(.+)$/m.exec(
+      logTail
+    );
     const reason = reasonMatch ? reasonMatch[1]!.trim() : 'Blocked by hook';
 
     if (tagMatch) {
       const code = tagMatch[1]!;
-      const agent = tagMatch[2]!;
-      const fb = tagMatch[3]!;
+      const agent = tagMatch[2];
+      const fb = tagMatch[3];
       return {
         kind: 'blocked',
         by: 's4',
@@ -901,11 +1043,12 @@ export function classifyFailure(
     };
   }
 
-  // 2. Usage limit
-  const usagePattern = /usage limit|limit reached|quota exceeded|exceeded your current quota|you've hit your limit|out of credits|insufficient_quota|RESOURCE_EXHAUSTED/i;
-  if (usagePattern.test(logTail)) {
-    const reset_at = parseResetTime(logTail, now);
-    const match = usagePattern.exec(logTail);
+  // 2. Usage limit (applied only to last 60 non-empty lines)
+  const usagePattern =
+    /\b(?:usage limit|limit reached|quota exceeded|exceeded your current quota|you've hit your limit|out of credits|insufficient_quota|RESOURCE_EXHAUSTED)\b/i;
+  if (usagePattern.test(last60)) {
+    const reset_at = parseResetTime(last60, now);
+    const match = usagePattern.exec(last60);
     return {
       kind: 'usage_limit',
       reset_at,
@@ -913,28 +1056,25 @@ export function classifyFailure(
     };
   }
 
-  // 3. Auth
+  // 3. Auth (applied only to last 60 non-empty lines)
   const authPattern = /OAuth session expired|Please set an Auth method|\b401\b|not logged in/i;
-  if (authPattern.test(logTail)) {
-    const match = authPattern.exec(logTail);
+  if (authPattern.test(last60)) {
+    const match = authPattern.exec(last60);
     return {
       kind: 'auth',
       raw: match ? match[0] : 'auth',
     };
   }
 
-  // 4. Transient (matched ONLY in last 40 lines of logTail)
-  const lines = logTail.split(/\r?\n/);
-  const last40 = lines.slice(-40).join('\n');
-
-  if (/\b429\b/.test(last40)) return { kind: 'transient', code: '429', raw: '429' };
-  if (/\b529\b/.test(last40)) return { kind: 'transient', code: '529', raw: '529' };
-  if (/\b503\b/.test(last40)) return { kind: 'transient', code: '503', raw: '503' };
-  if (/overloaded/i.test(last40)) return { kind: 'transient', code: 'overloaded', raw: 'overloaded' };
-  if (/Too Many Requests/i.test(last40) || /rate.?limit/i.test(last40)) {
+  // 4. Transient (applied only to last 60 non-empty lines)
+  if (/\b429\b/.test(last60)) return { kind: 'transient', code: '429', raw: '429' };
+  if (/\b529\b/.test(last60)) return { kind: 'transient', code: '529', raw: '529' };
+  if (/\b503\b/.test(last60)) return { kind: 'transient', code: '503', raw: '503' };
+  if (/overloaded/i.test(last60)) return { kind: 'transient', code: 'overloaded', raw: 'overloaded' };
+  if (/Too Many Requests/i.test(last60) || /rate.?limit/i.test(last60)) {
     return { kind: 'transient', code: 'rate_limit', raw: 'rate_limit' };
   }
-  if (/ECONNRESET|ETIMEDOUT|socket hang up|temporarily unavailable/i.test(last40)) {
+  if (/ECONNRESET|ETIMEDOUT|socket hang up|temporarily unavailable/i.test(last60)) {
     return { kind: 'transient', code: 'network', raw: 'network' };
   }
 
@@ -955,6 +1095,29 @@ export function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+export function isValidEnvSecret(key: string, value: string): boolean {
+  if (typeof value !== 'string') return false;
+  const val = value.trim();
+  if (val.length < 8) return false;
+  if (val.toLowerCase() === 'true' || val.toLowerCase() === 'false') return false;
+  if (/^\d+$/.test(val) && val.length < 10) return false;
+
+  if (/(KEY|SECRET|TOKEN|PASS|PWD|AUTH|CREDENTIAL|PRIVATE)/i.test(key)) {
+    return true;
+  }
+
+  if (val.length >= 16) {
+    const hasLower = /[a-z]/.test(val);
+    const hasUpper = /[A-Z]/.test(val);
+    const hasDigit = /\d/.test(val);
+    const hasSymbol = /[^a-zA-Z0-9]/.test(val);
+    const typesCount = [hasLower, hasUpper, hasDigit, hasSymbol].filter(Boolean).length;
+    if (typesCount >= 3) return true;
+  }
+
+  return false;
+}
+
 export function redactSecrets(text: string, extraValues?: string[]): string {
   if (!text) return '';
 
@@ -966,22 +1129,25 @@ export function redactSecrets(text: string, extraValues?: string[]): string {
     return `__MAW_S4_POLICY_BLOCK_${policyBlocks.length - 1}__`;
   });
 
-  // 2. Built-in patterns (Design 5.4)
-  out = out.replace(/sk-ant-[A-Za-z0-9_\-]{20,}/g, '[REDACTED:anthropic]');
-  out = out.replace(/sk-(?:proj-)?[A-Za-z0-9_\-]{20,}/g, '[REDACTED:openai]');
-  out = out.replace(/github_pat_[A-Za-z0-9_]{50,}/g, '[REDACTED:github]');
-  out = out.replace(/gh[pousr]_[A-Za-z0-9]{36,}/g, '[REDACTED:github]');
+  // 2. Built-in patterns (Item 12: require non-alphanumeric boundary before tokens)
+  out = out.replace(/(?<=^|[^a-zA-Z0-9_\-])sk-ant-[A-Za-z0-9_\-]{20,}/g, '[REDACTED:anthropic]');
+  out = out.replace(/(?<=^|[^a-zA-Z0-9_\-])sk-(?:proj-)?[A-Za-z0-9_\-]{20,}/g, '[REDACTED:openai]');
+  out = out.replace(/(?<=^|[^a-zA-Z0-9_\-])github_pat_[A-Za-z0-9_]{50,}/g, '[REDACTED:github]');
+  out = out.replace(/(?<=^|[^a-zA-Z0-9_\-])gh[pousr]_[A-Za-z0-9]{36,}/g, '[REDACTED:github]');
   out = out.replace(/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED:aws]');
-  out = out.replace(/AIza[0-9A-Za-z_\-]{35}/g, '[REDACTED:google]');
-  out = out.replace(/xox[baprs]-[A-Za-z0-9-]{10,}/g, '[REDACTED:slack]');
+  out = out.replace(/(?<=^|[^a-zA-Z0-9_\-])AIza[0-9A-Za-z_\-]{35}/g, '[REDACTED:google]');
+  out = out.replace(/(?<=^|[^a-zA-Z0-9_\-])xox[baprs]-[A-Za-z0-9-]{10,}/g, '[REDACTED:slack]');
   out = out.replace(/\b\d{8,10}:[A-Za-z0-9_\-]{35}\b/g, '[REDACTED:telegram]');
-  out = out.replace(/eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+/g, '[REDACTED:jwt]');
-  out = out.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[REDACTED:private_key]');
-
-  // Assignment: keeps key name, redacts value
+  out = out.replace(/(?<=^|[^a-zA-Z0-9_\-])eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+/g, '[REDACTED:jwt]');
   out = out.replace(
-    /(api[_-]?key|secret|token|password|passwd)(\s*[:=]\s*["']?)(?!\[REDACTED:)([^\s"']{8,})(["']?)/gi,
-    '$1$2[REDACTED:assignment]$4'
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
+    '[REDACTED:private_key]'
+  );
+
+  // Assignment: keeps key name, redacts value (supports quotes before colon as in JSON/YAML)
+  out = out.replace(
+    /(["']?(?:api[_-]?key|secret|token|password|passwd)["']?\s*[:=]\s*["']?)(?!\[REDACTED:)([^\s"']{8,})(["']?)/gi,
+    '$1[REDACTED:assignment]$3'
   );
 
   // 3. Extra values (.env values, secret_patterns)
@@ -989,7 +1155,6 @@ export function redactSecrets(text: string, extraValues?: string[]): string {
     for (const val of extraValues) {
       if (typeof val === 'string' && val.trim().length >= 8) {
         const trimmed = val.trim();
-        // Do not redact if already a redaction placeholder
         if (trimmed.startsWith('[REDACTED:')) continue;
         const re = new RegExp(escapeRegExp(trimmed), 'g');
         out = out.replace(re, '[REDACTED:custom]');
@@ -1009,11 +1174,7 @@ export function redactSecrets(text: string, extraValues?: string[]): string {
 // 8. Command Matching
 // ============================================================================
 
-export function matchCommand(
-  text: string,
-  pattern: string,
-  allowPatterns?: string[]
-): boolean {
+export function matchCommand(text: string, pattern: string, allowPatterns?: string[]): boolean {
   if (!text || !pattern) return false;
   const lines = text.split(/\r?\n/);
 
@@ -1054,11 +1215,23 @@ function matchSinglePattern(line: string, pattern: string): boolean {
     }
   }
 
-  // Ordered tokens: tokens must appear in this order with anything between them
+  // Item 10: Ordered tokens bounded by start/end/whitespace or shell separator
   const tokens = pat.split(/\s+/).filter(Boolean);
   if (tokens.length === 0) return false;
 
-  const regexStr = tokens.map((t) => escapeRegExp(t)).join('.*');
+  const sepStart = '(?:^|[\\s;|`"\'&()\\\\/<>=])';
+  const sepEnd = '(?=$|[\\s;|`"\'&()\\\\/<>=])';
+
+  const regexStr = tokens
+    .map((t, idx) => {
+      const esc = escapeRegExp(t);
+      if (idx === 0) {
+        return `${sepStart}${esc}${sepEnd}`;
+      }
+      return `.*${sepStart}${esc}${sepEnd}`;
+    })
+    .join('');
+
   try {
     const regex = new RegExp(regexStr, 'i');
     return regex.test(line);
@@ -1073,8 +1246,8 @@ function matchSinglePattern(line: string, pattern: string): boolean {
 
 export function matchGlob(relativePath: string, pattern: string): boolean {
   if (!relativePath || !pattern) return false;
-  let normPath = relativePath.replace(/\\/g, '/').replace(/^\.?\//, '').toLowerCase();
-  let normPat = pattern.replace(/\\/g, '/').replace(/^\.?\//, '').toLowerCase();
+  const normPath = relativePath.replace(/\\/g, '/').replace(/^\.?\//, '').toLowerCase();
+  const normPat = pattern.replace(/\\/g, '/').replace(/^\.?\//, '').toLowerCase();
 
   // If pattern does not contain '/', match against basename at any depth
   if (!normPat.includes('/')) {
@@ -1089,14 +1262,12 @@ function matchGlobExact(str: string, pat: string): boolean {
   let reStr = '';
   let i = 0;
   while (i < pat.length) {
-    if (pat.substring(i, i + 2) === '**') {
+    if (pat.substring(i, i + 3) === '**/') {
+      reStr += '(?:.*/)?';
+      i += 3;
+    } else if (pat.substring(i, i + 2) === '**') {
       reStr += '.*';
       i += 2;
-      // Skip trailing slash after ** if any
-      if (pat[i] === '/') {
-        reStr += '(?:/.*)?';
-        i += 1;
-      }
     } else if (pat[i] === '*') {
       reStr += '[^/]*';
       i += 1;
@@ -1200,7 +1371,10 @@ export function pickFallback(options: {
     if (agentDayCapBlockUsd > 0) {
       const spent = agentDaySpentUsd[id] ?? 0;
       if (spent >= agentDayCapBlockUsd) {
-        skipped.push({ agent: id, why: `agent_day budget exceeded ($${spent.toFixed(2)} >= $${agentDayCapBlockUsd.toFixed(2)})` });
+        skipped.push({
+          agent: id,
+          why: `agent_day budget exceeded ($${spent.toFixed(2)} >= $${agentDayCapBlockUsd.toFixed(2)})`,
+        });
         continue;
       }
     }
@@ -1281,10 +1455,8 @@ export function replaceAgent(
   }
 
   if (agentChanged) {
-    // Model / effort overrides are dropped when the agent changes
     delete result.model;
     delete result.effort;
-    // new_session is kept only if the new agent supports it
     if (result.new_session) {
       if (!toAgentInfo?.capabilities?.new_session) {
         delete result.new_session;
@@ -1296,9 +1468,7 @@ export function replaceAgent(
 }
 
 export function cleanPromptText(raw: string): string {
-  // Strip UTF-8 BOM if present
   let clean = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
-  // Remove S4 policy block if present
   clean = clean.replace(/<!-- MAW-S4-POLICY:BEGIN -->[\s\S]*?<!-- MAW-S4-POLICY:END -->\s*/g, '');
   return clean.trim();
 }
@@ -1338,4 +1508,3 @@ export function rebuildRunBody(
 
   return body;
 }
-

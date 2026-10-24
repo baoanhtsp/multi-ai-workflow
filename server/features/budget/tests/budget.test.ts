@@ -40,7 +40,11 @@ function createTempEnv() {
   const ctx: MawFeatureContext = {
     paths,
     registry,
-    readJobs: async () => [],
+    readJobs: async () => {
+      if (!fs.existsSync(testJobsDir)) return [];
+      const files = fs.readdirSync(testJobsDir).filter((f) => f.endsWith('.json'));
+      return files.map((f) => JSON.parse(fs.readFileSync(path.join(testJobsDir, f), 'utf8')));
+    },
     startJob: async () => ({ job_id: 'job_started_mock' }),
   };
 

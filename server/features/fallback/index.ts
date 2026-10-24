@@ -1,12 +1,14 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { MawFeature, MawFeatureContext } from '../../lib/feature.ts';
+import { createFeatureContext, type MawFeature, type MawFeatureContext } from '../../lib/feature.ts';
+import { ApiValidationError } from '../../lib/validate.ts';
 import { detectRegistryAgents } from '../../lib/versions.ts';
 import {
   appendS4Audit,
   classifyFailure,
   createDefaultFallbackConfig,
+  loadFallbackConfig,
   pickFallback,
   readJsonSafe,
   rebuildRunBody,
@@ -26,7 +28,7 @@ export interface RecoveryItem {
   role: string;
   fallback_agent: string | null;
   attempt: number;
-  status: 'waiting' | 'started' | 'done' | 'cancelled' | 'failed' | 'gave_up' | 'suggested';
+  status: 'waiting' | 'starting' | 'started' | 'done' | 'cancelled' | 'failed' | 'gave_up' | 'suggested';
   next_at: string | null;
   reason: string;
   created_at: string;
@@ -40,7 +42,30 @@ export interface RecoveryData {
 }
 
 let engineInterval: NodeJS.Timeout | null = null;
-let isScanning = false;
+
+// Item 7: In-process async mutex
+let recoveryLockPromise: Promise<void> = Promise.resolve();
+export async function withRecoveryLock<T>(fn: () => Promise<T>): Promise<T> {
+  let release: () => void = () => {};
+  const nextLock = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const prevLock = recoveryLockPromise;
+  recoveryLockPromise = (async () => {
+    try {
+      await prevLock;
+    } catch {
+      // Ignore previous lock failures
+    }
+  })();
+
+  await prevLock;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
 
 function generateRecoveryId(): string {
   const ts = Date.now();
@@ -49,10 +74,7 @@ function generateRecoveryId(): string {
 }
 
 export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
-  if (isScanning) return;
-  isScanning = true;
-
-  try {
+  await withRecoveryLock(async () => {
     const fallbackDir = ctx.paths.featureDataDir('fallback');
     const recFile = path.win32.join(fallbackDir, 'recovery.json');
     const recData = readJsonSafe<RecoveryData>(recFile, {
@@ -66,30 +88,16 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
       {}
     ).data;
 
-    const routingFile = path.win32.join(fallbackDir, 'routing.json');
-    const routingCfg = readJsonSafe<FallbackConfig>(routingFile, createDefaultFallbackConfig()).data;
+    const { config: routingCfg } = loadFallbackConfig(fallbackDir);
 
-    const detected = await detectRegistryAgents(ctx.paths, ctx.registry.agents);
-    const agentInfoMap: Record<string, FallbackAgentInfo> = {};
-    for (const a of ctx.registry.agents) {
-      const det = detected.get(a.id);
-      agentInfoMap[a.id] = {
-        id: a.id,
-        label: a.label,
-        enabled: a.enabled,
-        installed: det ? det.installed : true,
-        capabilities: a.capabilities,
-      };
-    }
+    const validAgentIds = new Set(ctx.registry.agents.map((a) => a.id.toLowerCase()));
 
-    const jobsDir = ctx.paths.jobsDir;
-    if (!fs.existsSync(jobsDir)) return;
-
-    let fileNames: string[] = [];
+    // Item 6: Use ctx.readJobs() as the source of job metas
+    let jobs: Array<Record<string, unknown>> = [];
     try {
-      fileNames = fs.readdirSync(jobsDir).filter((n) => n.startsWith('job_') && n.endsWith('.json'));
+      jobs = await ctx.readJobs();
     } catch {
-      return;
+      jobs = [];
     }
 
     const processedSet = new Set(recData.processed_jobs || []);
@@ -97,15 +105,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
     const nowMs = now.getTime();
     let changed = false;
 
-    for (const fName of fileNames) {
-      const fullPath = path.win32.join(jobsDir, fName);
-      let meta: Record<string, unknown>;
-      try {
-        meta = JSON.parse(fs.readFileSync(fullPath, 'utf8')) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-
+    for (const meta of jobs) {
       const jobId = String(meta.job_id ?? '').trim();
       if (!jobId || processedSet.has(jobId)) continue;
 
@@ -127,7 +127,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
       }
 
       // Read last 64 KB of log
-      const logFile = path.win32.join(jobsDir, `${jobId}.log`);
+      const logFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.log`);
       let logTail = '';
       if (fs.existsSync(logFile)) {
         try {
@@ -142,7 +142,14 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
       processedSet.add(jobId);
       changed = true;
 
-      const agent = String(meta.agent ?? meta.mode ?? '').trim().toLowerCase();
+      // Item 8: Which agent failed: extract from tag if present, verify it is a valid registry agent
+      let failedAgent = String(meta.agent ?? '').trim().toLowerCase();
+      if (classified.kind === 'blocked' && classified.agent) {
+        failedAgent = classified.agent.trim().toLowerCase();
+      }
+      const isKnownAgent = validAgentIds.has(failedAgent);
+      const isMultiAgentMode = ['team', 'auto-gate', 'council'].includes(String(meta.mode ?? ''));
+
       const role = String(meta.role ?? 'backend').trim().toLowerCase();
       const roleCfg = routingCfg.roles[role] || { fallbacks: [], auto_fallback: false };
 
@@ -153,26 +160,44 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
         rootJobId = priorItem.root_job_id;
       }
 
-      // Chain attempt count
       const chainItems = (recData.items || []).filter((it) => it.root_job_id === rootJobId);
       const attempt = chainItems.length + 1;
+
+      // Lazy detectRegistryAgents only if needed for fallback picking
+      let agentInfoMap: Record<string, FallbackAgentInfo> | null = null;
+      const getAgentInfoMap = async () => {
+        if (!agentInfoMap) {
+          const detected = await detectRegistryAgents(ctx.paths, ctx.registry.agents);
+          agentInfoMap = {};
+          for (const a of ctx.registry.agents) {
+            const det = detected.get(a.id);
+            agentInfoMap[a.id] = {
+              id: a.id,
+              label: a.label,
+              enabled: a.enabled,
+              installed: det ? det.installed : true,
+              capabilities: a.capabilities,
+            };
+          }
+        }
+        return agentInfoMap;
+      };
 
       // Decisions Table
       if (classified.kind === 'blocked') {
         if (classified.by === 's4' && (classified.code === 'budget' || classified.code === 'policy')) {
-          // No auto action, no retry
           continue;
         }
         if (classified.by === 's4' && classified.code === 'approval') {
-          // Waits for policy_approve
           continue;
         }
-        // Blocked by cooldown / budget agent_day / other hook (unhealthy)
+
+        const infoMap = await getAgentInfoMap();
         const fbResult = pickFallback({
           role,
-          blockedAgent: agent,
+          blockedAgent: failedAgent,
           fallbacks: roleCfg.fallbacks,
-          agents: agentInfoMap,
+          agents: infoMap,
           cooldowns,
           now,
         });
@@ -184,7 +209,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
             root_job_id: rootJobId,
             source_job_id: jobId,
             kind: 'fallback',
-            agent,
+            agent: failedAgent,
             role,
             fallback_agent: fbAgent,
             attempt,
@@ -202,7 +227,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
             root_job_id: rootJobId,
             source_job_id: jobId,
             kind: 'fallback',
-            agent,
+            agent: failedAgent,
             role,
             fallback_agent: fbAgent,
             attempt,
@@ -218,20 +243,25 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
       } else if (classified.kind === 'usage_limit') {
         const lastStep = routingCfg.recovery.backoff_s[routingCfg.recovery.backoff_s.length - 1] ?? 1800;
         const untilIso = classified.reset_at || new Date(nowMs + lastStep * 1000).toISOString();
-        cooldowns[agent] = {
-          until: untilIso,
-          reason: 'Usage limit reached',
-          source_job_id: jobId,
-        };
+
+        // Item 8: Never set cooldown for non-registry id
+        if (isKnownAgent) {
+          cooldowns[failedAgent] = {
+            until: untilIso,
+            reason: 'Usage limit reached',
+            source_job_id: jobId,
+          };
+        }
 
         const diffS = classified.reset_at ? (new Date(classified.reset_at).getTime() - nowMs) / 1000 : Infinity;
         if (classified.reset_at && diffS <= routingCfg.recovery.max_wait_s) {
-          if (routingCfg.recovery.prefer_fallback_on_limit && roleCfg.auto_fallback) {
+          if (routingCfg.recovery.prefer_fallback_on_limit && roleCfg.auto_fallback && isKnownAgent) {
+            const infoMap = await getAgentInfoMap();
             const fbResult = pickFallback({
               role,
-              blockedAgent: agent,
+              blockedAgent: failedAgent,
               fallbacks: roleCfg.fallbacks,
-              agents: agentInfoMap,
+              agents: infoMap,
               cooldowns,
               now,
             });
@@ -241,7 +271,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
                 root_job_id: rootJobId,
                 source_job_id: jobId,
                 kind: 'fallback',
-                agent,
+                agent: failedAgent,
                 role,
                 fallback_agent: fbResult.agent,
                 attempt,
@@ -257,14 +287,16 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
             }
           }
 
-          if (routingCfg.recovery.wait_for_reset) {
-            const nextAt = new Date(new Date(classified.reset_at).getTime() + routingCfg.recovery.reset_grace_s * 1000).toISOString();
+          if (routingCfg.recovery.wait_for_reset || isMultiAgentMode) {
+            const nextAt = new Date(
+              new Date(classified.reset_at).getTime() + routingCfg.recovery.reset_grace_s * 1000
+            ).toISOString();
             const item: RecoveryItem = {
               id: generateRecoveryId(),
               root_job_id: rootJobId,
               source_job_id: jobId,
               kind: 'usage_limit',
-              agent,
+              agent: failedAgent,
               role,
               fallback_agent: null,
               attempt,
@@ -282,7 +314,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
               root_job_id: rootJobId,
               source_job_id: jobId,
               kind: 'usage_limit',
-              agent,
+              agent: failedAgent,
               role,
               fallback_agent: null,
               attempt,
@@ -296,13 +328,12 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
             recData.items.unshift(item);
           }
         } else {
-          // Reset further than max_wait_s -> suggested
           const item: RecoveryItem = {
             id: generateRecoveryId(),
             root_job_id: rootJobId,
             source_job_id: jobId,
             kind: 'usage_limit',
-            agent,
+            agent: failedAgent,
             role,
             fallback_agent: null,
             attempt,
@@ -318,11 +349,15 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
       } else if (classified.kind === 'transient') {
         const stepIndex = Math.min(attempt - 1, routingCfg.recovery.backoff_s.length - 1);
         const backoffSec = routingCfg.recovery.backoff_s[stepIndex] ?? 30;
-        cooldowns[agent] = {
-          until: new Date(nowMs + backoffSec * 1000).toISOString(),
-          reason: `Rate limit / transient error (${classified.code})`,
-          source_job_id: jobId,
-        };
+
+        // Item 8: Never set cooldown for non-registry id
+        if (isKnownAgent) {
+          cooldowns[failedAgent] = {
+            until: new Date(nowMs + backoffSec * 1000).toISOString(),
+            reason: `Rate limit / transient error (${classified.code})`,
+            source_job_id: jobId,
+          };
+        }
 
         if (routingCfg.recovery.enabled && attempt < routingCfg.recovery.max_attempts) {
           const nextAt = new Date(nowMs + backoffSec * 1000).toISOString();
@@ -331,7 +366,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
             root_job_id: rootJobId,
             source_job_id: jobId,
             kind: 'transient',
-            agent,
+            agent: failedAgent,
             role,
             fallback_agent: null,
             attempt,
@@ -349,7 +384,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
             root_job_id: rootJobId,
             source_job_id: jobId,
             kind: 'transient',
-            agent,
+            agent: failedAgent,
             role,
             fallback_agent: null,
             attempt,
@@ -365,43 +400,37 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
       }
     }
 
-    // Save cooldowns
     writeJsonAtomic(cooldownFile, cooldowns);
-
-    // Bound items and processed_jobs
     recData.processed_jobs = [...processedSet].slice(-1000);
     recData.items = (recData.items || []).slice(0, 500);
 
     if (changed || recData.items.length > 0) {
       writeJsonAtomic(recFile, recData);
     }
+  });
 
-    // Process due items
-    await processDueItems(ctx, recData, agentInfoMap);
-  } finally {
-    isScanning = false;
-  }
+  // Process due items
+  await processDueItems(ctx);
 }
 
-async function processDueItems(
-  ctx: MawFeatureContext,
-  recData: RecoveryData,
-  agentInfoMap: Record<string, FallbackAgentInfo>
-): Promise<void> {
-  const nowIso = new Date().toISOString();
-  const dueItems = recData.items.filter(
-    (it) => it.status === 'waiting' && it.next_at && it.next_at <= nowIso
-  );
-
-  if (dueItems.length === 0) return;
-
+async function processDueItems(ctx: MawFeatureContext): Promise<void> {
   const fallbackDir = ctx.paths.featureDataDir('fallback');
   const recFile = path.win32.join(fallbackDir, 'recovery.json');
   const jobsDir = ctx.paths.jobsDir;
 
-  let startedCount = 0;
-  for (const item of dueItems) {
-    if (startedCount >= 3) break; // at most 3 per tick
+  let dueItemToStart: RecoveryItem | null = null;
+  let runBody: Record<string, unknown> | null = null;
+
+  // Item 7: Lock to select and mark item as 'starting'
+  await withRecoveryLock(async () => {
+    const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+    const nowIso = new Date().toISOString();
+    const item = recData.items.find((it) => it.status === 'waiting' && it.next_at && it.next_at <= nowIso);
+
+    if (!item) return;
+
+    item.status = 'starting';
+    writeJsonAtomic(recFile, recData);
 
     const sourceMetaFile = path.win32.join(jobsDir, `${item.source_job_id}.json`);
     const promptFile = path.win32.join(jobsDir, `${item.source_job_id}.prompt.txt`);
@@ -415,30 +444,52 @@ async function processDueItems(
       }
     }
 
-    let runBody = rebuildRunBody(meta, promptFile);
+    runBody = rebuildRunBody(meta, promptFile);
     if (item.fallback_agent) {
-      runBody = replaceAgent(runBody, item.agent, item.fallback_agent, agentInfoMap[item.fallback_agent]);
+      runBody = replaceAgent(runBody, item.agent, item.fallback_agent);
     }
+    dueItemToStart = item;
+  });
 
-    try {
-      const res = await ctx.startJob(runBody);
-      const newJobId = String(res.job_id ?? '');
-      item.status = 'started';
-      item.new_job_id = newJobId;
-      startedCount += 1;
-    } catch (err) {
-      item.status = 'failed';
-      item.error = err instanceof Error ? err.message : String(err);
-    }
+  if (!dueItemToStart || !runBody) return;
 
-    writeJsonAtomic(recFile, recData);
+  // Start the job outside the lock so we don't hold the lock during long spawns
+  let newJobId: string | null = null;
+  let startError: string | null = null;
+  try {
+    const res = await ctx.startJob(runBody);
+    newJobId = String(res.job_id ?? '');
+  } catch (err) {
+    startError = err instanceof Error ? err.message : String(err);
   }
+
+  // Update item inside the lock
+  await withRecoveryLock(async () => {
+    const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+    const item = recData.items.find((it) => it.id === dueItemToStart!.id);
+    if (item) {
+      if (item.status === 'cancelled') {
+        // Cancelled while starting
+        return;
+      }
+      if (newJobId) {
+        item.status = 'started';
+        item.new_job_id = newJobId;
+      } else {
+        item.status = 'failed';
+        item.error = startError || 'Failed to start recovery job';
+      }
+      writeJsonAtomic(recFile, recData);
+    }
+  });
 }
 
+// Item 17: rebuild context each tick with createFeatureContext(ctx.paths)
 export function ensureEngine(ctx: MawFeatureContext): void {
   if (!engineInterval) {
     engineInterval = setInterval(() => {
-      scanFinishedJobs(ctx).catch(() => {});
+      const freshCtx = createFeatureContext(ctx.paths);
+      scanFinishedJobs(freshCtx).catch(() => {});
     }, 5000);
     engineInterval.unref();
   }
@@ -452,10 +503,7 @@ export const feature: MawFeature = {
       handler: async (ctx) => {
         ensureEngine(ctx);
         const fallbackDir = ctx.paths.featureDataDir('fallback');
-        const cfgFile = path.win32.join(fallbackDir, 'routing.json');
-        const readRes = readJsonSafe<FallbackConfig>(cfgFile, createDefaultFallbackConfig());
-        const warnings: string[] = [];
-        if (readRes.warning) warnings.push(readRes.warning);
+        const { config, warnings } = loadFallbackConfig(fallbackDir);
 
         const cooldownFile = path.win32.join(fallbackDir, 'cooldowns.json');
         const cooldowns = readJsonSafe<Record<string, { until: string }>>(cooldownFile, {}).data;
@@ -474,7 +522,7 @@ export const feature: MawFeature = {
 
         return {
           ok: true,
-          config: readRes.data,
+          config,
           roles: ['architect', 'leader', 'backend', 'frontend', 'reviewer', 'tester'],
           agents,
           warnings,
@@ -490,12 +538,10 @@ export const feature: MawFeature = {
         const valRes = validateFallbackConfig(rawConfig, knownAgents);
 
         if (valRes.errorField) {
-          if (req.res) req.res.statusCode = 400;
-          return {
-            ok: false,
-            error: valRes.errorMessage || 'Invalid routing configuration.',
-            field: valRes.errorField,
-          };
+          throw new ApiValidationError(
+            `${valRes.errorField}: ${valRes.errorMessage || 'Invalid routing configuration.'}`,
+            400
+          );
         }
 
         const fallbackDir = ctx.paths.featureDataDir('fallback');
@@ -517,8 +563,7 @@ export const feature: MawFeature = {
         const agent = (req.url.searchParams.get('agent') ?? '').trim().toLowerCase();
 
         const fallbackDir = ctx.paths.featureDataDir('fallback');
-        const cfgFile = path.win32.join(fallbackDir, 'routing.json');
-        const routingCfg = readJsonSafe<FallbackConfig>(cfgFile, createDefaultFallbackConfig()).data;
+        const { config: routingCfg } = loadFallbackConfig(fallbackDir);
         const roleFallbacks = routingCfg.roles[role]?.fallbacks || [];
 
         const cooldownFile = path.win32.join(fallbackDir, 'cooldowns.json');
@@ -589,33 +634,32 @@ export const feature: MawFeature = {
       handler: async (ctx, req) => {
         const id = String(req.body.id ?? '').trim();
         if (!id) {
-          if (req.res) req.res.statusCode = 400;
-          return { ok: false, error: "Missing 'id' parameter." };
+          throw new ApiValidationError("Missing 'id' parameter.", 400);
         }
 
-        const fallbackDir = ctx.paths.featureDataDir('fallback');
-        const recFile = path.win32.join(fallbackDir, 'recovery.json');
-        const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+        return await withRecoveryLock(async () => {
+          const fallbackDir = ctx.paths.featureDataDir('fallback');
+          const recFile = path.win32.join(fallbackDir, 'recovery.json');
+          const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
 
-        const item = recData.items.find((it) => it.id === id);
-        if (!item) {
-          if (req.res) req.res.statusCode = 404;
-          return { ok: false, error: `Recovery item '${id}' not found.` };
-        }
+          const item = recData.items.find((it) => it.id === id);
+          if (!item) {
+            throw new ApiValidationError(`Recovery item '${id}' not found.`, 404);
+          }
 
-        if (item.status !== 'waiting' && item.status !== 'suggested') {
-          if (req.res) req.res.statusCode = 400;
-          return { ok: false, error: `Item '${id}' cannot be cancelled (status: ${item.status}).` };
-        }
+          if (item.status !== 'waiting' && item.status !== 'suggested') {
+            throw new ApiValidationError(`Item '${id}' cannot be cancelled (status: ${item.status}).`, 409);
+          }
 
-        item.status = 'cancelled';
-        writeJsonAtomic(recFile, recData);
-        appendS4Audit(fallbackDir, 'recovery_cancel', { id });
+          item.status = 'cancelled';
+          writeJsonAtomic(recFile, recData);
+          appendS4Audit(fallbackDir, 'recovery_cancel', { id });
 
-        return {
-          ok: true,
-          item,
-        };
+          return {
+            ok: true,
+            item,
+          };
+        });
       },
     },
     recovery_apply: {
@@ -624,78 +668,90 @@ export const feature: MawFeature = {
         const id = String(req.body.id ?? '').trim();
         const customAgent = req.body.agent ? String(req.body.agent).trim().toLowerCase() : undefined;
         if (!id) {
-          if (req.res) req.res.statusCode = 400;
-          return { ok: false, error: "Missing 'id' parameter." };
+          throw new ApiValidationError("Missing 'id' parameter.", 400);
         }
 
-        const fallbackDir = ctx.paths.featureDataDir('fallback');
-        const recFile = path.win32.join(fallbackDir, 'recovery.json');
-        const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+        let itemToApply: RecoveryItem | null = null;
+        let runBody: Record<string, unknown> | null = null;
 
-        const item = recData.items.find((it) => it.id === id);
-        if (!item) {
-          if (req.res) req.res.statusCode = 404;
-          return { ok: false, error: `Recovery item '${id}' not found.` };
-        }
+        await withRecoveryLock(async () => {
+          const fallbackDir = ctx.paths.featureDataDir('fallback');
+          const recFile = path.win32.join(fallbackDir, 'recovery.json');
+          const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
 
-        if (item.status !== 'waiting' && item.status !== 'suggested') {
-          if (req.res) req.res.statusCode = 400;
-          return { ok: false, error: `Item '${id}' cannot be applied (status: ${item.status}).` };
-        }
-
-        const targetAgent = customAgent || item.fallback_agent || item.agent;
-
-        const jobsDir = ctx.paths.jobsDir;
-        const sourceMetaFile = path.win32.join(jobsDir, `${item.source_job_id}.json`);
-        const promptFile = path.win32.join(jobsDir, `${item.source_job_id}.prompt.txt`);
-
-        let meta: Record<string, unknown> = {};
-        if (fs.existsSync(sourceMetaFile)) {
-          try {
-            meta = JSON.parse(fs.readFileSync(sourceMetaFile, 'utf8')) as Record<string, unknown>;
-          } catch {
-            meta = {};
+          const item = recData.items.find((it) => it.id === id);
+          if (!item) {
+            throw new ApiValidationError(`Recovery item '${id}' not found.`, 404);
           }
-        }
 
-        const detected = await detectRegistryAgents(ctx.paths, ctx.registry.agents);
-        const agentInfoMap: Record<string, FallbackAgentInfo> = {};
-        for (const a of ctx.registry.agents) {
-          const det = detected.get(a.id);
-          agentInfoMap[a.id] = {
-            id: a.id,
-            label: a.label,
-            enabled: a.enabled,
-            installed: det ? det.installed : true,
-            capabilities: a.capabilities,
-          };
-        }
+          if (item.status !== 'waiting' && item.status !== 'suggested') {
+            throw new ApiValidationError(`Item '${id}' cannot be applied (status: ${item.status}).`, 409);
+          }
 
-        let runBody = rebuildRunBody(meta, promptFile);
-        if (targetAgent && targetAgent !== item.agent) {
-          runBody = replaceAgent(runBody, item.agent, targetAgent, agentInfoMap[targetAgent]);
+          item.status = 'starting';
+          writeJsonAtomic(recFile, recData);
+
+          const targetAgent = customAgent || item.fallback_agent || item.agent;
+          const jobsDir = ctx.paths.jobsDir;
+          const sourceMetaFile = path.win32.join(jobsDir, `${item.source_job_id}.json`);
+          const promptFile = path.win32.join(jobsDir, `${item.source_job_id}.prompt.txt`);
+
+          let meta: Record<string, unknown> = {};
+          if (fs.existsSync(sourceMetaFile)) {
+            try {
+              meta = JSON.parse(fs.readFileSync(sourceMetaFile, 'utf8')) as Record<string, unknown>;
+            } catch {
+              meta = {};
+            }
+          }
+
+          runBody = rebuildRunBody(meta, promptFile);
+          if (targetAgent && targetAgent !== item.agent) {
+            runBody = replaceAgent(runBody, item.agent, targetAgent);
+          }
+          itemToApply = item;
+        });
+
+        if (!itemToApply || !runBody) {
+          throw new ApiValidationError('Could not prepare recovery request.', 500);
         }
 
         let newJobId: string;
         try {
           const res = await ctx.startJob(runBody);
           newJobId = String(res.job_id ?? '');
-          item.status = 'started';
-          item.new_job_id = newJobId;
-          if (customAgent) item.fallback_agent = customAgent;
-          writeJsonAtomic(recFile, recData);
-          appendS4Audit(fallbackDir, 'recovery_apply', { id, new_job_id: newJobId, agent: targetAgent });
         } catch (err) {
-          item.status = 'failed';
-          item.error = err instanceof Error ? err.message : String(err);
-          writeJsonAtomic(recFile, recData);
-          if (req.res) req.res.statusCode = 500;
-          return { ok: false, error: `Failed to start recovery job: ${item.error}` };
+          await withRecoveryLock(async () => {
+            const fallbackDir = ctx.paths.featureDataDir('fallback');
+            const recFile = path.win32.join(fallbackDir, 'recovery.json');
+            const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+            const item = recData.items.find((it) => it.id === id);
+            if (item) {
+              item.status = 'failed';
+              item.error = err instanceof Error ? err.message : String(err);
+              writeJsonAtomic(recFile, recData);
+            }
+          });
+          throw new ApiValidationError(`Failed to start recovery job: ${err instanceof Error ? err.message : String(err)}`, 500);
         }
+
+        await withRecoveryLock(async () => {
+          const fallbackDir = ctx.paths.featureDataDir('fallback');
+          const recFile = path.win32.join(fallbackDir, 'recovery.json');
+          const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+          const item = recData.items.find((it) => it.id === id);
+          if (item) {
+            item.status = 'started';
+            item.new_job_id = newJobId;
+            if (customAgent) item.fallback_agent = customAgent;
+            writeJsonAtomic(recFile, recData);
+            appendS4Audit(fallbackDir, 'recovery_apply', { id, new_job_id: newJobId, agent: customAgent || item.fallback_agent });
+          }
+        });
 
         return {
           ok: true,
-          item,
+          item: itemToApply,
           job_id: newJobId,
         };
       },
@@ -705,17 +761,18 @@ export const feature: MawFeature = {
       handler: async (ctx, req) => {
         const agent = String(req.body.agent ?? '').trim().toLowerCase();
         if (!agent) {
-          if (req.res) req.res.statusCode = 400;
-          return { ok: false, error: "Missing 'agent' parameter." };
+          throw new ApiValidationError("Missing 'agent' parameter.", 400);
         }
 
-        const fallbackDir = ctx.paths.featureDataDir('fallback');
-        const cooldownFile = path.win32.join(fallbackDir, 'cooldowns.json');
-        const cooldowns = readJsonSafe<Record<string, { until: string; reason: string }>>(cooldownFile, {}).data;
+        await withRecoveryLock(async () => {
+          const fallbackDir = ctx.paths.featureDataDir('fallback');
+          const cooldownFile = path.win32.join(fallbackDir, 'cooldowns.json');
+          const cooldowns = readJsonSafe<Record<string, { until: string; reason: string }>>(cooldownFile, {}).data;
 
-        delete cooldowns[agent];
-        writeJsonAtomic(cooldownFile, cooldowns);
-        appendS4Audit(fallbackDir, 'fallback_cooldown_clear', { agent });
+          delete cooldowns[agent];
+          writeJsonAtomic(cooldownFile, cooldowns);
+          appendS4Audit(fallbackDir, 'fallback_cooldown_clear', { agent });
+        });
 
         return { ok: true };
       },
@@ -732,8 +789,7 @@ export const feature: MawFeature = {
     const cooldownFile = path.win32.join(fallbackDir, 'cooldowns.json');
     const cooldowns = readJsonSafe<Record<string, { until: string }>>(cooldownFile, {}).data;
 
-    const routingFile = path.win32.join(fallbackDir, 'routing.json');
-    const routingCfg = readJsonSafe<FallbackConfig>(routingFile, createDefaultFallbackConfig()).data;
+    const { config: routingCfg } = loadFallbackConfig(fallbackDir);
 
     const waiting = (recData.items || [])
       .filter((it) => it.status === 'waiting')

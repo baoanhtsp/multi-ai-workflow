@@ -41,6 +41,7 @@ try {
     if ($env:MAW_JOB_PROJECT -and -not $ctxCopy.ContainsKey("project")) { $ctxCopy["project"] = $env:MAW_JOB_PROJECT }
     if ($env:MAW_S4_AUDIT_OFFSET -and -not $ctxCopy.ContainsKey("audit_offset")) { $ctxCopy["audit_offset"] = $env:MAW_S4_AUDIT_OFFSET }
     if ($env:MAW_TEAM_RUN_ID -and -not $ctxCopy.ContainsKey("team_run_id")) { $ctxCopy["team_run_id"] = $env:MAW_TEAM_RUN_ID }
+    if ($env:WorkDir -and -not $ctxCopy.ContainsKey("workdir")) { $ctxCopy["workdir"] = $env:WorkDir }
 
     $json = $ctxCopy | ConvertTo-Json -Compress
     $rawOut = $json | & $node @($cli, "before-agent")

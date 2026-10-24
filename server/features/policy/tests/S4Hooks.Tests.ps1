@@ -128,19 +128,64 @@ Describe "S4 Hook Wrappers" {
             $res.Reason | Should -Match '\[S4:budget agent=claude fallback=none\]'
         }
 
-        It "job-start exports MAW_JOB_ID and MAW_TEAM_RUN_ID into process env" {
+        It "job-start exports MAW_JOB_ID and MAW_TEAM_RUN_ID into process env and prepends policy brief to prompt file" {
+            # Create fake jobsDir and prompt file
+            $jobsDir = Join-Path $env:TEMP "maw_jobs"
+            New-Item -ItemType Directory -Force -Path $jobsDir | Out-Null
+            $promptFile = Join-Path $jobsDir "job_start_test.prompt.txt"
+            Set-Content -LiteralPath $promptFile -Value "Please write a simple backend function."
+
             $Context = @{
                 job_id = "job_start_test"
                 mode = "task"
-                role = "backend"
+                role = "reviewer"
                 project = $script:repoRoot
             }
             $res = & $script:jobStartHook
             $res.Block | Should -Be $false
             $env:MAW_JOB_ID | Should -Be "job_start_test"
             $env:MAW_TEAM_RUN_ID | Should -Be "job_start_test"
+
+            # Check prompt file contains policy brief
+            $promptContent = Get-Content -LiteralPath $promptFile -Raw
+            $promptContent | Should -Match '<!-- MAW-S4-POLICY:BEGIN -->'
+            $promptContent | Should -Match '## Policy for role reviewer'
+            $promptContent | Should -Match 'Please write a simple backend function.'
+
             $env:MAW_JOB_ID = $null
             $env:MAW_TEAM_RUN_ID = $null
+        }
+
+        It "before-review hook blocks on a red gate in a temp repo" {
+            $testRepo = Join-Path $script:tempDir "test_gate_repo"
+            New-Item -ItemType Directory -Force -Path (Join-Path $testRepo ".maw") | Out-Null
+
+            # Git init
+            & git init $testRepo 2>$null | Out-Null
+
+            # Write failing check config
+            $checksCfg = @{
+                version = 1
+                checks = @(
+                    @{
+                        id = "failing_test"
+                        label = "Failing Test"
+                        command = @("node", "-e", "process.exit(1)")
+                        required = $true
+                    }
+                )
+                spec_guard = $false
+                min_review_score = 0
+            }
+            $checksCfg | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $testRepo ".maw\checks.json")
+
+            $Context = @{
+                workdir = $testRepo
+            }
+            $res = & $script:beforeReviewHook
+            $res.Block | Should -Be $true
+            $res.Reason | Should -Match 'Test gate red'
+            $res.Reason | Should -Match '\[S4:gate\]'
         }
     }
 }

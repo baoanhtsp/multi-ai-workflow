@@ -1,15 +1,17 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { MawFeature, MawFeatureContext, MawFeatureRequest } from '../../lib/feature.ts';
+import { createFeatureContext, type MawFeature, type MawFeatureContext } from '../../lib/feature.ts';
+import { ApiValidationError } from '../../lib/validate.ts';
 import {
   appendJsonl,
   appendS4Audit,
   calculateAgentDaySpend,
   calculateDaySpend,
-  calculateJobSpendFromOffset,
   calculateProjectSpend,
   classifyFailure,
   createDefaultBudgetConfig,
+  findProjectOverride,
+  loadBudgetConfig,
   readAuditRows,
   readJsonSafe,
   validateBudgetConfig,
@@ -20,8 +22,7 @@ import {
 
 // Cache for status to keep it fast
 let cachedStatus: {
-  mtime: number;
-  size: number;
+  cacheKey: string;
   data: Record<string, unknown>;
 } | null = null;
 
@@ -84,7 +85,6 @@ export function parseReviewFromLog(logText: string): {
     let minScore: number | null = null;
 
     for (const t of tokens) {
-      // format: <id>=<VERDICT>|<score>
       const parts = t.split('=');
       if (parts.length === 2) {
         const val = parts[1]!;
@@ -149,15 +149,12 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
     }
   }
 
-  // Read all job metas from jobsDir
-  const jobsDir = ctx.paths.jobsDir;
-  if (!fs.existsSync(jobsDir)) return;
-
-  let fileNames: string[] = [];
+  // Item 6: Use ctx.readJobs() as the source of job metas (refreshes RUNNING -> DONE/FAILED)
+  let jobs: Array<Record<string, unknown>> = [];
   try {
-    fileNames = fs.readdirSync(jobsDir).filter((n) => n.startsWith('job_') && n.endsWith('.json'));
+    jobs = await ctx.readJobs();
   } catch {
-    return;
+    jobs = [];
   }
 
   // Read audit rows for calculating job cost
@@ -168,33 +165,25 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
   const recFile = path.win32.join(fallbackDir, 'recovery.json');
   const recoveryItems: Array<{ id: string; new_job_id?: string; source_job_id?: string; root_job_id?: string }> = [];
   if (fs.existsSync(recFile)) {
-    const recData = readJsonSafe<{ items?: Array<{ id: string; new_job_id?: string; source_job_id?: string; root_job_id?: string }> }>(
-      recFile,
-      { items: [] }
-    );
+    const recData = readJsonSafe<{
+      items?: Array<{ id: string; new_job_id?: string; source_job_id?: string; root_job_id?: string }>;
+    }>(recFile, { items: [] });
     if (recData.data.items) {
       recoveryItems.push(...recData.data.items);
     }
   }
 
-  for (const fName of fileNames) {
-    const fullPath = path.win32.join(jobsDir, fName);
-    let meta: Record<string, unknown>;
-    try {
-      meta = JSON.parse(fs.readFileSync(fullPath, 'utf8')) as Record<string, unknown>;
-    } catch {
-      continue;
-    }
+  const jobsDir = ctx.paths.jobsDir;
 
+  for (const meta of jobs) {
     const jobId = String(meta.job_id ?? '').trim();
     if (!jobId || seenJobIds.has(jobId)) continue;
 
     const status = String(meta.status ?? 'UNKNOWN');
     if (status === 'RUNNING') continue; // only finished jobs
 
-    // Find recovery info
     const recMatch = recoveryItems.find((it) => it.new_job_id === jobId);
-    const recoveryOf = recMatch ? (recMatch.source_job_id || recMatch.root_job_id || null) : null;
+    const recoveryOf = recMatch ? recMatch.source_job_id || recMatch.root_job_id || null : null;
     const teamRunId = recMatch?.root_job_id || String(meta.team_run_id || jobId);
 
     const startedAt = String(meta.started_at ?? '');
@@ -236,7 +225,6 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
       if (Number.isFinite(Number(r.score))) reviewScore = Number(r.score);
       if (Number.isFinite(Number(r.rounds))) reviewRounds = Number(r.rounds);
     } else {
-      // Read log
       const logFile = path.win32.join(jobsDir, `${jobId}.log`);
       if (fs.existsSync(logFile)) {
         try {
@@ -302,10 +290,12 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
   }
 }
 
+// Item 17: rebuild context each tick with createFeatureContext(ctx.paths)
 function ensureLedgerTimer(ctx: MawFeatureContext): void {
   if (!ledgerTimer) {
     ledgerTimer = setInterval(() => {
-      syncLedger(ctx).catch(() => {});
+      const freshCtx = createFeatureContext(ctx.paths);
+      syncLedger(freshCtx).catch(() => {});
     }, 60000);
     ledgerTimer.unref();
   }
@@ -321,14 +311,10 @@ export const feature: MawFeature = {
     budget_get: {
       method: 'GET',
       handler: async (ctx) => {
-        const cfgFile = path.win32.join(ctx.paths.featureDataDir('budget'), 'budgets.json');
-        const readRes = readJsonSafe<BudgetConfig>(cfgFile, createDefaultBudgetConfig());
-        const warnings: string[] = [];
-        if (readRes.warning) warnings.push(readRes.warning);
-
+        const { config, warnings } = loadBudgetConfig(ctx.paths.featureDataDir('budget'));
         return {
           ok: true,
-          config: readRes.data,
+          config,
           defaults: createDefaultBudgetConfig(),
           warnings,
         };
@@ -340,14 +326,11 @@ export const feature: MawFeature = {
         const rawConfig = req.body.config ?? req.body;
         const valRes = validateBudgetConfig(rawConfig);
         if (valRes.errorField) {
-          if (req.res) {
-            req.res.statusCode = 400;
-          }
-          return {
-            ok: false,
-            error: valRes.errorMessage || 'Invalid budget configuration.',
-            field: valRes.errorField,
-          };
+          // Item 1: throw ApiValidationError so server/http.ts sends 400
+          throw new ApiValidationError(
+            `${valRes.errorField}: ${valRes.errorMessage || 'Invalid budget configuration.'}`,
+            400
+          );
         }
 
         const budgetDir = ctx.paths.featureDataDir('budget');
@@ -374,9 +357,7 @@ export const feature: MawFeature = {
         const daysParam = Number.parseInt(req.url.searchParams.get('days') ?? '14', 10);
         const days = Math.min(90, Math.max(1, Number.isFinite(daysParam) ? daysParam : 14));
 
-        const cfgFile = path.win32.join(ctx.paths.featureDataDir('budget'), 'budgets.json');
-        const budgetCfg = readJsonSafe<BudgetConfig>(cfgFile, createDefaultBudgetConfig()).data;
-
+        const { config: budgetCfg } = loadBudgetConfig(ctx.paths.featureDataDir('budget'));
         const { rows } = readAuditRows(ctx.paths.auditFile, 0);
         const now = new Date();
 
@@ -400,8 +381,8 @@ export const feature: MawFeature = {
           cap: { warn: 0, block: 0 },
         };
         if (projectPath) {
-          const normProj = projectPath.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
-          const projOverride = budgetCfg.projects?.[normProj]?.project || budgetCfg.caps.project;
+          // Item 15: match override by path containment
+          const projOverride = findProjectOverride(budgetCfg.projects, projectPath) || budgetCfg.caps.project;
           const period = projOverride?.period || 'month';
           const pSpend = calculateProjectSpend(rows, projectPath, period, now);
           project = {
@@ -471,7 +452,7 @@ export const feature: MawFeature = {
           cap: agentCap,
         }));
 
-        // 5. running_jobs
+        // 5. running_jobs (Item 5: audit rows with Timestamp >= job.started_at - 5s and inside job.project_path)
         const running_jobs: Array<{ job_id: string; usd: number; cap: { warn: number; block: number } }> = [];
         try {
           const recent = await ctx.readJobs();
@@ -479,10 +460,21 @@ export const feature: MawFeature = {
             if (j.status === 'RUNNING') {
               const jId = String(j.job_id ?? '');
               const jProj = String(j.project_path ?? projectPath);
-              const jSpend = calculateJobSpendFromOffset(ctx.paths.auditFile, 0, jProj);
+              const startedMs = j.started_at ? new Date(String(j.started_at)).getTime() : 0;
+              let runUsd = 0;
+              for (const ar of rows) {
+                const arMs = new Date(ar.Timestamp).getTime();
+                if (arMs >= startedMs - 5000) {
+                  const arNorm = ar.WorkDir.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+                  const projNorm = jProj.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+                  if (arNorm === projNorm || arNorm.startsWith(projNorm + '\\')) {
+                    runUsd += ar.cost_usd;
+                  }
+                }
+              }
               running_jobs.push({
                 job_id: jId,
-                usd: jSpend.usd,
+                usd: Math.round(runUsd * 10000) / 10000,
                 cap: budgetCfg.caps.job?.usd ?? { warn: 0, block: 0 },
               });
             }
@@ -491,8 +483,26 @@ export const feature: MawFeature = {
           // Ignore
         }
 
-        // 6. recent_blocks
+        // 6. recent_blocks (Item 3: newest 20 from data/budget/blocks.jsonl)
         const recent_blocks: unknown[] = [];
+        const blocksFile = path.win32.join(ctx.paths.featureDataDir('budget'), 'blocks.jsonl');
+        if (fs.existsSync(blocksFile)) {
+          try {
+            const lines = fs
+              .readFileSync(blocksFile, 'utf8')
+              .split(/\r?\n/)
+              .filter((l) => l.trim().length > 0);
+            for (let i = lines.length - 1; i >= 0 && recent_blocks.length < 20; i--) {
+              try {
+                recent_blocks.push(JSON.parse(lines[i]!));
+              } catch {
+                // Ignore malformed
+              }
+            }
+          } catch {
+            // Ignore
+          }
+        }
 
         return {
           ok: true,
@@ -509,31 +519,43 @@ export const feature: MawFeature = {
   status: async (ctx) => {
     ensureLedgerTimer(ctx);
 
+    const now = new Date();
+    const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(
+      now.getDate()
+    ).padStart(2, '0')}`;
+
     const auditFile = ctx.paths.auditFile;
-    let mtime = 0;
-    let size = 0;
+    let auditMtime = 0;
+    let auditSize = 0;
     if (fs.existsSync(auditFile)) {
       try {
         const st = fs.statSync(auditFile);
-        mtime = st.mtimeMs;
-        size = st.size;
+        auditMtime = st.mtimeMs;
+        auditSize = st.size;
       } catch {
         // Ignore
       }
     }
 
-    if (cachedStatus && cachedStatus.mtime === mtime && cachedStatus.size === size) {
+    const cfgFile = path.win32.join(ctx.paths.featureDataDir('budget'), 'budgets.json');
+    let cfgMtime = 0;
+    if (fs.existsSync(cfgFile)) {
+      try {
+        cfgMtime = fs.statSync(cfgFile).mtimeMs;
+      } catch {
+        // Ignore
+      }
+    }
+
+    // Item 14: Cache key includes local date, cfgMtime, auditMtime, auditSize
+    const cacheKey = `${todayStr}_${cfgMtime}_${auditMtime}_${auditSize}`;
+    if (cachedStatus && cachedStatus.cacheKey === cacheKey) {
       return cachedStatus.data;
     }
 
-    const cfgFile = path.win32.join(ctx.paths.featureDataDir('budget'), 'budgets.json');
-    const readRes = readJsonSafe<BudgetConfig>(cfgFile, createDefaultBudgetConfig());
-    const budgetCfg = readRes.data;
-    const warnings: string[] = [];
-    if (readRes.warning) warnings.push(readRes.warning);
-
+    const { config: budgetCfg, warnings } = loadBudgetConfig(ctx.paths.featureDataDir('budget'));
     const { rows } = readAuditRows(auditFile, 0);
-    const daySpend = calculateDaySpend(rows, new Date());
+    const daySpend = calculateDaySpend(rows, now);
     const dayUsdCap = budgetCfg.caps.day?.usd;
 
     const today_usd = daySpend.usd;
@@ -559,8 +581,7 @@ export const feature: MawFeature = {
     };
 
     cachedStatus = {
-      mtime,
-      size,
+      cacheKey,
       data: statusData,
     };
 
