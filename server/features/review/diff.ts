@@ -17,6 +17,7 @@ export interface DiffFile {
   path: string;
   old_path: string;
   status: 'M' | 'A' | 'D' | 'R' | 'B';
+  change?: 'M' | 'A' | 'D' | 'R';
   binary: boolean;
   untracked: boolean;
   too_large: boolean;
@@ -104,7 +105,15 @@ export function unquoteGitPath(raw: string): string {
           continue;
         }
       }
-      bytes.push(s.charCodeAt(i));
+      const code = s.codePointAt(i)!;
+      const ch = String.fromCodePoint(code);
+      const chBuf = Buffer.from(ch, 'utf8');
+      for (let b = 0; b < chBuf.length; b++) {
+        bytes.push(chBuf[b]!);
+      }
+      if (ch.length > 1) {
+        i += ch.length - 1;
+      }
     }
     s = Buffer.from(bytes).toString('utf8');
   }
@@ -159,6 +168,7 @@ export function parseUnifiedDiff(
     oldPath: string;
     newPath: string;
     status: 'M' | 'A' | 'D' | 'R' | 'B';
+    change?: 'M' | 'A' | 'D' | 'R';
     totalBytes: number;
     totalDiffLines: number;
   }
@@ -196,12 +206,13 @@ export function parseUnifiedDiff(
         oldPath: '',
         newPath: '',
         status: options?.untracked ? 'A' : 'M',
+        change: options?.untracked ? 'A' : 'M',
         totalBytes: Buffer.byteLength(line, 'utf8'),
         totalDiffLines: 0,
       };
 
       const gitMatch = /^diff --(?:git|no-index) (?:--\s+)?("?[^"]+"?|\S+)\s+("?[^"]+"?|\S+)/.exec(line);
-      if (gitMatch) {
+      if (gitMatch && curChunk) {
         curChunk.oldPath = unquoteGitPath(gitMatch[1]!);
         curChunk.newPath = unquoteGitPath(gitMatch[2]!);
       }
@@ -290,17 +301,21 @@ export function parseUnifiedDiff(
     if (line.startsWith('new file mode ')) {
       curChunk.headerLines.push(line);
       curChunk.status = 'A';
+      curChunk.change = 'A';
     } else if (line.startsWith('deleted file mode ')) {
       curChunk.headerLines.push(line);
       curChunk.status = 'D';
+      curChunk.change = 'D';
     } else if (line.startsWith('rename from ')) {
       curChunk.headerLines.push(line);
       curChunk.oldPath = unquoteGitPath(line.slice(12));
       curChunk.status = 'R';
+      curChunk.change = 'R';
     } else if (line.startsWith('rename to ')) {
       curChunk.headerLines.push(line);
       curChunk.newPath = unquoteGitPath(line.slice(10));
       curChunk.status = 'R';
+      curChunk.change = 'R';
     } else if (
       line.startsWith('similarity index ') ||
       line.startsWith('index ') ||
@@ -407,6 +422,7 @@ export function parseUnifiedDiff(
       path: finalPath,
       old_path: finalOldPath,
       status: chunk.isBinary ? 'B' : chunk.status,
+      change: chunk.change,
       binary: chunk.isBinary,
       untracked: Boolean(options?.untracked),
       too_large: isTooLarge,

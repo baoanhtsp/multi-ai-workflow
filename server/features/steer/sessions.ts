@@ -228,9 +228,19 @@ export function buildSummaryPrompt(options: {
   logTail: string;
   message: string;
 }): string {
-  const maxOriginalPromptLen = 6000;
-  const maxLogTailLen = 6000;
   const maxTotalLen = 20000;
+  const maxOriginalPromptCap = 6000;
+  const maxLogTailCap = 6000;
+
+  const roleSet = new Set(['architect', 'leader', 'backend', 'frontend', 'reviewer', 'tester']);
+  const effectiveRole = roleSet.has(options.role) ? options.role : 'backend';
+
+  const headerLine = `You are continuing an earlier job (${options.jobId}, agent ${options.agent}, role ${effectiveRole}) in ${options.projectPath}.\n`;
+  const taskTitle = 'Original task (may be cut):';
+  const logTitle = 'End of the previous output (may be cut):';
+  const msgTitle = 'New instruction from the user:';
+
+  let userMsg = options.message.trim();
 
   // Clean log tail: remove runner header & JOB_FINISHED marker
   let cleanLog = options.logTail
@@ -241,33 +251,69 @@ export function buildSummaryPrompt(options: {
     .replace(/===\s*\[JOB_FINISHED\s+exit_code=[-]?\d+\]\s*===.*/, '')
     .trim();
 
-  if (cleanLog.length > maxLogTailLen) {
-    cleanLog = cleanLog.slice(-maxLogTailLen);
-  }
-
   let origPrompt = options.originalPrompt.trim();
-  if (origPrompt.length > maxOriginalPromptLen) {
-    origPrompt = origPrompt.slice(0, maxOriginalPromptLen);
+
+  const minimalTemplate = [
+    headerLine,
+    taskTitle,
+    '',
+    '',
+    logTitle,
+    '',
+    '',
+    msgTitle,
+    '',
+  ].join('\n');
+
+  if (minimalTemplate.length + userMsg.length > maxTotalLen) {
+    // Drop both log tail and original prompt completely
+    const cutSuffix = ' [message cut]';
+    const maxAllowedMsgLen = maxTotalLen - minimalTemplate.length - cutSuffix.length;
+    if (maxAllowedMsgLen > 0) {
+      userMsg = userMsg.slice(0, maxAllowedMsgLen) + cutSuffix;
+    } else {
+      userMsg = userMsg.slice(0, Math.max(0, maxTotalLen - minimalTemplate.length));
+    }
+    return minimalTemplate + userMsg;
   }
 
-  const roleSet = new Set(['architect', 'leader', 'backend', 'frontend', 'reviewer', 'tester']);
-  const effectiveRole = roleSet.has(options.role) ? options.role : 'backend';
+  // Cap initial values to 6000 chars
+  if (origPrompt.length > maxOriginalPromptCap) {
+    origPrompt = origPrompt.slice(0, maxOriginalPromptCap);
+  }
+  if (cleanLog.length > maxLogTailCap) {
+    cleanLog = cleanLog.slice(-maxLogTailCap);
+  }
+
+  const availableForContext = maxTotalLen - minimalTemplate.length - userMsg.length;
+
+  if (origPrompt.length + cleanLog.length > availableForContext) {
+    const half = Math.floor(availableForContext / 2);
+    if (origPrompt.length > half && cleanLog.length > half) {
+      origPrompt = origPrompt.slice(0, half);
+      cleanLog = cleanLog.slice(-(availableForContext - origPrompt.length));
+    } else if (origPrompt.length <= half) {
+      cleanLog = cleanLog.slice(-(availableForContext - origPrompt.length));
+    } else {
+      origPrompt = origPrompt.slice(0, availableForContext - cleanLog.length);
+    }
+  }
 
   const parts = [
-    `You are continuing an earlier job (${options.jobId}, agent ${options.agent}, role ${effectiveRole}) in ${options.projectPath}.\n`,
-    `Original task (may be cut):`,
+    headerLine,
+    taskTitle,
     origPrompt,
-    ``,
-    `End of the previous output (may be cut):`,
+    '',
+    logTitle,
     cleanLog,
-    ``,
-    `New instruction from the user:`,
-    options.message.trim(),
+    '',
+    msgTitle,
+    userMsg,
   ];
 
-  let fullPrompt = parts.join('\n');
+  const fullPrompt = parts.join('\n');
   if (fullPrompt.length > maxTotalLen) {
-    fullPrompt = fullPrompt.slice(0, maxTotalLen);
+    return fullPrompt.slice(0, maxTotalLen);
   }
   return fullPrompt;
 }

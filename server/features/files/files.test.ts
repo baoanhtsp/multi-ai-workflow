@@ -235,6 +235,8 @@ test('files feature end-to-end: tree, dotfiles, .git excluded, path traversal, r
     '/etc/passwd',
     'src/../../outside.txt',
     '.git/config',
+    '.GIT/config',
+    '.Git/config',
   ];
 
   for (const inv of invalidPaths) {
@@ -257,6 +259,71 @@ test('files feature end-to-end: tree, dotfiles, .git excluded, path traversal, r
       `Expected traversal rejection for ${inv}`
     );
   }
+
+  // Case-insensitive .git directory in files_tree -> 400
+  await assert.rejects(
+    async () => {
+      await filesFeature.routes.files_tree.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL(`http://127.0.0.1/api?action=files_tree&project_path=${encodeURIComponent(projectDir)}&dir=.GIT`),
+          query: new URLSearchParams({ project_path: projectDir, dir: '.GIT' }),
+          body: {},
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+
+  // Junction pointing outside project boundary: files_read & files_open must reject with 400
+  const secretDir = path.win32.join(tmpRoot, 'outside_secret_dir');
+  fs.mkdirSync(secretDir, { recursive: true });
+  fs.writeFileSync(path.win32.join(secretDir, 'secret.txt'), 'sensitive content\n', 'utf8');
+
+  const junctionPath = path.win32.join(projectDir, 'out');
+  fs.symlinkSync(secretDir, junctionPath, 'junction');
+
+  await assert.rejects(
+    async () => {
+      await filesFeature.routes.files_read.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL(`http://127.0.0.1/api?action=files_read&project_path=${encodeURIComponent(projectDir)}&path=out/secret.txt`),
+          query: new URLSearchParams({ project_path: projectDir, path: 'out/secret.txt' }),
+          body: {},
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400,
+    'Expected junction escape to be rejected with 400'
+  );
+
+  await assert.rejects(
+    async () => {
+      await filesFeature.routes.files_read.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL(`http://127.0.0.1/api?action=files_read&project_path=${encodeURIComponent(projectDir)}&path=out/nonexistent.txt`),
+          query: new URLSearchParams({ project_path: projectDir, path: 'out/nonexistent.txt' }),
+          body: {},
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400,
+    'Expected non-existent file inside junction escape to be rejected with 400'
+  );
 
   // 4. GET files_read: BOM strip, binary file, too_large file
   // BOM strip

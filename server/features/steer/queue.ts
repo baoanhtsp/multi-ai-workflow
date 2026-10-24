@@ -32,6 +32,33 @@ export interface SteerData {
 let queueTimer: NodeJS.Timeout | null = null;
 let isQueueProcessing = false;
 
+const jobWriteChains = new Map<string, Promise<unknown>>();
+
+export function withJobLock<T>(jobId: string, fn: () => Promise<T>): Promise<T> {
+  const previous = jobWriteChains.get(jobId) ?? Promise.resolve();
+
+  const run = async (): Promise<T> => {
+    try {
+      await previous;
+    } catch {
+      // previous lock error should not block next execution
+    }
+    return await fn();
+  };
+
+  const resultPromise = run();
+  const chainPromise = resultPromise
+    .catch(() => {})
+    .finally(() => {
+      if (jobWriteChains.get(jobId) === chainPromise) {
+        jobWriteChains.delete(jobId);
+      }
+    });
+
+  jobWriteChains.set(jobId, chainPromise);
+  return resultPromise;
+}
+
 export function getSteerFilePath(jobId: string, paths: ServerPaths): string {
   const dataDir = paths.featureDataDir('steer');
   return path.win32.join(dataDir, `${jobId}.json`);
@@ -195,154 +222,188 @@ export async function runQueueProcessor(ctx: MawFeatureContext): Promise<void> {
     const files = fs.readdirSync(steerDir).filter((f) => f.endsWith('.json'));
     for (const file of files) {
       const jobId = path.basename(file, '.json');
-      const data = loadSteerData(jobId, ctx.paths);
-      const queuedEntries = data.entries.filter((e) => e.status === 'queued');
-      if (queuedEntries.length === 0) {
-        continue;
-      }
+      await withJobLock(jobId, async () => {
+        const data = loadSteerData(jobId, ctx.paths);
+        const queuedEntries = data.entries.filter((e) => e.status === 'queued');
+        if (queuedEntries.length === 0) {
+          return;
+        }
 
-      // Check parent job status
-      const jobMetaFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.json`);
-      if (!fs.existsSync(jobMetaFile)) {
-        continue;
-      }
+        // Check parent job status
+        const jobMetaFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.json`);
+        if (!fs.existsSync(jobMetaFile)) {
+          for (const e of queuedEntries) {
+            e.status = 'failed';
+            e.error = 'Parent job meta not found.';
+          }
+          saveSteerData(data, ctx.paths);
+          return;
+        }
 
-      let meta: JobMeta;
-      try {
-        meta = JSON.parse(fs.readFileSync(jobMetaFile, 'utf8')) as JobMeta;
-      } catch {
-        continue;
-      }
+        let meta: JobMeta;
+        try {
+          meta = JSON.parse(fs.readFileSync(jobMetaFile, 'utf8')) as JobMeta;
+        } catch {
+          for (const e of queuedEntries) {
+            e.status = 'failed';
+            e.error = 'Parent job meta is corrupt.';
+          }
+          saveSteerData(data, ctx.paths);
+          return;
+        }
 
-      const refreshed = await refreshJobMetaStatus(meta, ctx.paths.jobsDir, { checkPid: true });
-      if (refreshed.status === 'RUNNING') {
-        // Still running, keep queued
-        continue;
-      }
+        const refreshed = await refreshJobMetaStatus(meta, ctx.paths.jobsDir, { checkPid: true });
+        if (refreshed.status === 'RUNNING') {
+          // Still running, keep queued
+          return;
+        }
 
-      const validatedProject = resolveProjectPath(meta.project_path, ctx.paths.projectsRoot);
-      if (!validatedProject) {
-        continue;
-      }
+        const validatedProject = resolveProjectPath(meta.project_path, ctx.paths.projectsRoot);
+        if (!validatedProject) {
+          for (const e of queuedEntries) {
+            e.status = 'failed';
+            e.error = 'Invalid parent project_path.';
+          }
+          saveSteerData(data, ctx.paths);
+          return;
+        }
 
-      // Parent is no longer RUNNING: process queued entries
-      const mergedMessage = queuedEntries.map((e) => e.message).join('\n\n---\n\n');
-      const logFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.log`);
-      const logContent = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
-      const promptFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.prompt.txt`);
-      const originalPrompt = fs.existsSync(promptFile) ? fs.readFileSync(promptFile, 'utf8') : '';
+        // Re-load steer file, re-check that each entry is still "queued"
+        const freshData = loadSteerData(jobId, ctx.paths);
+        const toLaunch = freshData.entries.filter((e) => e.status === 'queued');
+        if (toLaunch.length === 0) {
+          return; // Entries were cancelled
+        }
+        const toLaunchIds = new Set(toLaunch.map((e) => e.id));
 
-      let agent = meta.agent;
-      let role = meta.role;
-      if (meta.mode === 'antigravity' || (!agent && meta.mode === 'antigravity')) {
-        agent = 'antigravity';
-      } else if (meta.mode === 'claude') {
-        agent = 'claude';
-      } else if (meta.mode === 'codex') {
-        agent = 'codex';
-      } else if (
-        meta.mode === 'council' ||
-        meta.mode === 'auto-gate' ||
-        meta.mode === 'spec-guard'
-      ) {
-        agent = (meta as any).implementer || ctx.registry.defaults?.implementer || 'claude';
-        role = 'backend';
-      }
-      if (!agent) agent = 'antigravity';
+        // Mark them "started" and save BEFORE the await on the launch
+        for (const entry of toLaunch) {
+          entry.status = 'started';
+        }
+        saveSteerData(freshData, ctx.paths);
 
-      const VALID_TASK_ROLES = new Set([
-        'architect',
-        'leader',
-        'backend',
-        'frontend',
-        'reviewer',
-        'tester',
-      ]);
-      const effectiveRole = VALID_TASK_ROLES.has(role) ? role : 'backend';
-      const agentEntry = ctx.registry.agents.find((a) => a.id === agent);
+        // Parent is no longer RUNNING: process queued entries
+        const mergedMessage = toLaunch.map((e) => e.message).join('\n\n---\n\n');
+        const logFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.log`);
+        const logContent = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
+        const promptFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.prompt.txt`);
+        const originalPrompt = fs.existsSync(promptFile) ? fs.readFileSync(promptFile, 'utf8') : '';
 
-      const sessionRef = parseSessionRefFromLog(
-        logContent,
-        agent,
-        validatedProject,
-        ctx.paths,
-        agentEntry
-      );
-      const resumeCmd =
-        sessionRef && sessionRef.exists
-          ? buildResumeCommand({
-              platform: agent,
-              sessionId: sessionRef.id,
+        let agent = meta.agent;
+        let role = meta.role;
+        if (meta.mode === 'antigravity' || (!agent && meta.mode === 'antigravity')) {
+          agent = 'antigravity';
+        } else if (meta.mode === 'claude') {
+          agent = 'claude';
+        } else if (meta.mode === 'codex') {
+          agent = 'codex';
+        } else if (
+          meta.mode === 'council' ||
+          meta.mode === 'auto-gate' ||
+          meta.mode === 'spec-guard'
+        ) {
+          agent = (meta as any).implementer || ctx.registry.defaults?.implementer || 'claude';
+          role = 'backend';
+        }
+        if (!agent) agent = 'antigravity';
+
+        const VALID_TASK_ROLES = new Set([
+          'architect',
+          'leader',
+          'backend',
+          'frontend',
+          'reviewer',
+          'tester',
+        ]);
+        const effectiveRole = VALID_TASK_ROLES.has(role) ? role : 'backend';
+        const agentEntry = ctx.registry.agents.find((a) => a.id === agent);
+
+        const sessionRef = parseSessionRefFromLog(
+          logContent,
+          agent,
+          validatedProject,
+          ctx.paths,
+          agentEntry
+        );
+        const resumeCmd =
+          sessionRef && sessionRef.exists
+            ? buildResumeCommand({
+                platform: agent,
+                sessionId: sessionRef.id,
+                model: meta.model,
+                effort: meta.effort,
+                projectPath: validatedProject,
+                paths: ctx.paths,
+                registryAgent: agentEntry,
+              })
+            : null;
+
+        let childJobId: string | null = null;
+        let launchError: string | null = null;
+
+        try {
+          if (resumeCmd) {
+            // Launch steer job
+            const steerRes = await launchSteerJob({
+              parentJobId: jobId,
+              agent,
+              role: effectiveRole,
               model: meta.model,
               effort: meta.effort,
               projectPath: validatedProject,
+              prompt: mergedMessage,
+              commandExe: resumeCmd.exe,
+              commandArgs: resumeCmd.args,
+              promptVia: resumeCmd.promptVia,
               paths: ctx.paths,
-              registryAgent: agentEntry,
-            })
-          : null;
+              registry: ctx.registry,
+              strategy: 'resume',
+            });
+            childJobId = steerRes.job_id;
+            appendSteerLogLine(jobId, 'resume', steerRes.job_id, mergedMessage, ctx.paths);
+          } else {
+            // Fall back to summary
+            const summaryPrompt = buildSummaryPrompt({
+              jobId,
+              agent,
+              role: effectiveRole,
+              projectPath: validatedProject,
+              originalPrompt,
+              logTail: logContent,
+              message: mergedMessage,
+            });
 
-      try {
-        if (resumeCmd) {
-          // Launch steer job
-          const steerRes = await launchSteerJob({
-            parentJobId: jobId,
-            agent,
-            role: effectiveRole,
-            model: meta.model,
-            effort: meta.effort,
-            projectPath: validatedProject,
-            prompt: mergedMessage,
-            commandExe: resumeCmd.exe,
-            commandArgs: resumeCmd.args,
-            promptVia: resumeCmd.promptVia,
-            paths: ctx.paths,
-            registry: ctx.registry,
-            strategy: 'resume',
-          });
-
-          for (const entry of queuedEntries) {
-            entry.status = 'started';
-            entry.child_job_id = steerRes.job_id;
+            const jobResult = await ctx.startJob({
+              mode: 'task',
+              agent,
+              role: effectiveRole,
+              model: meta.model,
+              effort: meta.effort,
+              project_path: validatedProject,
+              prompt: summaryPrompt,
+            });
+            childJobId = String(jobResult.job_id ?? '');
+            appendSteerLogLine(jobId, 'summary', childJobId, mergedMessage, ctx.paths);
           }
-          appendSteerLogLine(jobId, 'resume', steerRes.job_id, mergedMessage, ctx.paths);
-        } else {
-          // Fall back to summary
-          const summaryPrompt = buildSummaryPrompt({
-            jobId,
-            agent,
-            role: effectiveRole,
-            projectPath: validatedProject,
-            originalPrompt,
-            logTail: logContent,
-            message: mergedMessage,
-          });
+        } catch (err: unknown) {
+          launchError = err instanceof Error ? err.message : String(err);
+        }
 
-          const jobResult = await ctx.startJob({
-            mode: 'task',
-            agent,
-            role: effectiveRole,
-            model: meta.model,
-            effort: meta.effort,
-            project_path: validatedProject,
-            prompt: summaryPrompt,
-          });
-
-          const childJobId = String(jobResult.job_id ?? '');
-          for (const entry of queuedEntries) {
-            entry.status = 'started';
-            entry.child_job_id = childJobId;
+        // Re-load again and patch ONLY toLaunchIds
+        const afterLaunchData = loadSteerData(jobId, ctx.paths);
+        for (const entry of afterLaunchData.entries) {
+          if (toLaunchIds.has(entry.id)) {
+            if (launchError) {
+              entry.status = 'failed';
+              entry.error = launchError;
+            } else if (childJobId) {
+              entry.status = 'started';
+              entry.child_job_id = childJobId;
+            }
           }
-          appendSteerLogLine(jobId, 'summary', childJobId, mergedMessage, ctx.paths);
         }
-      } catch (err: unknown) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        for (const entry of queuedEntries) {
-          entry.status = 'failed';
-          entry.error = errMsg;
-        }
-      }
-
-      saveSteerData(data, ctx.paths);
+        saveSteerData(afterLaunchData, ctx.paths);
+      });
     }
   } finally {
     isQueueProcessing = false;

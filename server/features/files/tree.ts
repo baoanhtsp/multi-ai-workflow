@@ -57,7 +57,7 @@ export async function getFilesTree(options: {
     const dirents = fs.readdirSync(targetDir, { withFileTypes: true });
     for (const d of dirents) {
       const name = d.name;
-      if (name === '.git') {
+      if (name.toLowerCase() === '.git') {
         continue;
       }
       if (!showDotfiles && name.startsWith('.')) {

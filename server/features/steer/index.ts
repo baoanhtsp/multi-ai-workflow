@@ -15,6 +15,7 @@ import {
   loadSteerData,
   runQueueProcessor,
   saveSteerData,
+  withJobLock,
   type SteerEntry,
 } from './queue.ts';
 import {
@@ -312,139 +313,141 @@ export const feature: MawFeature = {
           );
         }
 
-        const entryId = crypto.randomBytes(4).toString('hex');
-        const now = new Date().toISOString();
-        const steerData = loadSteerData(jobId, ctx.paths);
+        return await withJobLock(jobId, async () => {
+          const entryId = crypto.randomBytes(4).toString('hex');
+          const now = new Date().toISOString();
+          const steerData = loadSteerData(jobId, ctx.paths);
 
-        const entry: SteerEntry = {
-          id: entryId,
-          ts: now,
-          strategy,
-          message,
-          status: 'started',
-        };
-
-        if (strategy === 'live') {
-          const tmpDir = path.win32.join(ctx.paths.featureDataDir('steer'), 'tmp');
-          if (!fs.existsSync(tmpDir)) {
-            fs.mkdirSync(tmpDir, { recursive: true });
-          }
-          const promptFile = path.win32.join(tmpDir, `steer_prompt_${entryId}.txt`);
-          fs.writeFileSync(promptFile, '\uFEFF' + message, 'utf8');
-
-          const scriptPath = path.win32.join(ctx.paths.scriptsDir, 'invoke-antigravity.ps1');
-          const runRes = await runCommand(
-            'powershell.exe',
-            [
-              '-NoProfile',
-              '-ExecutionPolicy',
-              'Bypass',
-              '-File',
-              scriptPath,
-              '-Action',
-              'send',
-              '-ConversationId',
-              sessionRef!.id,
-              '-WorkDir',
-              validatedProject,
-              '-Title',
-              'Steer from Mission Control',
-              '-PromptFile',
-              promptFile,
-              '-NoWait',
-            ],
-            { timeoutMs: 60000 }
-          );
-
-          if (fs.existsSync(promptFile)) {
-            try {
-              fs.unlinkSync(promptFile);
-            } catch {}
-          }
-
-          if (runRes.code !== 0) {
-            entry.status = 'failed';
-            entry.error = runRes.stderr || runRes.stdout || `Exit code ${runRes.code}`;
-          } else {
-            entry.status = 'sent';
-            appendSteerLogLine(jobId, 'live', sessionRef!.id, message, ctx.paths);
-          }
-        } else if (strategy === 'queue') {
-          entry.status = 'queued';
-          ensureQueueProcessorRunning(ctx);
-        } else if (strategy === 'resume') {
-          try {
-            const steerRes = await launchSteerJob({
-              parentJobId: jobId,
-              agent,
-              role,
-              model: typeof req.body.model === 'string' ? req.body.model : meta.model,
-              effort: typeof req.body.effort === 'string' ? req.body.effort : meta.effort,
-              projectPath: validatedProject,
-              prompt: message,
-              commandExe: resumeCmd!.exe,
-              commandArgs: resumeCmd!.args,
-              promptVia: resumeCmd!.promptVia,
-              paths: ctx.paths,
-              registry: ctx.registry,
-              strategy: 'resume',
-            });
-            entry.status = 'started';
-            entry.child_job_id = steerRes.job_id;
-            appendSteerLogLine(jobId, 'resume', steerRes.job_id, message, ctx.paths);
-          } catch (err: unknown) {
-            entry.status = 'failed';
-            entry.error = err instanceof Error ? err.message : String(err);
-            steerData.entries.push(entry);
-            saveSteerData(steerData, ctx.paths);
-            throw err;
-          }
-        } else if (strategy === 'summary') {
-          const promptFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.prompt.txt`);
-          const originalPrompt = fs.existsSync(promptFile) ? fs.readFileSync(promptFile, 'utf8') : '';
-
-          const summaryPrompt = buildSummaryPrompt({
-            jobId,
-            agent,
-            role,
-            projectPath: validatedProject,
-            originalPrompt,
-            logTail: logContent,
+          const entry: SteerEntry = {
+            id: entryId,
+            ts: now,
+            strategy,
             message,
-          });
+            status: 'started',
+          };
 
-          try {
-            const jobResult = await ctx.startJob({
-              mode: 'task',
+          if (strategy === 'live') {
+            const tmpDir = path.win32.join(ctx.paths.featureDataDir('steer'), 'tmp');
+            if (!fs.existsSync(tmpDir)) {
+              fs.mkdirSync(tmpDir, { recursive: true });
+            }
+            const promptFile = path.win32.join(tmpDir, `steer_prompt_${entryId}.txt`);
+            fs.writeFileSync(promptFile, '\uFEFF' + message, 'utf8');
+
+            const scriptPath = path.win32.join(ctx.paths.scriptsDir, 'invoke-antigravity.ps1');
+            const runRes = await runCommand(
+              'powershell.exe',
+              [
+                '-NoProfile',
+                '-ExecutionPolicy',
+                'Bypass',
+                '-File',
+                scriptPath,
+                '-Action',
+                'send',
+                '-ConversationId',
+                sessionRef!.id,
+                '-WorkDir',
+                validatedProject,
+                '-Title',
+                'Steer from Mission Control',
+                '-PromptFile',
+                promptFile,
+                '-NoWait',
+              ],
+              { timeoutMs: 60000 }
+            );
+
+            if (fs.existsSync(promptFile)) {
+              try {
+                fs.unlinkSync(promptFile);
+              } catch {}
+            }
+
+            if (runRes.code !== 0) {
+              entry.status = 'failed';
+              entry.error = runRes.stderr || runRes.stdout || `Exit code ${runRes.code}`;
+            } else {
+              entry.status = 'sent';
+              appendSteerLogLine(jobId, 'live', sessionRef!.id, message, ctx.paths);
+            }
+          } else if (strategy === 'queue') {
+            entry.status = 'queued';
+          } else if (strategy === 'resume') {
+            try {
+              const steerRes = await launchSteerJob({
+                parentJobId: jobId,
+                agent,
+                role,
+                model: typeof req.body.model === 'string' ? req.body.model : meta.model,
+                effort: typeof req.body.effort === 'string' ? req.body.effort : meta.effort,
+                projectPath: validatedProject,
+                prompt: message,
+                commandExe: resumeCmd!.exe,
+                commandArgs: resumeCmd!.args,
+                promptVia: resumeCmd!.promptVia,
+                paths: ctx.paths,
+                registry: ctx.registry,
+                strategy: 'resume',
+              });
+              entry.status = 'started';
+              entry.child_job_id = steerRes.job_id;
+              appendSteerLogLine(jobId, 'resume', steerRes.job_id, message, ctx.paths);
+            } catch (err: unknown) {
+              entry.status = 'failed';
+              entry.error = err instanceof Error ? err.message : String(err);
+              steerData.entries.push(entry);
+              saveSteerData(steerData, ctx.paths);
+              throw err;
+            }
+          } else if (strategy === 'summary') {
+            const promptFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.prompt.txt`);
+            const originalPrompt = fs.existsSync(promptFile) ? fs.readFileSync(promptFile, 'utf8') : '';
+
+            const summaryPrompt = buildSummaryPrompt({
+              jobId,
               agent,
               role,
-              model: typeof req.body.model === 'string' ? req.body.model : meta.model,
-              effort: typeof req.body.effort === 'string' ? req.body.effort : meta.effort,
-              project_path: validatedProject,
-              prompt: summaryPrompt,
+              projectPath: validatedProject,
+              originalPrompt,
+              logTail: logContent,
+              message,
             });
 
-            const childJobId = String(jobResult.job_id ?? '');
-            entry.status = 'started';
-            entry.child_job_id = childJobId;
-            appendSteerLogLine(jobId, 'summary', childJobId, message, ctx.paths);
-          } catch (err: unknown) {
-            entry.status = 'failed';
-            entry.error = err instanceof Error ? err.message : String(err);
-            steerData.entries.push(entry);
-            saveSteerData(steerData, ctx.paths);
-            throw err;
+            try {
+              const jobResult = await ctx.startJob({
+                mode: 'task',
+                agent,
+                role,
+                model: typeof req.body.model === 'string' ? req.body.model : meta.model,
+                effort: typeof req.body.effort === 'string' ? req.body.effort : meta.effort,
+                project_path: validatedProject,
+                prompt: summaryPrompt,
+              });
+
+              const childJobId = String(jobResult.job_id ?? '');
+              entry.status = 'started';
+              entry.child_job_id = childJobId;
+              appendSteerLogLine(jobId, 'summary', childJobId, message, ctx.paths);
+            } catch (err: unknown) {
+              entry.status = 'failed';
+              entry.error = err instanceof Error ? err.message : String(err);
+              steerData.entries.push(entry);
+              saveSteerData(steerData, ctx.paths);
+              throw err;
+            }
           }
-        }
 
-        steerData.entries.push(entry);
-        saveSteerData(steerData, ctx.paths);
+          steerData.entries.push(entry);
+          saveSteerData(steerData, ctx.paths);
+          ensureQueueProcessorRunning(ctx);
 
-        return {
-          ok: true,
-          entry,
-          child_job_id: entry.child_job_id,
-        };
+          return {
+            ok: true,
+            entry,
+            child_job_id: entry.child_job_id,
+          };
+        });
       },
     },
 
@@ -457,23 +460,25 @@ export const feature: MawFeature = {
           throw new ApiValidationError('Invalid job_id.', 400);
         }
 
-        const steerData = loadSteerData(jobId, ctx.paths);
-        const entry = steerData.entries.find((e) => e.id === entryId);
-        if (!entry) {
-          throw new ApiValidationError(`Entry '${entryId}' not found.`, 404);
-        }
+        return await withJobLock(jobId, async () => {
+          const steerData = loadSteerData(jobId, ctx.paths);
+          const entry = steerData.entries.find((e) => e.id === entryId);
+          if (!entry) {
+            throw new ApiValidationError(`Entry '${entryId}' not found.`, 404);
+          }
 
-        if (entry.status !== 'queued') {
-          throw new ApiValidationError('Only queued entries can be cancelled.', 409);
-        }
+          if (entry.status !== 'queued') {
+            throw new ApiValidationError('Only queued entries can be cancelled.', 409);
+          }
 
-        entry.status = 'cancelled';
-        saveSteerData(steerData, ctx.paths);
-        ensureQueueProcessorRunning(ctx);
+          entry.status = 'cancelled';
+          saveSteerData(steerData, ctx.paths);
+          ensureQueueProcessorRunning(ctx);
 
-        return {
-          ok: true,
-        };
+          return {
+            ok: true,
+          };
+        });
       },
     },
 

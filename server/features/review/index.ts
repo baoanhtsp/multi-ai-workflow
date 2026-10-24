@@ -169,6 +169,11 @@ export const feature: MawFeature = {
             : null;
         const action = String(req.body.action ?? '').trim().toLowerCase();
         const confirm = Boolean(req.body.confirm);
+        const context =
+          req.body.context !== undefined && req.body.context !== null && req.body.context !== ''
+            ? Number(req.body.context)
+            : undefined;
+        const ignore_ws = Boolean(req.body.ignore_ws);
 
         if (action !== 'accept' && action !== 'reject' && action !== 'reset') {
           throw new ApiValidationError(
@@ -187,6 +192,8 @@ export const feature: MawFeature = {
             base,
             path: validPath,
             full: true,
+            context,
+            ignore_ws,
           },
           ctx.paths
         );
@@ -231,15 +238,48 @@ export const feature: MawFeature = {
             throw new ApiValidationError('Target is not writable.', 409);
           }
 
+          let rejectFile = file;
+          if (ignore_ws) {
+            const nonWsDiffRun = await runReviewDiff(
+              {
+                project_path: projectPath,
+                source,
+                ref,
+                base,
+                path: validPath,
+                full: true,
+                context,
+                ignore_ws: false,
+              },
+              ctx.paths
+            );
+
+            const nonWsFile = nonWsDiffRun.diffResult.files.find(
+              (f) => f.path.toLowerCase() === validPath.toLowerCase()
+            );
+            if (!nonWsFile) {
+              throw new ApiValidationError("Turn off 'ignore whitespace' to reject this hunk.", 409);
+            }
+
+            if (hunkId !== null) {
+              const nonWsHunk = nonWsFile.hunks.find((h) => h.id === hunkId);
+              if (!nonWsHunk) {
+                throw new ApiValidationError("Turn off 'ignore whitespace' to reject this hunk.", 409);
+              }
+            }
+            rejectFile = nonWsFile;
+          }
+
           try {
             snapshotRef = await createSafetySnapshot(diffRun.target_path, ctx.paths);
             await executeRejectHunk({
               targetPath: diffRun.target_path,
-              file,
+              file: rejectFile,
               hunkId,
               snapshotRef,
               source,
               beforeRef: diffRun.beforeRef,
+              ref: diffRun.ref,
               paths: ctx.paths,
             });
 
@@ -307,12 +347,17 @@ export const feature: MawFeature = {
 
         saveReviewSession(session, ctx.paths);
 
+        const storedState =
+          hunkId === null
+            ? session.states[validPath].file
+            : (session.states[validPath].hunks[hunkId] ?? null);
+
         return {
           ok: true,
           action,
           path: validPath,
           hunk_id: hunkId,
-          state: action === 'reset' ? null : action,
+          state: storedState,
           ...(snapshotRef ? { snapshot_ref: snapshotRef } : {}),
         };
       },

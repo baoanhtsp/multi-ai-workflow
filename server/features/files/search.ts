@@ -66,6 +66,10 @@ export async function searchProjectFiles(options: {
       const files = lsRes.stdout.split('\0').filter(Boolean);
       for (const f of files) {
         const normPath = f.replace(/\\/g, '/');
+        const parts = normPath.split('/');
+        if (parts.some((p) => p.toLowerCase() === '.git')) {
+          continue;
+        }
         const fileName = path.posix.basename(normPath);
         candidateMap.set(normPath, {
           path: normPath,
@@ -74,7 +78,6 @@ export async function searchProjectFiles(options: {
         });
 
         // Derive parent directories
-        const parts = normPath.split('/');
         let cur = '';
         for (let p = 0; p < parts.length - 1; p++) {
           cur = cur ? `${cur}/${parts[p]!}` : parts[p]!;
@@ -104,7 +107,8 @@ export async function searchProjectFiles(options: {
       for (const d of dirents) {
         if (count >= 50000) return;
         const name = d.name;
-        if (name === '.git' || name === 'node_modules') {
+        const lowerName = name.toLowerCase();
+        if (lowerName === '.git' || lowerName === 'node_modules') {
           continue;
         }
         const rel = relDir ? `${relDir}/${name}` : name;

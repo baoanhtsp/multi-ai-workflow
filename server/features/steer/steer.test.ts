@@ -198,6 +198,36 @@ test('steer: resume commands construction and summary prompt format/limits', () 
   assert.ok(summary.includes('New instruction from the user:'));
   assert.ok(summary.includes('Now add tests for review feature'));
   assert.ok(summary.length <= 20000);
+
+  // 20000-char message budgeting test
+  const bigMessage = 'x'.repeat(20000);
+  const bigSummary = buildSummaryPrompt({
+    jobId: 'job_20261025_000000_123456',
+    agent: 'claude',
+    role: 'backend',
+    projectPath: 'C:\\proj',
+    originalPrompt: 'Build the review feature',
+    logTail: rawLog,
+    message: bigMessage,
+  });
+  assert.ok(bigSummary.length <= 20000);
+  assert.ok(bigSummary.includes('New instruction from the user:'));
+  assert.ok(bigSummary.includes('[message cut]'));
+
+  // 19500-char message preserves entire message without cutting it
+  const msg19500 = 'y'.repeat(19500);
+  const summary19500 = buildSummaryPrompt({
+    jobId: 'job_20261025_000000_123456',
+    agent: 'claude',
+    role: 'backend',
+    projectPath: 'C:\\proj',
+    originalPrompt: 'Build the review feature',
+    logTail: rawLog,
+    message: msg19500,
+  });
+  assert.ok(summary19500.length <= 20000);
+  assert.ok(summary19500.includes(msg19500));
+  assert.ok(!summary19500.includes('[message cut]'));
 });
 
 test('steer: strategy selection, steer jobs creation, queue merge and cancel', async () => {
@@ -657,6 +687,183 @@ test('steer: queue processor maps legacy roles and modes to valid task roles', a
   // review-diff legacy role mapped to backend
   assert.equal(launchedJob.role, 'backend');
   assert.equal(launchedJob.mode, 'task');
+
+  // Clean up
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('steer: queue processor handles concurrent steer_cancel during launch and serialization', async () => {
+  const tmpRoot = path.win32.join(
+    os.tmpdir(),
+    `maw_steer_race_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const mawHome = path.win32.join(tmpRoot, 'maw_home');
+  const projectDir = path.win32.join(projectsRoot, 'race-repo');
+
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    mawHome,
+    repoRoot: projectDir,
+  });
+
+  const parentJobId = 'job_20261025_070000_555555';
+  const finishedMeta = {
+    job_id: parentJobId,
+    pid: 999999,
+    mode: 'task',
+    agent: 'claude',
+    role: 'backend',
+    project_path: projectDir,
+    command: 'fake-command',
+    status: 'DONE',
+    exit_code: 0,
+    started_at: new Date().toISOString(),
+    started_ts: Math.floor(Date.now() / 1000),
+  };
+
+  fs.writeFileSync(
+    path.win32.join(paths.jobsDir, `${parentJobId}.json`),
+    JSON.stringify(finishedMeta),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.win32.join(paths.jobsDir, `${parentJobId}.log`),
+    'Log without session\n=== [JOB_FINISHED exit_code=0] ===\n',
+    'utf8'
+  );
+
+  // Setup steer data with two queued entries
+  const entryId1 = 'entry_race_1';
+  const entryId2 = 'entry_race_2';
+  const steerData = {
+    job_id: parentJobId,
+    root_job_id: parentJobId,
+    entries: [
+      {
+        id: entryId1,
+        ts: new Date().toISOString(),
+        strategy: 'queue' as const,
+        status: 'queued' as const,
+        message: 'Message 1',
+      },
+      {
+        id: entryId2,
+        ts: new Date().toISOString(),
+        strategy: 'queue' as const,
+        status: 'queued' as const,
+        message: 'Message 2',
+      },
+    ],
+  };
+  saveSteerData(steerData, paths);
+
+  // Fake slow startJob that delays 60ms
+  const launchedBodies: any[] = [];
+  const fakeCtx = {
+    paths,
+    registry: { agents: [] } as any,
+    readJobs: async () => [finishedMeta],
+    startJob: async (body: any) => {
+      await new Promise((r) => setTimeout(r, 60));
+      launchedBodies.push(body);
+      return { ok: true, job_id: 'job_child_race_123' };
+    },
+  };
+
+  // Run processor concurrently with cancel
+  const processPromise = runQueueProcessor(fakeCtx as any);
+
+  // Short delay to ensure processor has marked entries started and entered startJob
+  await new Promise((r) => setTimeout(r, 10));
+
+  // Concurrently attempt to cancel entry 1 (which was already picked up as started)
+  await assert.rejects(
+    async () => {
+      await steerFeature.routes.steer_cancel.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=steer_cancel'),
+          query: new URLSearchParams(),
+          body: {
+            job_id: parentJobId,
+            entry_id: entryId1,
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409
+  );
+
+  await processPromise;
+
+  const dataAfter = loadSteerData(parentJobId, paths);
+  assert.equal(dataAfter.entries[0]!.status, 'started');
+  assert.equal(dataAfter.entries[0]!.child_job_id, 'job_child_race_123');
+
+  // Clean up
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('steer: processor marks queued entries failed when parent job meta missing or invalid path', async () => {
+  const tmpRoot = path.win32.join(
+    os.tmpdir(),
+    `maw_steer_missing_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const mawHome = path.win32.join(tmpRoot, 'maw_home');
+  const projectDir = path.win32.join(projectsRoot, 'missing-repo');
+
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    mawHome,
+    repoRoot: projectDir,
+  });
+
+  const parentJobId = 'job_20261025_080000_666666';
+  // Do NOT write <parentJobId>.json - meta is missing!
+
+  const steerData = {
+    job_id: parentJobId,
+    root_job_id: parentJobId,
+    entries: [
+      {
+        id: 'entry_missing_meta',
+        ts: new Date().toISOString(),
+        strategy: 'queue' as const,
+        status: 'queued' as const,
+        message: 'Hello to missing parent',
+      },
+    ],
+  };
+  saveSteerData(steerData, paths);
+
+  const fakeCtx = {
+    paths,
+    registry: { agents: [] } as any,
+    readJobs: async () => [],
+    startJob: async () => ({ ok: true }),
+  };
+
+  await runQueueProcessor(fakeCtx as any);
+
+  const dataAfter = loadSteerData(parentJobId, paths);
+  assert.equal(dataAfter.entries[0]!.status, 'failed');
+  assert.equal(dataAfter.entries[0]!.error, 'Parent job meta not found.');
 
   // Clean up
   try {

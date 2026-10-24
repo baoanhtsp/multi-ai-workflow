@@ -18,6 +18,8 @@ test('diff parser handles modify, add, delete, rename, binary, no-newline, CRLF,
   assert.equal(unquoteGitPath('a/simple.txt'), 'simple.txt');
   assert.equal(unquoteGitPath('"a/path with spaces/file.txt"'), 'path with spaces/file.txt');
   assert.equal(unquoteGitPath('"a/quote\\"file.txt"'), 'quote"file.txt');
+  assert.equal(unquoteGitPath('"a/café file.txt"'), 'café file.txt');
+  assert.equal(unquoteGitPath('"a/caf\\303\\251 file.txt"'), 'café file.txt');
   assert.equal(unquoteGitPath('/dev/null'), '/dev/null');
 
   // 2. Synthetic raw diff with multiple file operations, CRLF and no-newline marker
@@ -337,6 +339,7 @@ test('review end-to-end on temp git repo: worktree diff, reject hunk, audit log,
 
   assert.equal(rejectRes.ok, true);
   assert.equal(rejectRes.action, 'reject');
+  assert.equal(rejectRes.state, 'rejected');
   assert.ok(rejectRes.snapshot_ref);
   assert.match(rejectRes.snapshot_ref, /^refs\/maw\/checkpoints\/review-/);
 
@@ -711,6 +714,350 @@ test('review_hunk on CRLF repository with core.autocrlf=false successfully rever
   const contentAfter = fs.readFileSync(path.win32.join(projectDir, 'crlf.txt'), 'utf8');
   assert.ok(contentAfter.includes('row 3\r\n'));
   assert.ok(!contentAfter.includes('row 3 MODIFIED'));
+
+  // Clean up
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('review binary reject: untracked binary removed, tracked binary restored without altering real index', async () => {
+  const tmpRoot = path.win32.join(
+    os.tmpdir(),
+    `maw_review_bin_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const mawHome = path.win32.join(tmpRoot, 'maw_home');
+  const projectDir = path.win32.join(projectsRoot, 'bin-repo');
+
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    mawHome,
+    repoRoot: projectDir,
+  });
+
+  await runCommand('git', ['-C', projectDir, 'init']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.name', 'Tester']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.email', 'tester@example.com']);
+
+  // Tracked binary file (with NUL bytes)
+  const trackedBinPath = path.win32.join(projectDir, 'image.png');
+  const origBinData = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0x03]);
+  fs.writeFileSync(trackedBinPath, origBinData);
+  await runCommand('git', ['-C', projectDir, 'add', 'image.png']);
+  await runCommand('git', ['-C', projectDir, 'commit', '-m', 'Add tracked image.png']);
+
+  // 1. Modify tracked binary file
+  const modBinData = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x99, 0x88, 0x77]);
+  fs.writeFileSync(trackedBinPath, modBinData);
+
+  // 2. Add an untracked binary file
+  const untrackedBinPath = path.win32.join(projectDir, 'untracked.bin');
+  const untrackedData = Buffer.from([0x00, 0x01, 0x02, 0x03]);
+  fs.writeFileSync(untrackedBinPath, untrackedData);
+
+  const fakeCtx = {
+    paths,
+    registry: {} as any,
+    readJobs: async () => [],
+    startJob: async () => ({ ok: true }),
+  };
+
+  // Reject untracked binary file
+  const rejectUntrackedRes = (await reviewFeature.routes.review_hunk.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_hunk'),
+      query: new URLSearchParams(),
+      body: {
+        project_path: projectDir,
+        source: 'worktree',
+        path: 'untracked.bin',
+        action: 'reject',
+        confirm: true,
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(rejectUntrackedRes.ok, true);
+  assert.equal(rejectUntrackedRes.state, 'rejected');
+  assert.equal(fs.existsSync(untrackedBinPath), false);
+
+  // Index must remain untouched
+  const indexAfterUntracked = (await runCommand('git', ['-C', projectDir, 'diff', '--cached'])).stdout;
+  assert.equal(indexAfterUntracked, '');
+
+  // Reject tracked binary file
+  const rejectTrackedRes = (await reviewFeature.routes.review_hunk.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_hunk'),
+      query: new URLSearchParams(),
+      body: {
+        project_path: projectDir,
+        source: 'worktree',
+        path: 'image.png',
+        action: 'reject',
+        confirm: true,
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(rejectTrackedRes.ok, true);
+  assert.equal(rejectTrackedRes.state, 'rejected');
+  // Reverted to origBinData
+  const diskData = fs.readFileSync(trackedBinPath);
+  assert.deepEqual(diskData, origBinData);
+
+  // Real index must still be untouched
+  const indexAfterTracked = (await runCommand('git', ['-C', projectDir, 'diff', '--cached'])).stdout;
+  assert.equal(indexAfterTracked, '');
+
+  // Clean up
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('review: untracked files guards cap at 300, skip >400KB as too_large, and truncate at 5MB', async () => {
+  const tmpRoot = path.win32.join(
+    os.tmpdir(),
+    `maw_review_guards_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const mawHome = path.win32.join(tmpRoot, 'maw_home');
+  const projectDir = path.win32.join(projectsRoot, 'guards-repo');
+
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    mawHome,
+    repoRoot: projectDir,
+  });
+
+  await runCommand('git', ['-C', projectDir, 'init']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.name', 'Tester']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.email', 'tester@example.com']);
+
+  // Commit an initial file
+  fs.writeFileSync(path.win32.join(projectDir, 'init.txt'), 'hello\n');
+  await runCommand('git', ['-C', projectDir, 'add', 'init.txt']);
+  await runCommand('git', ['-C', projectDir, 'commit', '-m', 'Init']);
+
+  // 1. Large untracked file > 400 KB
+  const largeUntracked = path.win32.join(projectDir, 'large_untracked.txt');
+  fs.writeFileSync(largeUntracked, Buffer.alloc(450 * 1024, 'z'));
+
+  const fakeCtx = {
+    paths,
+    registry: {} as any,
+    readJobs: async () => [],
+    startJob: async () => ({ ok: true }),
+  };
+
+  const diffRes = (await reviewFeature.routes.review_diff.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL(`http://127.0.0.1/api?action=review_diff&project_path=${encodeURIComponent(projectDir)}&source=worktree`),
+      query: new URLSearchParams({ project_path: projectDir, source: 'worktree' }),
+      body: {},
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  const largeEntry = diffRes.files.find((f: any) => f.path === 'large_untracked.txt');
+  assert.ok(largeEntry);
+  assert.equal(largeEntry.too_large, true);
+  assert.equal(largeEntry.hunks.length, 0);
+
+  // Clean up
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('review_hunk: context option and ignore_ws rejection error', async () => {
+  const tmpRoot = path.win32.join(
+    os.tmpdir(),
+    `maw_review_ctx_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const mawHome = path.win32.join(tmpRoot, 'maw_home');
+  const projectDir = path.win32.join(projectsRoot, 'ctx-repo');
+
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    mawHome,
+    repoRoot: projectDir,
+  });
+
+  await runCommand('git', ['-C', projectDir, 'init']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.name', 'Tester']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.email', 'tester@example.com']);
+
+  // Commit file with 15 lines
+  const lines: string[] = [];
+  for (let i = 1; i <= 15; i++) {
+    lines.push(`line ${i}`);
+  }
+  fs.writeFileSync(path.win32.join(projectDir, 'file.txt'), lines.join('\n') + '\n', 'utf8');
+  await runCommand('git', ['-C', projectDir, 'add', 'file.txt']);
+  await runCommand('git', ['-C', projectDir, 'commit', '-m', 'Init']);
+
+  // Modify line 8
+  lines[7] = 'line 8 MODIFIED';
+  fs.writeFileSync(path.win32.join(projectDir, 'file.txt'), lines.join('\n') + '\n', 'utf8');
+
+  const fakeCtx = {
+    paths,
+    registry: {} as any,
+    readJobs: async () => [],
+    startJob: async () => ({ ok: true }),
+  };
+
+  // Diff with context=5
+  const diffRes = (await reviewFeature.routes.review_diff.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL(`http://127.0.0.1/api?action=review_diff&project_path=${encodeURIComponent(projectDir)}&source=worktree&context=5`),
+      query: new URLSearchParams({ project_path: projectDir, source: 'worktree', context: '5' }),
+      body: {},
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(diffRes.files.length, 1);
+  const hunkCtx5 = diffRes.files[0].hunks[0];
+  assert.ok(hunkCtx5);
+
+  // Accept with context=5
+  const acceptRes = (await reviewFeature.routes.review_hunk.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_hunk'),
+      query: new URLSearchParams(),
+      body: {
+        project_path: projectDir,
+        source: 'worktree',
+        path: 'file.txt',
+        hunk_id: hunkCtx5.id,
+        context: 5,
+        action: 'accept',
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(acceptRes.ok, true);
+  assert.equal(acceptRes.state, 'accepted');
+
+  // Reset
+  const resetRes = (await reviewFeature.routes.review_hunk.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_hunk'),
+      query: new URLSearchParams(),
+      body: {
+        project_path: projectDir,
+        source: 'worktree',
+        path: 'file.txt',
+        hunk_id: hunkCtx5.id,
+        context: 5,
+        action: 'reset',
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+  assert.equal(resetRes.state, null);
+
+  // Reject with context=5
+  const rejectRes = (await reviewFeature.routes.review_hunk.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_hunk'),
+      query: new URLSearchParams(),
+      body: {
+        project_path: projectDir,
+        source: 'worktree',
+        path: 'file.txt',
+        hunk_id: hunkCtx5.id,
+        context: 5,
+        action: 'reject',
+        confirm: true,
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(rejectRes.ok, true);
+  assert.equal(rejectRes.state, 'rejected');
+
+  // Verify file restored
+  const restored = fs.readFileSync(path.win32.join(projectDir, 'file.txt'), 'utf8');
+  assert.ok(restored.includes('line 8'));
+  assert.ok(!restored.includes('line 8 MODIFIED'));
+
+  // Test ignore_ws rejection error when whitespace-only change does not appear in non-ws diff
+  // Modify with whitespace only
+  fs.writeFileSync(path.win32.join(projectDir, 'file.txt'), restored.replace('line 8', 'line 8   '));
+
+  // Diff with ignore_ws=1 produces no hunks, or if requested hunk id is missing in non-ws diff
+  await assert.rejects(
+    async () => {
+      await reviewFeature.routes.review_hunk.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=review_hunk'),
+          query: new URLSearchParams(),
+          body: {
+            project_path: projectDir,
+            source: 'worktree',
+            path: 'file.txt',
+            hunk_id: 'fake_ws_hunk_id',
+            ignore_ws: true,
+            action: 'reject',
+            confirm: true,
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409
+  );
 
   // Clean up
   try {

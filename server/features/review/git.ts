@@ -31,7 +31,7 @@ export function validateSafeRelativePath(projectPath: string, relPath: string): 
 
   const normalized = trimmed.replace(/\//g, '\\');
   const parts = normalized.split('\\');
-  if (parts.includes('..') || parts.includes('.git')) {
+  if (parts.some((p) => p === '..' || p.toLowerCase() === '.git')) {
     throw new ApiValidationError('Invalid path.', 400);
   }
 
@@ -45,30 +45,48 @@ export function validateSafeRelativePath(projectPath: string, relPath: string): 
   const normBase = realProject.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
   const targetCandidate = path.win32.resolve(realProject, normalized);
 
+  let realTarget: string | null = null;
   try {
-    const realTarget = fs.realpathSync(targetCandidate);
+    realTarget = fs.realpathSync(targetCandidate);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+      throw new ApiValidationError('Invalid path.', 400);
+    }
+  }
+
+  if (realTarget !== null) {
     const normTarget = realTarget.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
     if (!normTarget.startsWith(normBase + '\\') && normTarget !== normBase) {
       throw new ApiValidationError('Invalid path.', 400);
     }
-  } catch {
+  } else {
+    // Only fall back to ancestor walk when realpathSync threw ENOENT (file does not yet exist)
     let cur = path.win32.dirname(targetCandidate);
     let ancestorFound = false;
     while (cur.length >= realProject.length) {
+      let realCur: string | null = null;
       try {
-        const realCur = fs.realpathSync(cur);
+        realCur = fs.realpathSync(cur);
+      } catch (curErr: unknown) {
+        if ((curErr as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+          throw new ApiValidationError('Invalid path.', 400);
+        }
+      }
+
+      if (realCur !== null) {
         const normRealCur = realCur.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
         if (!normRealCur.startsWith(normBase + '\\') && normRealCur !== normBase) {
           throw new ApiValidationError('Invalid path.', 400);
         }
         ancestorFound = true;
         break;
-      } catch {
-        const parent = path.win32.dirname(cur);
-        if (parent === cur) break;
-        cur = parent;
       }
+
+      const parent = path.win32.dirname(cur);
+      if (parent === cur) break;
+      cur = parent;
     }
+
     if (!ancestorFound) {
       const normCandidate = targetCandidate.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
       if (!normCandidate.startsWith(normBase + '\\')) {
@@ -323,6 +341,115 @@ export interface ResolvedReviewDiff {
   beforeRef?: string;
 }
 
+async function appendUntrackedFilesDiff(options: {
+  workingDir: string;
+  untrackedFiles: string[];
+  filterPath: string;
+  ctx: number;
+  ignore_ws: boolean;
+  full: boolean;
+  combinedParsed: ParsedDiffResult;
+  currentRawDiffBytes: number;
+}): Promise<void> {
+  const {
+    workingDir,
+    untrackedFiles,
+    filterPath,
+    ctx,
+    ignore_ws,
+    full,
+    combinedParsed,
+  } = options;
+
+  let totalRawBytes = options.currentRawDiffBytes;
+  let diffedCount = 0;
+
+  for (const uFile of untrackedFiles) {
+    if (combinedParsed.truncated) {
+      break;
+    }
+
+    if (diffedCount >= 300) {
+      combinedParsed.files.push({
+        path: uFile,
+        old_path: uFile,
+        status: 'A',
+        change: 'A',
+        binary: false,
+        untracked: true,
+        too_large: false,
+        omitted: true,
+        additions: 0,
+        deletions: 0,
+        hunks: [],
+        headerLines: [],
+      });
+      continue;
+    }
+
+    const fullFilePath = path.win32.join(workingDir, uFile.replace(/\//g, '\\'));
+    let fileSize = 0;
+    try {
+      fileSize = fs.statSync(fullFilePath).size;
+    } catch {
+      continue;
+    }
+
+    if (fileSize > 400 * 1024) {
+      combinedParsed.files.push({
+        path: uFile,
+        old_path: uFile,
+        status: 'A',
+        change: 'A',
+        binary: false,
+        untracked: true,
+        too_large: true,
+        omitted: false,
+        additions: 0,
+        deletions: 0,
+        hunks: [],
+        headerLines: [],
+      });
+      continue;
+    }
+
+    const uDiffArgs = [
+      '-C',
+      workingDir,
+      '-c',
+      'core.quotepath=off',
+      'diff',
+      '--no-color',
+      '--no-ext-diff',
+      `-U${ctx}`,
+    ];
+    if (ignore_ws) uDiffArgs.push('-w');
+    uDiffArgs.push('--no-index', '--', '/dev/null', uFile);
+
+    const uDiffRes = await runCommand('git', uDiffArgs);
+    if (uDiffRes.stdout) {
+      const chunkBytes = Buffer.byteLength(uDiffRes.stdout, 'utf8');
+      if (totalRawBytes + chunkBytes > 5 * 1024 * 1024) {
+        combinedParsed.truncated = true;
+        break;
+      }
+      totalRawBytes += chunkBytes;
+
+      const uParsed = parseUnifiedDiff(uDiffRes.stdout, {
+        full,
+        targetPath: filterPath,
+        untracked: true,
+      });
+
+      combinedParsed.files.push(...uParsed.files);
+      combinedParsed.stats.files += uParsed.stats.files;
+      combinedParsed.stats.additions += uParsed.stats.additions;
+      combinedParsed.stats.deletions += uParsed.stats.deletions;
+      diffedCount++;
+    }
+  }
+}
+
 export async function runReviewDiff(
   params: ReviewDiffParams,
   paths: ServerPaths
@@ -396,6 +523,8 @@ export async function runReviewDiff(
       untracked: false,
     });
 
+    const rawDiffBytes = Buffer.byteLength(diffRes.stdout ?? '', 'utf8');
+
     // Untracked files
     const untrackedArgs = [
       '-C',
@@ -413,32 +542,16 @@ export async function runReviewDiff(
     const untrackedRes = await runCommand('git', untrackedArgs);
     if (untrackedRes.code === 0 && untrackedRes.stdout) {
       const untrackedFiles = untrackedRes.stdout.split('\0').filter(Boolean);
-      for (const uFile of untrackedFiles) {
-        const uDiffArgs = [
-          '-C',
-          effectiveProjectPath,
-          '-c',
-          'core.quotepath=off',
-          'diff',
-          '--no-color',
-          '--no-ext-diff',
-          `-U${ctx}`,
-        ];
-        if (ignore_ws) uDiffArgs.push('-w');
-        uDiffArgs.push('--no-index', '--', '/dev/null', uFile);
-        const uDiffRes = await runCommand('git', uDiffArgs);
-        if (uDiffRes.stdout) {
-          const uParsed = parseUnifiedDiff(uDiffRes.stdout, {
-            full: Boolean(full),
-            targetPath: filterPath,
-            untracked: true,
-          });
-          combinedParsed.files.push(...uParsed.files);
-          combinedParsed.stats.files += uParsed.stats.files;
-          combinedParsed.stats.additions += uParsed.stats.additions;
-          combinedParsed.stats.deletions += uParsed.stats.deletions;
-        }
-      }
+      await appendUntrackedFilesDiff({
+        workingDir: effectiveProjectPath,
+        untrackedFiles,
+        filterPath,
+        ctx,
+        ignore_ws: Boolean(ignore_ws),
+        full: Boolean(full),
+        combinedParsed,
+        currentRawDiffBytes: rawDiffBytes,
+      });
     }
   } else if (source === 'branch') {
     if (!ref || !isValidGitRef(ref)) {
@@ -588,6 +701,8 @@ export async function runReviewDiff(
         untracked: false,
       });
 
+      const rawDiffBytes = Buffer.byteLength(diffRes.stdout ?? '', 'utf8');
+
       const lsTreeRes = await runCommand('git', [
         '-C',
         workingDir,
@@ -613,35 +728,20 @@ export async function runReviewDiff(
       }
       const untrackedRes = await runCommand('git', untrackedArgs);
       if (untrackedRes.code === 0 && untrackedRes.stdout) {
-        const untrackedFiles = untrackedRes.stdout.split('\0').filter(Boolean);
-        for (const uFile of untrackedFiles) {
-          if (!trackedInBefore.has(uFile)) {
-            const uDiffArgs = [
-              '-C',
-              workingDir,
-              '-c',
-              'core.quotepath=off',
-              'diff',
-              '--no-color',
-              '--no-ext-diff',
-              `-U${ctx}`,
-            ];
-            if (ignore_ws) uDiffArgs.push('-w');
-            uDiffArgs.push('--no-index', '--', '/dev/null', uFile);
-            const uDiffRes = await runCommand('git', uDiffArgs);
-            if (uDiffRes.stdout) {
-              const uParsed = parseUnifiedDiff(uDiffRes.stdout, {
-                full: Boolean(full),
-                targetPath: filterPath,
-                untracked: true,
-              });
-              combinedParsed.files.push(...uParsed.files);
-              combinedParsed.stats.files += uParsed.stats.files;
-              combinedParsed.stats.additions += uParsed.stats.additions;
-              combinedParsed.stats.deletions += uParsed.stats.deletions;
-            }
-          }
-        }
+        const untrackedFiles = untrackedRes.stdout
+          .split('\0')
+          .filter(Boolean)
+          .filter((f) => !trackedInBefore.has(f));
+        await appendUntrackedFilesDiff({
+          workingDir,
+          untrackedFiles,
+          filterPath,
+          ctx,
+          ignore_ws: Boolean(ignore_ws),
+          full: Boolean(full),
+          combinedParsed,
+          currentRawDiffBytes: rawDiffBytes,
+        });
       }
     }
   } else if (source === 'commit') {
@@ -775,9 +875,10 @@ export async function executeRejectHunk(options: {
   snapshotRef: string;
   source: string;
   beforeRef?: string;
+  ref?: string;
   paths: ServerPaths;
 }): Promise<void> {
-  const { targetPath, file, hunkId, source, beforeRef, paths } = options;
+  const { targetPath, file, hunkId, source, beforeRef, ref, paths } = options;
 
   if (file.binary) {
     if (hunkId !== null) {
@@ -786,24 +887,46 @@ export async function executeRejectHunk(options: {
 
     const fullFilePath = path.win32.join(targetPath, file.path.replace(/\//g, '\\'));
 
-    if (file.status === 'A' && file.untracked) {
+    let beforeSource = 'HEAD';
+    if (source === 'worktree') {
+      beforeSource = 'HEAD';
+    } else if (source === 'job') {
+      beforeSource = beforeRef ?? 'HEAD';
+    } else if (source === 'commit') {
+      beforeSource = ref ? `${ref}^` : 'HEAD';
+    } else if (source === 'branch') {
+      beforeSource = beforeRef ?? 'HEAD';
+    }
+
+    // Check if the binary file existed on the before side
+    const catRes = await runCommand('git', [
+      '-C',
+      targetPath,
+      'cat-file',
+      '-e',
+      `${beforeSource}:${file.path}`,
+    ]);
+
+    if (catRes.code !== 0 || file.untracked || file.change === 'A') {
+      // The binary file did not exist on before side; delete it from worktree
       if (fs.existsSync(fullFilePath)) {
         fs.unlinkSync(fullFilePath);
       }
       return;
     }
 
-    const checkoutRef = source === 'worktree' ? 'HEAD' : (beforeRef ?? 'HEAD');
-    const checkoutRes = await runCommand('git', [
+    // Restore from beforeSource to worktree only (real index untouched)
+    const restoreRes = await runCommand('git', [
       '-C',
       targetPath,
-      'checkout',
-      checkoutRef,
+      'restore',
+      `--source=${beforeSource}`,
+      '--worktree',
       '--',
       file.path,
     ]);
-    if (checkoutRes.code !== 0) {
-      throw new ApiValidationError(`Binary revert failed: ${checkoutRes.stderr}`, 409);
+    if (restoreRes.code !== 0) {
+      throw new ApiValidationError(`Binary revert failed: ${restoreRes.stderr}`, 409);
     }
     return;
   }
