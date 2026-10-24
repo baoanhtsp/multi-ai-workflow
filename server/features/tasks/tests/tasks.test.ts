@@ -9,13 +9,17 @@ import { loadAgentRegistry } from '../../../lib/registry.ts';
 import { exportLibrary, importLibrary } from '../library.ts';
 import { deletePreset, getPresets, savePreset } from '../presets.ts';
 import {
+  getAgentsUsedByCard,
   getSchedulerStatus,
   handleTaskRetry,
+  refreshLeaderHeartbeat,
   startCardJob,
+  stopScheduler,
   tick,
   tryAcquireLeaderLock,
 } from '../scheduler.ts';
 import {
+  bulkCreateCards,
   createCard,
   deleteCard,
   getCard,
@@ -990,6 +994,303 @@ test('tasks: council findings extraction captures 6000 chars of reviewer logs en
     assert.equal(lastAttempt.findings.length, 6000);
     assert.ok(lastAttempt.findings.endsWith('VERDICT: APPROVED'));
     assert.ok(lastAttempt.findings.includes('Reviewer feedback details:'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('tasks: leader lock exclusive acquisition, stale lock rename, token heartbeat, and stopScheduler release', async () => {
+  const { ctx, cleanup } = createTestContext('leader_regression');
+  try {
+    const lockFile = path.join(ctx.paths.featureDataDir('tasks'), 'scheduler.lock');
+    fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+
+    // Clean any prior state
+    stopScheduler(ctx);
+
+    // 1. Acquire fresh lock
+    const acquired = tryAcquireLeaderLock(ctx);
+    assert.equal(acquired, true);
+    assert.ok(fs.existsSync(lockFile));
+    const lockData1 = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+    assert.equal(lockData1.pid, process.pid);
+    assert.ok(lockData1.token);
+
+    // 2. Refresh heartbeat
+    const refreshed = refreshLeaderHeartbeat(ctx);
+    assert.equal(refreshed, true);
+
+    // 3. Stale lock takeover (> 60s old heartbeat from dead PID)
+    const deadPid = 999999;
+    const staleHeartbeat = new Date(Date.now() - 75000).toISOString();
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: deadPid,
+        token: 'dead-token',
+        started_at: staleHeartbeat,
+        heartbeat_at: staleHeartbeat,
+      }),
+      'utf8'
+    );
+
+    // Reset module token
+    stopScheduler();
+    const takeover = tryAcquireLeaderLock(ctx);
+    assert.equal(takeover, true);
+
+    // Check that stale lock was renamed to .stale-<ts>
+    const files = fs.readdirSync(path.dirname(lockFile));
+    const staleFiles = files.filter((f) => f.includes('scheduler.lock.stale-'));
+    assert.ok(staleFiles.length >= 1, 'Expected at least one .stale-<ts> file');
+
+    // 4. stopScheduler unlinks lock
+    stopScheduler(ctx);
+    assert.equal(fs.existsSync(lockFile), false);
+  } finally {
+    stopScheduler(ctx);
+    cleanup();
+  }
+});
+
+test('tasks: restart-safe start sets starting info and reconciles crashed/orphaned start after 30s', async () => {
+  const { ctx, testProjectDir, tempJobsDir, cleanup } = createTestContext('restart_safe_start');
+  try {
+    const prompt = 'Test restart safe start prompt';
+    const card = await createCard(ctx, {
+      title: 'Restart Safe Task',
+      prompt,
+      project_path: testProjectDir,
+      mode: 'task',
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'backlog',
+    });
+
+    // 1. Simulate server crashed while starting (> 30s ago), but NO job was created in jobsDir
+    const oldStartingTime = new Date(Date.now() - 35000).toISOString();
+    card.status = 'queued';
+    card.starting = {
+      at: oldStartingTime,
+      prompt_sha: '0000000000000000000000000000000000000000000000000000000000000000',
+    };
+    await saveCard(ctx, card);
+
+    // Tick step 1 should reconcile orphaned starting card -> mark failed
+    await tick(ctx);
+    const failedCard = (await getCard(ctx, card.id))!;
+    assert.equal(failedCard.status, 'failed');
+    assert.equal(
+      failedCard.status_reason,
+      'start interrupted (server stopped while starting); retry to run again'
+    );
+    assert.equal(failedCard.starting, null);
+
+    // 2. Simulate server crashed while starting (> 30s ago), BUT a job was indeed created
+    const card2 = await createCard(ctx, {
+      title: 'Restart Safe Task 2',
+      prompt: 'Prompt for adoption',
+      project_path: testProjectDir,
+      mode: 'task',
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'queued',
+    });
+
+    const crypto = await import('node:crypto');
+    const expectedSha = crypto.createHash('sha256').update('Prompt for adoption').digest('hex');
+    card2.starting = {
+      at: oldStartingTime,
+      prompt_sha: expectedSha,
+    };
+    await saveCard(ctx, card2);
+
+    // Place matching job meta in jobsDir
+    const adoptedJobId = `job_adopted_${Date.now()}`;
+    fs.writeFileSync(
+      path.join(tempJobsDir, `${adoptedJobId}.json`),
+      JSON.stringify({
+        job_id: adoptedJobId,
+        pid: process.pid,
+        status: 'RUNNING',
+        project_path: testProjectDir,
+        prompt_sha256: expectedSha,
+        started_at: oldStartingTime,
+      })
+    );
+
+    // Tick step 1 should adopt the job
+    await tick(ctx);
+    const adoptedCard = (await getCard(ctx, card2.id))!;
+    assert.equal(adoptedCard.status, 'running');
+    assert.equal(adoptedCard.job_id, adoptedJobId);
+    assert.equal(adoptedCard.starting, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test('tasks: bulkCreateCards validates every item, rejects unknown depends_on_refs, and enforces all-or-nothing atomicity', async () => {
+  const { ctx, testProjectDir, cleanup } = createTestContext('bulk_create_atomicity');
+  try {
+    // 1. Unknown depends_on_refs -> rejects with 400 naming item index
+    await assert.rejects(
+      async () => {
+        await bulkCreateCards(ctx, {
+          tasks: [
+            {
+              ref: 'step-1',
+              title: 'Valid step 1',
+              prompt: 'prompt 1',
+              project_path: testProjectDir,
+              agent: 'antigravity',
+              role: 'backend',
+            },
+            {
+              ref: 'step-2',
+              title: 'Invalid step 2',
+              prompt: 'prompt 2',
+              project_path: testProjectDir,
+              agent: 'antigravity',
+              role: 'backend',
+              depends_on_refs: ['nonexistent-step'],
+            },
+          ],
+        });
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.ok(err.message.includes('Item #2'));
+        assert.ok(err.message.includes('nonexistent-step'));
+        return true;
+      }
+    );
+
+    // Verify atomicity: 0 cards saved
+    const cardsAfterFail = await getCards(ctx);
+    assert.equal(cardsAfterFail.length, 0);
+
+    // 2. Invalid field (e.g. invalid mode) -> rejects with 400 naming item index
+    await assert.rejects(
+      async () => {
+        await bulkCreateCards(ctx, {
+          tasks: [
+            {
+              ref: 'step-1',
+              title: 'Valid step 1',
+              prompt: 'prompt 1',
+              project_path: testProjectDir,
+              agent: 'antigravity',
+              role: 'backend',
+              mode: 'invalid_mode' as any,
+            },
+          ],
+        });
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.ok(err.message.includes('Item #1'));
+        return true;
+      }
+    );
+
+    // 3. Successful bulk create with depends_on_refs
+    const created = await bulkCreateCards(ctx, {
+      tasks: [
+        {
+          ref: 'build',
+          title: 'Build project',
+          prompt: 'npm run build',
+          project_path: testProjectDir,
+          agent: 'antigravity',
+          role: 'backend',
+        },
+        {
+          ref: 'test',
+          title: 'Test project',
+          prompt: 'npm test',
+          project_path: testProjectDir,
+          agent: 'antigravity',
+          role: 'backend',
+          depends_on_refs: ['build'],
+        },
+      ],
+    });
+
+    assert.equal(created.length, 2);
+    assert.equal(created[1]!.depends_on.length, 1);
+    assert.equal(created[1]!.depends_on[0], created[0]!.id);
+  } finally {
+    cleanup();
+  }
+});
+
+test('tasks: getAgentsUsedByCard resolves effective agents from preset and defaults for running and candidate cards', async () => {
+  const { ctx, testProjectDir, cleanup } = createTestContext('effective_agents');
+  try {
+    await savePreset(ctx, {
+      id: 'team-arch-sec',
+      name: 'Arch + Sec',
+      team: {
+        architect: 'claude',
+        reviewer: 'codex',
+        implementer: 'antigravity',
+      },
+      reviewers: ['claude', 'codex'],
+      implementer: 'antigravity',
+    });
+
+    // 1. Task mode uses card agent
+    const card1 = await createCard(ctx, {
+      title: 'Task Mode',
+      prompt: 'Do task',
+      project_path: testProjectDir,
+      agent: 'gemini',
+      role: 'backend',
+    });
+    const agents1 = getAgentsUsedByCard(card1, ctx);
+    assert.deepEqual(agents1, ['gemini']);
+
+    // 2. Team mode uses preset team
+    const cardTeam = await createCard(ctx, {
+      title: 'Team Mode',
+      prompt: 'Do team task',
+      project_path: testProjectDir,
+      mode: 'team',
+      agent: 'claude',
+      role: 'backend',
+      preset_id: 'team-arch-sec',
+    });
+    const agentsTeam = getAgentsUsedByCard(cardTeam, ctx);
+    assert.ok(agentsTeam.includes('claude'));
+    assert.ok(agentsTeam.includes('codex'));
+    assert.ok(agentsTeam.includes('antigravity'));
+
+    // 3. Council mode uses preset reviewers
+    const cardCouncil = await createCard(ctx, {
+      title: 'Council Mode',
+      prompt: 'Do council review',
+      project_path: testProjectDir,
+      mode: 'council',
+      role: 'reviewer',
+      preset_id: 'team-arch-sec',
+    });
+    const agentsCouncil = getAgentsUsedByCard(cardCouncil, ctx);
+    assert.deepEqual(agentsCouncil.sort(), ['claude', 'codex'].sort());
+
+    // 4. Auto-gate mode uses implementer and reviewers
+    const cardAutoGate = await createCard(ctx, {
+      title: 'Auto Gate Mode',
+      prompt: 'Do auto gate',
+      project_path: testProjectDir,
+      mode: 'auto-gate',
+      role: 'backend',
+      preset_id: 'team-arch-sec',
+    });
+    const agentsAutoGate = getAgentsUsedByCard(cardAutoGate, ctx);
+    assert.ok(agentsAutoGate.includes('antigravity'));
+    assert.ok(agentsAutoGate.includes('claude'));
+    assert.ok(agentsAutoGate.includes('codex'));
   } finally {
     cleanup();
   }

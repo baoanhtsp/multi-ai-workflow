@@ -1,5 +1,7 @@
+import path from 'node:path';
 import type { MawFeature } from '../../lib/feature.ts';
-import { badRequest, conflict } from '../tasks/lib.ts';
+import { resolveProjectPath } from '../../lib/paths.ts';
+import { badRequest, conflict, fileMutex } from '../tasks/lib.ts';
 import { ensureScheduler, registerTicker, triggerImmediateTick } from '../tasks/scheduler.ts';
 import { createCard, getCards } from '../tasks/store.ts';
 import { checkGhStatus, ensureGhReady, executeGh, throwGhNotInstalled, throwGhNotLoggedIn } from './client.ts';
@@ -23,7 +25,15 @@ export const feature: MawFeature = {
       method: 'GET',
       handler: async (ctx, req) => {
         ensureScheduler(ctx);
-        const projectPath = req.url.searchParams.get('project_path') ?? undefined;
+        const rawProjectPath = req.url.searchParams.get('project_path');
+        let projectPath: string | undefined;
+        if (rawProjectPath) {
+          const resolved = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+          if (!resolved) {
+            throw badRequest(`project_path "${rawProjectPath}" is not valid or outside projectsRoot.`);
+          }
+          projectPath = resolved;
+        }
         const gh = await checkGhStatus(projectPath);
 
         if (!gh.installed) {
@@ -81,7 +91,15 @@ export const feature: MawFeature = {
       method: 'GET',
       handler: async (ctx, req) => {
         ensureScheduler(ctx);
-        const projectPath = req.url.searchParams.get('project_path') ?? undefined;
+        const rawProjectPath = req.url.searchParams.get('project_path');
+        let projectPath: string | undefined;
+        if (rawProjectPath) {
+          const resolved = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+          if (!resolved) {
+            throw badRequest(`project_path "${rawProjectPath}" is not valid or outside projectsRoot.`);
+          }
+          projectPath = resolved;
+        }
         await ensureGhReady(projectPath, req.res);
 
         const state = req.url.searchParams.get('state') ?? 'open';
@@ -136,9 +154,13 @@ export const feature: MawFeature = {
       method: 'POST',
       handler: async (ctx, req) => {
         ensureScheduler(ctx);
-        const projectPath = String(req.body.project_path ?? '').trim();
-        if (!projectPath) {
+        const rawProjectPath = String(req.body.project_path ?? '').trim();
+        if (!rawProjectPath) {
           throw badRequest("Field 'project_path' is required.");
+        }
+        const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+        if (!projectPath) {
+          throw badRequest(`project_path "${rawProjectPath}" is not valid or outside projectsRoot.`);
         }
 
         const issueNumber = Number(req.body.number ?? 0);
@@ -148,71 +170,74 @@ export const feature: MawFeature = {
 
         await ensureGhReady(projectPath, req.res);
 
-        // Check duplicate
-        const allCards = await getCards(ctx, { project_path: projectPath });
-        const existing = allCards.find(
-          (c) => c.source?.kind === 'github-issue' && Number(c.source?.number) === issueNumber
-        );
-        if (existing) {
-          throw conflict(
-            `Issue #${issueNumber} has already been imported as card ${existing.id}.`
+        const importLock = path.win32.join(ctx.paths.featureDataDir('github'), 'import.lock');
+        return await fileMutex.runExclusive(importLock, async () => {
+          // Check duplicate
+          const allCards = await getCards(ctx, { project_path: projectPath });
+          const existing = allCards.find(
+            (c) => c.source?.kind === 'github-issue' && Number(c.source?.number) === issueNumber
           );
-        }
+          if (existing) {
+            throw conflict(
+              `Issue #${issueNumber} has already been imported as card ${existing.id}.`
+            );
+          }
 
-        const viewRes = await executeGh(
-          ['issue', 'view', String(issueNumber), '--json', 'number,title,body,labels,url'],
-          { cwd: projectPath }
-        );
-        if (viewRes.code !== 0) {
-          throw badRequest(`gh issue view failed: ${viewRes.stderr || viewRes.stdout}`);
-        }
+          const viewRes = await executeGh(
+            ['issue', 'view', String(issueNumber), '--json', 'number,title,body,labels,url'],
+            { cwd: projectPath }
+          );
+          if (viewRes.code !== 0) {
+            throw badRequest(`gh issue view failed: ${viewRes.stderr || viewRes.stdout}`);
+          }
 
-        let issueData: any;
-        try {
-          issueData = JSON.parse(viewRes.stdout);
-        } catch {
-          throw badRequest('Failed to parse gh issue view JSON.');
-        }
+          let issueData: any;
+          try {
+            issueData = JSON.parse(viewRes.stdout);
+          } catch {
+            throw badRequest('Failed to parse gh issue view JSON.');
+          }
 
-        const title = String(issueData.title ?? '');
-        const body = String(issueData.body ?? '');
-        const url = String(issueData.url ?? '');
-        const labels: string[] = Array.isArray(issueData.labels)
-          ? issueData.labels.map((l: any) => String(l.name ?? l))
-          : [];
+          const title = String(issueData.title ?? '');
+          const body = String(issueData.body ?? '');
+          const url = String(issueData.url ?? '');
+          const labels: string[] = Array.isArray(issueData.labels)
+            ? issueData.labels.map((l: any) => String(l.name ?? l))
+            : [];
 
-        const cardTitle = `#${issueNumber} ${title}`.slice(0, 200);
-        let prompt = `Resolve GitHub issue #${issueNumber}: ${title}\n\n${body}`;
+          const cardTitle = `#${issueNumber} ${title}`.slice(0, 200);
+          let prompt = `Resolve GitHub issue #${issueNumber}: ${title}\n\n${body}`;
 
-        const card = await createCard(ctx, {
-          title: cardTitle,
-          prompt,
-          project_path: projectPath,
-          mode: req.body.mode ? String(req.body.mode).trim() : 'task',
-          agent: req.body.agent ? String(req.body.agent).trim() : undefined,
-          role: req.body.role ? String(req.body.role).trim() : 'backend',
-          preset_id: req.body.preset_id ? String(req.body.preset_id).trim() : undefined,
-          template_id: req.body.template_id ? String(req.body.template_id).trim() : undefined,
-          vars: {
-            number: String(issueNumber),
-            title,
-            body,
-          },
-          status: req.body.status ? String(req.body.status).trim() : 'backlog',
-          labels,
-          created_by: 'github',
-          source: {
-            kind: 'github-issue',
-            number: issueNumber,
-            url,
-          },
+          const card = await createCard(ctx, {
+            title: cardTitle,
+            prompt,
+            project_path: projectPath,
+            mode: req.body.mode ? String(req.body.mode).trim() : 'task',
+            agent: req.body.agent ? String(req.body.agent).trim() : undefined,
+            role: req.body.role ? String(req.body.role).trim() : 'backend',
+            preset_id: req.body.preset_id ? String(req.body.preset_id).trim() : undefined,
+            template_id: req.body.template_id ? String(req.body.template_id).trim() : undefined,
+            vars: {
+              number: String(issueNumber),
+              title,
+              body,
+            },
+            status: req.body.status ? String(req.body.status).trim() : 'backlog',
+            labels,
+            created_by: 'github',
+            source: {
+              kind: 'github-issue',
+              number: issueNumber,
+              url,
+            },
+          });
+
+          triggerImmediateTick(ctx);
+          return {
+            ok: true,
+            task: card,
+          };
         });
-
-        triggerImmediateTick(ctx);
-        return {
-          ok: true,
-          task: card,
-        };
       },
     },
 
@@ -220,7 +245,15 @@ export const feature: MawFeature = {
       method: 'GET',
       handler: async (ctx, req) => {
         ensureScheduler(ctx);
-        const projectPath = req.url.searchParams.get('project_path') ?? undefined;
+        const rawProjectPath = req.url.searchParams.get('project_path');
+        let projectPath: string | undefined;
+        if (rawProjectPath) {
+          const resolved = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+          if (!resolved) {
+            throw badRequest(`project_path "${rawProjectPath}" is not valid or outside projectsRoot.`);
+          }
+          projectPath = resolved;
+        }
         await ensureGhReady(projectPath, req.res);
 
         const res = await executeGh(

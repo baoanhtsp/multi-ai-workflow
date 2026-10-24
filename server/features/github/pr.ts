@@ -3,6 +3,7 @@ import type { ServerResponse } from 'node:http';
 import path from 'node:path';
 import { refreshJobMetaStatus, type JobMeta } from '../../actions/jobs.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
+import { resolveProjectPath } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
 import {
   appendAudit,
@@ -86,7 +87,11 @@ export async function createPrRequest(
     throw conflict("Cannot create PR: task card must be in 'review' or 'done' status.");
   }
 
-  const projectPath = card.project_path;
+  const rawProjectPath = card.project_path;
+  const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+  if (!projectPath) {
+    throw badRequest(`project_path "${rawProjectPath}" is not valid or outside projectsRoot.`);
+  }
   await ensureGhReady(projectPath, res);
 
   // 1. Determine branch
@@ -327,6 +332,45 @@ export async function githubTicker(ctx: MawFeatureContext): Promise<void> {
 
       // Step 3: Handle creating
       if (req.state === 'creating') {
+        // Replay check: adopt existing open PR if found
+        let adoptedPr: { number: number; url: string } | null = null;
+        try {
+          const listRes = await executeGh(
+            ['pr', 'list', '--head', req.branch, '--base', req.base, '--state', 'open', '--json', 'number,url', '--limit', '1'],
+            { cwd: req.project_path }
+          );
+          if (listRes.code === 0) {
+            const listJson = JSON.parse(listRes.stdout);
+            if (Array.isArray(listJson) && listJson.length > 0 && listJson[0]?.url) {
+              adoptedPr = {
+                number: Number(listJson[0].number || 0),
+                url: String(listJson[0].url),
+              };
+            }
+          }
+        } catch {
+          // ignore error and proceed to gh pr create
+        }
+
+        if (adoptedPr) {
+          req.state = 'done';
+          req.pr_url = adoptedPr.url;
+          req.updated_at = new Date().toISOString();
+
+          await patchCard(ctx, card.id, (c) => {
+            c.pr = { number: adoptedPr.number, url: adoptedPr.url };
+          });
+
+          appendAudit(ctx.paths.auditFile, 'github_pr_adopt', {
+            task_id: card.id,
+            pr_url: adoptedPr.url,
+            pr_number: adoptedPr.number,
+          });
+
+          modified = true;
+          continue;
+        }
+
         const bodyContent = req.body_text || card.prompt;
         const tmpFile = path.win32.join(ctx.paths.featureDataDir('github'), `pr_body_${req.id}.md`);
         fs.writeFileSync(tmpFile, bodyContent, 'utf8');
@@ -406,9 +450,13 @@ export async function fetchPrFeedback(
   task: Card;
   counts: { reviews: number; comments: number; failed_checks: number };
 }> {
-  const projectPath = String(raw.project_path ?? '').trim();
-  if (!projectPath) {
+  const rawProjectPath = String(raw.project_path ?? '').trim();
+  if (!rawProjectPath) {
     throw badRequest("Field 'project_path' is required.");
+  }
+  const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+  if (!projectPath) {
+    throw badRequest(`project_path "${rawProjectPath}" is not valid or outside projectsRoot.`);
   }
 
   const prNumber = Number(raw.number ?? 0);

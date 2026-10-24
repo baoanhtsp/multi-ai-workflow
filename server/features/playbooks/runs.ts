@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MawFeatureContext } from '../../lib/feature.ts';
+import { resolveProjectPath } from '../../lib/paths.ts';
 import {
   appendAudit,
   badRequest,
@@ -30,6 +31,7 @@ export interface PlaybookRunItem {
 
 export interface PlaybookRun {
   id: string;
+  schedule_id?: string;
   project_path: string;
   file: string;
   on_failure: 'stop' | 'continue';
@@ -71,11 +73,17 @@ export async function getPlaybookRuns(
 
 export async function startPlaybookRun(
   ctx: MawFeatureContext,
-  raw: Record<string, unknown>
+  raw: Record<string, unknown>,
+  options?: { schedule_id?: string }
 ): Promise<{ run: PlaybookRun; tasks: Card[] }> {
-  const projectPath = String(raw.project_path ?? '').trim();
-  if (!projectPath) {
+  const rawProjectPath = String(raw.project_path ?? '').trim();
+  if (!rawProjectPath) {
     throw badRequest('project_path is required.');
+  }
+
+  const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+  if (!projectPath) {
+    throw badRequest(`project_path "${rawProjectPath}" is not valid or outside projectsRoot.`);
   }
 
   const fileInput = String(raw.file ?? '').trim();
@@ -144,8 +152,11 @@ export async function startPlaybookRun(
     });
   }
 
+  const scheduleId = raw.schedule_id ? String(raw.schedule_id).trim() : options?.schedule_id;
+
   const run: PlaybookRun = {
     id: runId,
+    ...(scheduleId ? { schedule_id: scheduleId } : {}),
     project_path: projectPath,
     file: validatedFilePath,
     on_failure: onFailure,
@@ -226,13 +237,14 @@ export async function playbookTicker(ctx: MawFeatureContext): Promise<void> {
           const c = await getCard(ctx, item.card_id);
           if (c && c.status === 'done') {
             const ticked = tickBoxInFile(run.file, item.line, item.text);
-            if (ticked) {
-              appendAudit(ctx.paths.auditFile, 'playbook_tick', {
-                file: run.file,
-                line: item.line,
-                text: item.text,
-              });
+            if (!ticked) {
+              continue;
             }
+            appendAudit(ctx.paths.auditFile, 'playbook_tick', {
+              file: run.file,
+              line: item.line,
+              text: item.text,
+            });
             item.state = 'done';
             modified = true;
           }
@@ -277,13 +289,15 @@ export async function playbookTicker(ctx: MawFeatureContext): Promise<void> {
           await moveCard(ctx, card.id, 'queued');
         } else if (card.status === 'done') {
           const ticked = tickBoxInFile(run.file, runningItem.line, runningItem.text);
-          if (ticked) {
-            appendAudit(ctx.paths.auditFile, 'playbook_tick', {
-              file: run.file,
-              line: runningItem.line,
-              text: runningItem.text,
-            });
+          if (!ticked) {
+            // tickBoxInFile failed (e.g. file locked/rename failure); keep item in 'running' state and retry on next tick
+            continue;
           }
+          appendAudit(ctx.paths.auditFile, 'playbook_tick', {
+            file: run.file,
+            line: runningItem.line,
+            text: runningItem.text,
+          });
           runningItem.state = 'done';
           run.cursor++;
           modified = true;

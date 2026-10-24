@@ -63,6 +63,11 @@ export interface TaskPendingRun {
   new_session?: boolean;
 }
 
+export interface TaskStartingInfo {
+  at: string;
+  prompt_sha: string;
+}
+
 export interface Card {
   id: string;
   title: string;
@@ -96,6 +101,7 @@ export interface Card {
   order: number;
   pr?: { number: number; url: string };
   pending_run?: TaskPendingRun | null;
+  starting?: TaskStartingInfo | null;
 }
 
 export interface TasksFile {
@@ -354,6 +360,252 @@ export async function getQueuedCardsCount(ctx: MawFeatureContext): Promise<numbe
   return cards.filter((c) => c.status === 'queued').length;
 }
 
+export interface ValidatedCardInput {
+  title: string;
+  prompt: string;
+  project_path: string;
+  mode: TaskMode;
+  agent: string;
+  role: TaskRole;
+  team?: Record<string, string>;
+  reviewers?: string[];
+  model?: string;
+  effort?: string;
+  preset_id?: string;
+  isolate?: boolean;
+  depends_on: string[];
+  priority: number;
+  require_review: boolean;
+  status: TaskStatus;
+  retry: TaskRetryConfig;
+  labels: string[];
+  source: Record<string, unknown> | null;
+  created_by: TaskCreatedBy;
+}
+
+export async function validateCardInput(
+  ctx: MawFeatureContext,
+  input: Record<string, unknown>,
+  validDependencyIds?: Set<string>,
+  itemPrefix = ''
+): Promise<ValidatedCardInput> {
+  // 1. Template resolution if template_id given
+  let rawTitle = String(input.title ?? '').trim();
+  let rawPrompt = String(input.prompt ?? '').trim();
+  const templateId = String(input.template_id ?? '').trim();
+
+  if (templateId) {
+    const tpl = await getTemplate(ctx, templateId);
+    if (!tpl) {
+      throw notFound(`${itemPrefix}Template not found: ${templateId}`);
+    }
+    const vars =
+      input.vars && typeof input.vars === 'object' && !Array.isArray(input.vars)
+        ? (input.vars as Record<string, string>)
+        : {};
+    const rendered = renderTemplate(
+      tpl,
+      vars,
+      String(input.project_path ?? ctx.paths.projectsRoot)
+    );
+    if (!rawTitle) rawTitle = rendered.title;
+    if (!rawPrompt) rawPrompt = rendered.prompt;
+    if (!input.mode && tpl.mode) input.mode = tpl.mode;
+    if (!input.agent && tpl.agent) input.agent = tpl.agent;
+    if (!input.role && tpl.role) input.role = tpl.role;
+    if (!input.preset_id && tpl.preset_id) input.preset_id = tpl.preset_id;
+  }
+
+  // Title validation
+  if (!rawTitle || rawTitle.length > 200) {
+    throw badRequest(`${itemPrefix}Card title must be between 1 and 200 characters.`);
+  }
+
+  // Prompt validation
+  if (!rawPrompt || rawPrompt.length > 20000) {
+    throw badRequest(`${itemPrefix}Card prompt must be between 1 and 20000 characters.`);
+  }
+
+  // Project path validation
+  const rawProjectPath = String(input.project_path ?? '').trim();
+  if (!rawProjectPath) {
+    throw badRequest(`${itemPrefix}project_path is required.`);
+  }
+  const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+  if (!projectPath) {
+    throw badRequest(
+      `${itemPrefix}Invalid project_path '${rawProjectPath}': must be inside projects root.`
+    );
+  }
+
+  // Mode validation
+  const mode = String(input.mode ?? 'task').trim() as TaskMode;
+  if (!ALLOWED_MODES.has(mode)) {
+    throw badRequest(
+      `${itemPrefix}Invalid mode '${mode}'. Allowed: ${Array.from(ALLOWED_MODES).join(', ')}`
+    );
+  }
+
+  // Enabled agents check
+  const enabledAgents = new Map(
+    (ctx.registry?.agents ?? []).filter((a) => a.enabled).map((a) => [a.id, a])
+  );
+
+  const presetId = input.preset_id ? String(input.preset_id).trim() : undefined;
+  let agent = String(input.agent ?? '').trim();
+  let role = String(input.role ?? '').trim() as TaskRole;
+
+  if (mode === 'task') {
+    if (!agent) {
+      throw badRequest(`${itemPrefix}Agent is required for 'task' mode.`);
+    }
+    if (enabledAgents.size > 0 && !enabledAgents.has(agent)) {
+      throw badRequest(`${itemPrefix}Agent '${agent}' is not installed or enabled.`);
+    }
+    if (!ALLOWED_TASK_ROLES.has(role)) {
+      throw badRequest(
+        `${itemPrefix}Invalid task role '${role}'. Allowed: ${Array.from(ALLOWED_TASK_ROLES).join(', ')}`
+      );
+    }
+  } else if (mode === 'team') {
+    if (!agent && !presetId) {
+      throw badRequest(`${itemPrefix}Leader agent is required for 'team' mode.`);
+    }
+    if (agent && enabledAgents.size > 0 && !enabledAgents.has(agent)) {
+      throw badRequest(`${itemPrefix}Leader agent '${agent}' is not installed or enabled.`);
+    }
+    role = 'leader';
+  } else if (mode === 'auto-gate') {
+    if (!agent && !presetId) {
+      throw badRequest(`${itemPrefix}Implementer agent is required for 'auto-gate' mode.`);
+    }
+    if (agent && enabledAgents.size > 0 && !enabledAgents.has(agent)) {
+      throw badRequest(`${itemPrefix}Implementer agent '${agent}' is not installed or enabled.`);
+    }
+  } else if (mode === 'council') {
+    agent = '';
+  } else if (mode === 'chat') {
+    if (!agent) {
+      throw badRequest(`${itemPrefix}Agent is required for 'chat' mode.`);
+    }
+    if (enabledAgents.size > 0 && !enabledAgents.has(agent)) {
+      throw badRequest(`${itemPrefix}Agent '${agent}' is not installed or enabled.`);
+    }
+  }
+
+  // Team validation
+  let team: Record<string, string> | undefined;
+  if (input.team && typeof input.team === 'object' && !Array.isArray(input.team)) {
+    team = {};
+    for (const [k, v] of Object.entries(input.team as Record<string, unknown>)) {
+      const val = String(v ?? '').trim();
+      if (val) {
+        if (enabledAgents.size > 0 && !enabledAgents.has(val)) {
+          throw badRequest(`${itemPrefix}Team member agent '${val}' is not installed or enabled.`);
+        }
+        team[k] = val;
+      }
+    }
+  }
+
+  // Reviewers validation
+  let reviewers: string[] | undefined;
+  if (Array.isArray(input.reviewers)) {
+    reviewers = [];
+    for (const r of input.reviewers) {
+      const rev = String(r ?? '').trim();
+      if (rev) {
+        if (enabledAgents.size > 0) {
+          const ag = enabledAgents.get(rev);
+          if (!ag) {
+            throw badRequest(`${itemPrefix}Reviewer agent '${rev}' is not installed or enabled.`);
+          }
+          if (!ag.capabilities.review) {
+            throw badRequest(`${itemPrefix}Agent '${rev}' does not have review capability.`);
+          }
+        }
+        reviewers.push(rev);
+      }
+    }
+  }
+
+  // Depends_on validation
+  let dependsOn: string[] = [];
+  if (Array.isArray(input.depends_on)) {
+    dependsOn = Array.from(
+      new Set(input.depends_on.map((x) => String(x ?? '').trim()).filter(Boolean))
+    );
+    if (dependsOn.length > 20) {
+      throw badRequest(`${itemPrefix}depends_on cannot contain more than 20 dependencies.`);
+    }
+    if (validDependencyIds) {
+      for (const dep of dependsOn) {
+        if (!validDependencyIds.has(dep)) {
+          throw badRequest(`${itemPrefix}Dependency card not found: ${dep}`);
+        }
+      }
+    }
+  }
+
+  // Status validation
+  const rawStatus = String(input.status ?? 'backlog').trim() as TaskStatus;
+  if (rawStatus !== 'backlog' && rawStatus !== 'queued') {
+    throw badRequest(`${itemPrefix}Card initial status must be 'backlog' or 'queued'.`);
+  }
+
+  // Priority validation
+  let priority = 0;
+  if (input.priority !== undefined) {
+    priority = Math.trunc(Number(input.priority));
+    if (!Number.isInteger(priority) || priority < -2 || priority > 3) {
+      throw badRequest(`${itemPrefix}Card priority must be an integer between -2 and 3.`);
+    }
+  }
+
+  // Retry validation
+  const retryCfg = parseRetryConfig(input.retry);
+
+  // Labels
+  const labels = Array.isArray(input.labels)
+    ? input.labels.map((x) => String(x ?? '').trim()).filter(Boolean)
+    : [];
+
+  // Created by
+  let createdBy: TaskCreatedBy = 'user';
+  if (input.created_by) {
+    const cb = String(input.created_by).trim() as TaskCreatedBy;
+    if (ALLOWED_CREATED_BY.has(cb)) {
+      createdBy = cb;
+    }
+  }
+
+  return {
+    title: rawTitle,
+    prompt: rawPrompt,
+    project_path: projectPath,
+    mode,
+    agent: agent || '',
+    role: role || '',
+    team,
+    reviewers,
+    model: input.model ? String(input.model).trim() : undefined,
+    effort: input.effort ? String(input.effort).trim() : undefined,
+    preset_id: input.preset_id ? String(input.preset_id).trim() : undefined,
+    isolate: input.isolate !== undefined ? Boolean(input.isolate) : undefined,
+    depends_on: dependsOn,
+    priority,
+    require_review: Boolean(input.require_review),
+    status: rawStatus,
+    retry: retryCfg,
+    labels,
+    source:
+      input.source && typeof input.source === 'object' && !Array.isArray(input.source)
+        ? (input.source as Record<string, unknown>)
+        : null,
+    created_by: createdBy,
+  };
+}
+
 export async function createCard(
   ctx: MawFeatureContext,
   input: Record<string, unknown>
@@ -367,240 +619,33 @@ export async function createCard(
       throw badRequest('Maximum card limit (2000) reached.');
     }
 
-    // 1. Template resolution if template_id given
-    let rawTitle = String(input.title ?? '').trim();
-    let rawPrompt = String(input.prompt ?? '').trim();
-    const templateId = String(input.template_id ?? '').trim();
-
-    if (templateId) {
-      const tpl = await getTemplate(ctx, templateId);
-      if (!tpl) {
-        throw notFound(`Template not found: ${templateId}`);
-      }
-      const vars =
-        input.vars && typeof input.vars === 'object' && !Array.isArray(input.vars)
-          ? (input.vars as Record<string, string>)
-          : {};
-      const rendered = renderTemplate(
-        tpl,
-        vars,
-        String(input.project_path ?? ctx.paths.projectsRoot)
-      );
-      if (!rawTitle) rawTitle = rendered.title;
-      if (!rawPrompt) rawPrompt = rendered.prompt;
-      if (!input.mode && tpl.mode) input.mode = tpl.mode;
-      if (!input.agent && tpl.agent) input.agent = tpl.agent;
-      if (!input.role && tpl.role) input.role = tpl.role;
-      if (!input.preset_id && tpl.preset_id) input.preset_id = tpl.preset_id;
-    }
-
-    // Title validation
-    if (!rawTitle || rawTitle.length > 200) {
-      throw badRequest('Card title must be between 1 and 200 characters.');
-    }
-
-    // Prompt validation
-    if (!rawPrompt || rawPrompt.length > 20000) {
-      throw badRequest('Card prompt must be between 1 and 20000 characters.');
-    }
-
-    // Project path validation
-    const rawProjectPath = String(input.project_path ?? '').trim();
-    if (!rawProjectPath) {
-      throw badRequest('project_path is required.');
-    }
-    const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
-    if (!projectPath) {
-      throw badRequest(`Invalid project_path '${rawProjectPath}': must be inside projects root.`);
-    }
-
-    // Mode validation
-    const mode = String(input.mode ?? 'task').trim() as TaskMode;
-    if (!ALLOWED_MODES.has(mode)) {
-      throw badRequest(
-        `Invalid mode '${mode}'. Allowed: ${Array.from(ALLOWED_MODES).join(', ')}`
-      );
-    }
-
-    // Enabled agents check
-    const enabledAgents = new Map(
-      (ctx.registry?.agents ?? []).filter((a) => a.enabled).map((a) => [a.id, a])
-    );
-
-    let agent = String(input.agent ?? '').trim();
-    let role = String(input.role ?? '').trim() as TaskRole;
-
-    if (mode === 'task') {
-      if (!agent) {
-        throw badRequest("Agent is required for 'task' mode.");
-      }
-      if (enabledAgents.size > 0 && !enabledAgents.has(agent)) {
-        throw badRequest(`Agent '${agent}' is not installed or enabled.`);
-      }
-      if (!ALLOWED_TASK_ROLES.has(role)) {
-        throw badRequest(
-          `Invalid task role '${role}'. Allowed: ${Array.from(ALLOWED_TASK_ROLES).join(', ')}`
-        );
-      }
-    } else if (mode === 'team') {
-      if (!agent) {
-        throw badRequest("Leader agent is required for 'team' mode.");
-      }
-      if (enabledAgents.size > 0 && !enabledAgents.has(agent)) {
-        throw badRequest(`Leader agent '${agent}' is not installed or enabled.`);
-      }
-      role = 'leader';
-    } else if (mode === 'auto-gate') {
-      if (!agent) {
-        throw badRequest("Implementer agent is required for 'auto-gate' mode.");
-      }
-      if (enabledAgents.size > 0 && !enabledAgents.has(agent)) {
-        throw badRequest(`Implementer agent '${agent}' is not installed or enabled.`);
-      }
-    } else if (mode === 'council') {
-      agent = '';
-    } else if (mode === 'chat') {
-      if (!agent) {
-        throw badRequest("Agent is required for 'chat' mode.");
-      }
-      if (enabledAgents.size > 0 && !enabledAgents.has(agent)) {
-        throw badRequest(`Agent '${agent}' is not installed or enabled.`);
-      }
-    }
-
-    // Team validation
-    let team: Record<string, string> | undefined;
-    if (input.team && typeof input.team === 'object' && !Array.isArray(input.team)) {
-      team = {};
-      for (const [k, v] of Object.entries(input.team as Record<string, unknown>)) {
-        const val = String(v ?? '').trim();
-        if (val) {
-          if (enabledAgents.size > 0 && !enabledAgents.has(val)) {
-            throw badRequest(`Team member agent '${val}' is not installed or enabled.`);
-          }
-          team[k] = val;
-        }
-      }
-    }
-
-    // Reviewers validation
-    let reviewers: string[] | undefined;
-    if (Array.isArray(input.reviewers)) {
-      reviewers = [];
-      for (const r of input.reviewers) {
-        const rev = String(r ?? '').trim();
-        if (rev) {
-          if (enabledAgents.size > 0) {
-            const ag = enabledAgents.get(rev);
-            if (!ag) {
-              throw badRequest(`Reviewer agent '${rev}' is not installed or enabled.`);
-            }
-            if (!ag.capabilities.review) {
-              throw badRequest(
-                `Agent '${rev}' does not have review capability.`
-              );
-            }
-          }
-          reviewers.push(rev);
-        }
-      }
-    }
-
-    // Depends_on validation
-    let dependsOn: string[] = [];
-    if (Array.isArray(input.depends_on)) {
-      dependsOn = Array.from(
-        new Set(input.depends_on.map((x) => String(x ?? '').trim()).filter(Boolean))
-      );
-      if (dependsOn.length > 20) {
-        throw badRequest('depends_on cannot contain more than 20 dependencies.');
-      }
-      const existingIds = new Set(data.tasks.map((t) => t.id));
-      for (const dep of dependsOn) {
-        if (!existingIds.has(dep)) {
-          throw badRequest(`Dependency card not found: ${dep}`);
-        }
-      }
-    }
+    const existingIds = new Set(data.tasks.map((t) => t.id));
+    const validated = await validateCardInput(ctx, input, existingIds);
 
     const newCardId = newId('task');
-    if (dependsOn.includes(newCardId)) {
+    if (validated.depends_on.includes(newCardId)) {
       throw badRequest('Card cannot depend on itself.');
     }
-    checkDependencyCycles(data.tasks, newCardId, dependsOn);
-
-    // Status validation
-    const rawStatus = String(input.status ?? 'backlog').trim() as TaskStatus;
-    if (rawStatus !== 'backlog' && rawStatus !== 'queued') {
-      throw badRequest("Card initial status must be 'backlog' or 'queued'.");
-    }
-
-    // Priority validation
-    let priority = 0;
-    if (input.priority !== undefined) {
-      priority = Math.trunc(Number(input.priority));
-      if (!Number.isInteger(priority) || priority < -2 || priority > 3) {
-        throw badRequest('Card priority must be an integer between -2 and 3.');
-      }
-    }
-
-    // Retry validation
-    const retryCfg = parseRetryConfig(input.retry);
-
-    // Labels
-    const labels = Array.isArray(input.labels)
-      ? input.labels.map((x) => String(x ?? '').trim()).filter(Boolean)
-      : [];
-
-    // Created by
-    let createdBy: TaskCreatedBy = 'user';
-    if (input.created_by) {
-      const cb = String(input.created_by).trim() as TaskCreatedBy;
-      if (ALLOWED_CREATED_BY.has(cb)) {
-        createdBy = cb;
-      }
-    }
+    checkDependencyCycles(data.tasks, newCardId, validated.depends_on);
 
     // Order calculation
     let order = 1000;
     if (input.order !== undefined) {
       order = Math.max(0, Math.trunc(Number(input.order) || 1000));
     } else {
-      const colTasks = data.tasks.filter((t) => t.status === rawStatus);
+      const colTasks = data.tasks.filter((t) => t.status === validated.status);
       if (colTasks.length > 0) {
         order = Math.max(...colTasks.map((t) => t.order)) + 1000;
       }
     }
 
     const card: Card = {
+      ...validated,
       id: newCardId,
-      title: rawTitle,
-      prompt: rawPrompt,
-      project_path: projectPath,
-      mode,
-      agent: agent || '',
-      role: role || '',
-      team,
-      reviewers,
-      model: input.model ? String(input.model).trim() : undefined,
-      effort: input.effort ? String(input.effort).trim() : undefined,
-      preset_id: input.preset_id ? String(input.preset_id).trim() : undefined,
-      isolate: input.isolate !== undefined ? Boolean(input.isolate) : undefined,
-      depends_on: dependsOn,
-      priority,
-      require_review: Boolean(input.require_review),
-      status: rawStatus,
       status_reason: '',
       job_id: null,
       attempts: [],
-      retry: retryCfg,
       next_retry_at: null,
-      labels,
-      source:
-        input.source && typeof input.source === 'object' && !Array.isArray(input.source)
-          ? (input.source as Record<string, unknown>)
-          : null,
-      created_by: createdBy,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
       started_at: null,
@@ -978,12 +1023,25 @@ export async function bulkCreateCards(
   const refMap = new Map<string, string>();
   const idList: string[] = [];
 
-  for (const item of items) {
+  for (let i = 0; i < items.length; i++) {
     const id = newId('task');
     idList.push(id);
-    const ref = String(item.ref ?? '').trim();
+    const ref = String(items[i]!.ref ?? '').trim();
     if (ref) {
       refMap.set(ref, id);
+    }
+  }
+
+  // Pre-validate depends_on_refs before acquiring mutex
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    if (Array.isArray(item.depends_on_refs)) {
+      for (const ref of item.depends_on_refs) {
+        const r = String(ref ?? '').trim();
+        if (!r || !refMap.has(r)) {
+          throw badRequest(`Item #${i + 1}: unknown depends_on_ref '${r}'.`);
+        }
+      }
     }
   }
 
@@ -996,8 +1054,12 @@ export async function bulkCreateCards(
       throw badRequest('Maximum card limit (2000) reached.');
     }
 
+    const existingIds = new Set(data.tasks.map((t) => t.id));
+    const allValidIds = new Set([...existingIds, ...idList]);
+
     const createdCards: Card[] = [];
 
+    // First pass: validate every card completely without saving anything
     for (let i = 0; i < items.length; i++) {
       const item = items[i]!;
       const assignedId = idList[i]!;
@@ -1010,7 +1072,7 @@ export async function bulkCreateCards(
       if (Array.isArray(item.depends_on_refs)) {
         for (const ref of item.depends_on_refs) {
           const r = String(ref ?? '').trim();
-          if (r && refMap.has(r)) {
+          if (refMap.has(r)) {
             resolvedDeps.push(refMap.get(r)!);
           }
         }
@@ -1023,60 +1085,24 @@ export async function bulkCreateCards(
         created_by: input.created_by || item.created_by || 'lead',
       };
 
-      const title = String(cardInput.title ?? '').trim();
-      if (!title || title.length > 200) {
-        throw badRequest(`Task #${i + 1}: title must be between 1 and 200 characters.`);
-      }
-      const prompt = String(cardInput.prompt ?? '').trim();
-      if (!prompt || prompt.length > 20000) {
-        throw badRequest(`Task #${i + 1}: prompt must be between 1 and 20000 characters.`);
-      }
-      const rawProjectPath = String(cardInput.project_path ?? ctx.paths.projectsRoot).trim();
-      const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
-      if (!projectPath) {
-        throw badRequest(`Task #${i + 1}: Invalid project_path '${rawProjectPath}'.`);
-      }
+      const validated = await validateCardInput(
+        ctx,
+        cardInput,
+        allValidIds,
+        `Item #${i + 1}: `
+      );
 
-      const mode = (String(cardInput.mode ?? 'task').trim() || 'task') as TaskMode;
-      const agent = String(cardInput.agent ?? '').trim();
-      const role = String(cardInput.role ?? '').trim() as TaskRole;
+      if (validated.depends_on.includes(assignedId)) {
+        throw badRequest(`Item #${i + 1}: Card cannot depend on itself.`);
+      }
 
       const card: Card = {
+        ...validated,
         id: assignedId,
-        title,
-        prompt,
-        project_path: projectPath,
-        mode,
-        agent: agent || '',
-        role: role || '',
-        team:
-          cardInput.team && typeof cardInput.team === 'object' && !Array.isArray(cardInput.team)
-            ? (cardInput.team as Record<string, string>)
-            : undefined,
-        reviewers: Array.isArray(cardInput.reviewers)
-          ? cardInput.reviewers.map((r: unknown) => String(r ?? '').trim()).filter(Boolean)
-          : undefined,
-        model: cardInput.model ? String(cardInput.model).trim() : undefined,
-        effort: cardInput.effort ? String(cardInput.effort).trim() : undefined,
-        preset_id: cardInput.preset_id ? String(cardInput.preset_id).trim() : undefined,
-        isolate: cardInput.isolate !== undefined ? Boolean(cardInput.isolate) : undefined,
-        depends_on: cardInput.depends_on as string[],
-        priority: cardInput.priority !== undefined ? Math.trunc(Number(cardInput.priority)) : 0,
-        require_review: Boolean(cardInput.require_review),
-        status: (String(cardInput.status ?? 'backlog').trim() || 'backlog') as TaskStatus,
         status_reason: '',
         job_id: null,
         attempts: [],
-        retry: { auto: false, max_attempts: 3, backoff_sec: 60 },
         next_retry_at: null,
-        labels: Array.isArray(cardInput.labels)
-          ? cardInput.labels.map((x: unknown) => String(x ?? '').trim()).filter(Boolean)
-          : [],
-        source:
-          cardInput.source && typeof cardInput.source === 'object' && !Array.isArray(cardInput.source)
-            ? (cardInput.source as Record<string, unknown>)
-            : null,
-        created_by: (cardInput.created_by as TaskCreatedBy) || 'lead',
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
         started_at: null,
@@ -1087,12 +1113,18 @@ export async function bulkCreateCards(
       createdCards.push(card);
     }
 
-    // Check cycles across all existing + newly created
+    // Check cycles across all existing + newly created cards
     const combinedTasks = [...data.tasks, ...createdCards];
-    for (const c of createdCards) {
-      checkDependencyCycles(combinedTasks, c.id, c.depends_on);
+    for (let i = 0; i < createdCards.length; i++) {
+      const c = createdCards[i]!;
+      try {
+        checkDependencyCycles(combinedTasks, c.id, c.depends_on);
+      } catch (err: unknown) {
+        throw badRequest(`Item #${i + 1}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
+    // If all pass, append all cards and save
     data.tasks.push(...createdCards);
     writeJsonAtomic(file, data);
     return createdCards;

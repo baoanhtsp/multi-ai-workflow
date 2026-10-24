@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { handleCancelJob, refreshJobMetaStatus, type JobMeta } from '../../actions/jobs.ts';
@@ -15,7 +16,7 @@ import {
   stripRunnerNoise,
   writeJsonAtomic,
 } from './lib.ts';
-import { getPreset } from './presets.ts';
+import { getPreset, getPresets, type TeamPreset } from './presets.ts';
 import {
   getCard,
   getCards,
@@ -29,6 +30,7 @@ import {
 
 export interface SchedulerLock {
   pid: number;
+  token: string;
   started_at: string;
   heartbeat_at: string;
 }
@@ -51,16 +53,42 @@ let schedulerTimer: NodeJS.Timeout | null = null;
 let debounceTickTimer: NodeJS.Timeout | null = null;
 let lastTickTime: string | null = null;
 let isCurrentlyTicking = false;
+let myLeaderToken: string | null = null;
+let activeCtx: MawFeatureContext | null = null;
 const startingCards = new Set<string>();
+
+export function getMyLeaderToken(): string | null {
+  return myLeaderToken;
+}
 
 function getLockFile(ctx: MawFeatureContext): string {
   return path.win32.join(ctx.paths.featureDataDir('tasks'), 'scheduler.lock');
 }
 
 export function tryAcquireLeaderLock(ctx: MawFeatureContext): boolean {
+  activeCtx = ctx;
   const lockFile = getLockFile(ctx);
   const nowIso = new Date().toISOString();
 
+  // If we already hold the lock, verify and refresh heartbeat
+  if (myLeaderToken) {
+    try {
+      if (fs.existsSync(lockFile)) {
+        const raw = fs.readFileSync(lockFile, 'utf8').trim();
+        const current = raw ? (JSON.parse(raw) as SchedulerLock) : null;
+        if (current?.token === myLeaderToken && current.pid === process.pid) {
+          current.heartbeat_at = nowIso;
+          writeJsonAtomic(lockFile, current);
+          return true;
+        }
+      }
+    } catch {
+      // Failed to verify/refresh existing lock
+    }
+    myLeaderToken = null;
+  }
+
+  // Check if an existing lock exists
   let existing: SchedulerLock | null = null;
   try {
     if (fs.existsSync(lockFile)) {
@@ -73,27 +101,84 @@ export function tryAcquireLeaderLock(ctx: MawFeatureContext): boolean {
     existing = null;
   }
 
-  if (existing && existing.pid && existing.pid !== process.pid) {
-    const alive = isProcessRunning(existing.pid);
+  if (existing) {
+    // If the existing lock has my pid, refresh it
+    if (existing.pid === process.pid) {
+      if (!myLeaderToken || !existing.token) {
+        myLeaderToken = existing.token || crypto.randomBytes(16).toString('hex');
+        existing.token = myLeaderToken;
+      }
+      if (existing.token === myLeaderToken) {
+        existing.heartbeat_at = nowIso;
+        try {
+          writeJsonAtomic(lockFile, existing);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+    }
+
+    const alive = existing.pid ? isProcessRunning(existing.pid) : false;
     const heartbeatAge = Date.now() - (Date.parse(existing.heartbeat_at) || 0);
-    if (alive && heartbeatAge <= 20000) {
-      return false; // Held by another alive process with fresh heartbeat
+    if (alive && heartbeatAge <= 60000) {
+      return false; // Active leader exists with fresh heartbeat
+    }
+
+    // Stale lock: atomic rename to lock.stale-<ts>
+    const staleFile = `${lockFile}.stale-${Date.now()}`;
+    try {
+      fs.renameSync(lockFile, staleFile);
+    } catch {
+      // Rename failed (someone else took it or file disappeared) -> stay passive
+      return false;
     }
   }
 
-  // Acquire / refresh lock
-  try {
-    const lockData: SchedulerLock = {
-      pid: process.pid,
-      started_at: existing?.pid === process.pid ? existing.started_at : nowIso,
-      heartbeat_at: nowIso,
-    };
-    writeJsonAtomic(lockFile, lockData);
+  // Claim with exclusive create 'wx'
+  const token = crypto.randomBytes(16).toString('hex');
+  const lockData: SchedulerLock = {
+    pid: process.pid,
+    token,
+    started_at: nowIso,
+    heartbeat_at: nowIso,
+  };
 
-    const raw = fs.readFileSync(lockFile, 'utf8').trim();
-    const check = raw ? (JSON.parse(raw) as SchedulerLock) : null;
-    return check?.pid === process.pid;
+  try {
+    fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+    const fd = fs.openSync(lockFile, 'wx');
+    try {
+      fs.writeFileSync(fd, JSON.stringify(lockData, null, 2), 'utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+    myLeaderToken = token;
+    return true;
   } catch {
+    myLeaderToken = null;
+    return false;
+  }
+}
+
+export function refreshLeaderHeartbeat(ctx: MawFeatureContext): boolean {
+  if (!myLeaderToken) return false;
+  const lockFile = getLockFile(ctx);
+  try {
+    if (!fs.existsSync(lockFile)) {
+      myLeaderToken = null;
+      return false;
+    }
+    const raw = fs.readFileSync(lockFile, 'utf8').trim();
+    const current = raw ? (JSON.parse(raw) as SchedulerLock) : null;
+    if (current?.token !== myLeaderToken || current.pid !== process.pid) {
+      myLeaderToken = null;
+      return false;
+    }
+    current.heartbeat_at = new Date().toISOString();
+    writeJsonAtomic(lockFile, current);
+    return true;
+  } catch {
+    myLeaderToken = null;
     return false;
   }
 }
@@ -110,9 +195,13 @@ export function getSchedulerStatus(ctx: MawFeatureContext): SchedulerStatus {
     lock = null;
   }
 
-  const isHeldByUs = lock?.pid === process.pid;
+  const isHeldByUs = Boolean(
+    myLeaderToken && lock?.token === myLeaderToken && lock?.pid === process.pid
+  );
   const isAlive = lock?.pid ? isProcessRunning(lock.pid) : false;
-  const isFresh = lock?.heartbeat_at ? Date.now() - Date.parse(lock.heartbeat_at) <= 20000 : false;
+  const isFresh = lock?.heartbeat_at
+    ? Date.now() - Date.parse(lock.heartbeat_at) <= 60000
+    : false;
 
   return {
     active: Boolean(isHeldByUs && isAlive && isFresh),
@@ -263,6 +352,15 @@ export async function startCardJob(
       new_session: newSession,
     };
 
+    // Restart safety: record starting intent before calling startJob
+    const promptSha = crypto.createHash('sha256').update(finalPrompt).digest('hex');
+    await patchCard(ctx, card.id, (c) => {
+      c.starting = {
+        at: new Date().toISOString(),
+        prompt_sha: promptSha,
+      };
+    });
+
     const jobResp = await ctx.startJob(runBody);
     const jobId = String(jobResp.job_id ?? '');
 
@@ -290,6 +388,7 @@ export async function startCardJob(
       c.status_reason = '';
       c.started_at = c.started_at ?? new Date().toISOString();
       c.pending_run = null;
+      c.starting = null;
       c.attempts.push(attempt);
       if (c.attempts.length > 20) {
         c.attempts.shift();
@@ -315,6 +414,7 @@ export async function startCardJob(
     card.status_reason = '';
     card.started_at = patched.started_at;
     card.pending_run = null;
+    card.starting = null;
     card.attempts = patched.attempts;
 
     return jobId;
@@ -351,9 +451,110 @@ export async function tick(ctx: MawFeatureContext): Promise<void> {
     }
 
     const config = await getConfig(freshCtx);
+    const allPresets = await getPresets(freshCtx);
+    const presetsMap = new Map(allPresets.map((p) => [p.id, p]));
     const allTasks = await getCards(freshCtx);
 
-    // 1. Reconcile running cards
+    const nowTs = Date.now();
+
+    // 1. Reconcile running and interrupted starting cards
+    // 1a. Reconcile queued cards that were left in starting state (> 30s ago)
+    const startingCardsToReconcile = allTasks.filter(
+      (t) => t.status === 'queued' && t.starting && nowTs - Date.parse(t.starting.at) > 30000
+    );
+
+    for (const card of startingCardsToReconcile) {
+      const startingAtTs = Math.floor(Date.parse(card.starting!.at) / 1000);
+      let adoptedJobId: string | null = null;
+      let adoptedJobMeta: JobMeta | null = null;
+
+      try {
+        if (fs.existsSync(freshCtx.paths.jobsDir)) {
+          const jobFiles = fs
+            .readdirSync(freshCtx.paths.jobsDir)
+            .filter((f) => f.startsWith('job_') && f.endsWith('.json'));
+
+          for (const jf of jobFiles) {
+            const metaPath = path.win32.join(freshCtx.paths.jobsDir, jf);
+            try {
+              const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as JobMeta;
+              const metaStartedTs =
+                meta.started_ts ??
+                (meta.started_at ? Math.floor(Date.parse(meta.started_at) / 1000) : 0);
+              const projectMatches =
+                meta.project_path &&
+                path.resolve(meta.project_path).toLowerCase() ===
+                  path.resolve(card.project_path).toLowerCase();
+
+              if (projectMatches && metaStartedTs >= startingAtTs - 5) {
+                const metaSha = (meta as unknown as Record<string, unknown>).prompt_sha256;
+                if (metaSha && metaSha === card.starting!.prompt_sha) {
+                  adoptedJobId = meta.job_id;
+                  adoptedJobMeta = meta;
+                  break;
+                }
+                // Check prompt hash from prompt file
+                const promptFile = path.win32.join(
+                  freshCtx.paths.jobsDir,
+                  `${meta.job_id}.prompt.txt`
+                );
+                if (fs.existsSync(promptFile)) {
+                  let promptContent = fs.readFileSync(promptFile, 'utf8');
+                  if (promptContent.charCodeAt(0) === 0xfeff) {
+                    promptContent = promptContent.slice(1);
+                  }
+                  const sha = crypto.createHash('sha256').update(promptContent).digest('hex');
+                  if (sha === card.starting!.prompt_sha) {
+                    adoptedJobId = meta.job_id;
+                    adoptedJobMeta = meta;
+                    break;
+                  }
+                }
+              }
+            } catch {
+              // skip unreadable job meta
+            }
+          }
+        }
+      } catch {
+        // error scanning jobs
+      }
+
+      if (adoptedJobId && adoptedJobMeta) {
+        const kind =
+          card.pending_run?.kind || (card.attempts.length === 0 ? 'start' : 'retry');
+        const attempt: TaskAttempt = {
+          n: card.attempts.length + 1,
+          job_id: adoptedJobId,
+          agent: card.agent,
+          role: card.role,
+          mode: card.mode,
+          kind,
+          started_at: adoptedJobMeta.started_at || new Date().toISOString(),
+          status: adoptedJobMeta.status || 'RUNNING',
+          exit_code: adoptedJobMeta.exit_code ?? null,
+        };
+
+        await patchCard(freshCtx, card.id, (c) => {
+          c.status = 'running';
+          c.job_id = adoptedJobId;
+          c.status_reason = '';
+          c.starting = null;
+          c.pending_run = null;
+          c.started_at = c.started_at ?? attempt.started_at;
+          c.attempts.push(attempt);
+        });
+      } else {
+        await patchCard(freshCtx, card.id, (c) => {
+          c.status = 'failed';
+          c.starting = null;
+          c.status_reason =
+            'start interrupted (server stopped while starting); retry to run again';
+        });
+      }
+    }
+
+    // 1b. Reconcile running cards
     const runningCards = allTasks.filter((t) => t.status === 'running');
     for (const card of runningCards) {
       if (!card.job_id) {
@@ -442,7 +643,6 @@ export async function tick(ctx: MawFeatureContext): Promise<void> {
     }
 
     // 2. Auto-retry
-    const nowTs = Date.now();
     const freshAllAfterReconcile = await getCards(freshCtx);
     const failedCards = freshAllAfterReconcile.filter((t) => t.status === 'failed');
 
@@ -451,6 +651,7 @@ export async function tick(ctx: MawFeatureContext): Promise<void> {
         card.retry?.auto &&
         card.status_reason !== 'cancelled' &&
         !card.status_reason.startsWith('invalid: ') &&
+        !card.status_reason.startsWith('start interrupted') &&
         card.attempts.length < card.retry.max_attempts
       ) {
         if (!card.next_retry_at) {
@@ -501,14 +702,18 @@ export async function tick(ctx: MawFeatureContext): Promise<void> {
 
       const agentUsage: Record<string, number> = {};
       for (const rc of currentlyRunning) {
-        const used = getAgentsUsedByCard(rc, freshCtx);
+        const used = getAgentsUsedByCard(rc, freshCtx, presetsMap);
         for (const a of used) {
           agentUsage[a] = (agentUsage[a] ?? 0) + 1;
         }
       }
 
       const queued = freshCards
-        .filter((c) => c.status === 'queued')
+        .filter(
+          (c) =>
+            c.status === 'queued' &&
+            !(c.starting && nowTs - Date.parse(c.starting.at) <= 30000)
+        )
         .sort(
           (a, b) =>
             b.priority - a.priority ||
@@ -517,6 +722,11 @@ export async function tick(ctx: MawFeatureContext): Promise<void> {
         );
 
       for (const card of queued) {
+        // Verify leader lock heartbeat before starting candidate card
+        if (!refreshLeaderHeartbeat(freshCtx)) {
+          break; // Lost leader lock, stop starting cards
+        }
+
         // Check dependencies
         let allDepsDone = true;
         let blockedByFailed: string | null = null;
@@ -554,8 +764,8 @@ export async function tick(ctx: MawFeatureContext): Promise<void> {
           break;
         }
 
-        // Check per-agent limits
-        const neededAgents = getAgentsUsedByCard(card, freshCtx);
+        // Check per-agent limits using effective agents
+        const neededAgents = getAgentsUsedByCard(card, freshCtx, presetsMap);
         let agentLimitBlocked = false;
 
         for (const ag of neededAgents) {
@@ -599,6 +809,9 @@ export async function tick(ctx: MawFeatureContext): Promise<void> {
 
     // 4. Run registered tickers
     for (const [name, tickerFn] of tickers.entries()) {
+      if (!refreshLeaderHeartbeat(freshCtx)) {
+        break; // Lost leader lock, stop running tickers
+      }
       try {
         await tickerFn(freshCtx);
       } catch (err: unknown) {
@@ -610,32 +823,61 @@ export async function tick(ctx: MawFeatureContext): Promise<void> {
   }
 }
 
-function getAgentsUsedByCard(card: Card, ctx: MawFeatureContext): string[] {
+export function getAgentsUsedByCard(
+  card: Card,
+  ctx: MawFeatureContext,
+  presetsMap?: Map<string, TeamPreset>
+): string[] {
   const result: string[] = [];
+  let preset: TeamPreset | null = null;
+  if (card.preset_id) {
+    if (presetsMap) {
+      preset = presetsMap.get(card.preset_id) ?? null;
+    } else {
+      try {
+        const file = path.win32.join(ctx.paths.featureDataDir('tasks'), 'presets.json');
+        if (fs.existsSync(file)) {
+          const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+          preset = (raw.presets ?? []).find((p: TeamPreset) => p.id === card.preset_id) ?? null;
+        }
+      } catch {
+        preset = null;
+      }
+    }
+  }
+
   if (card.mode === 'task' || card.mode === 'chat') {
     if (card.agent) result.push(card.agent);
   } else if (card.mode === 'team') {
     if (card.agent) result.push(card.agent);
-    if (card.team) {
-      for (const val of Object.values(card.team)) {
+    const teamHasMembers =
+      card.team && typeof card.team === 'object' && Object.keys(card.team).length > 0;
+    const effectiveTeam = teamHasMembers ? card.team : preset?.team;
+    if (effectiveTeam) {
+      for (const val of Object.values(effectiveTeam)) {
         if (val) result.push(val);
       }
     }
   } else if (card.mode === 'council') {
-    if (Array.isArray(card.reviewers) && card.reviewers.length > 0) {
-      result.push(...card.reviewers);
-    } else if (ctx.registry?.defaults?.council) {
-      result.push(...ctx.registry.defaults.council);
+    const revs =
+      (Array.isArray(card.reviewers) && card.reviewers.length > 0
+        ? card.reviewers
+        : (preset?.reviewers ?? ctx.registry?.defaults?.council ?? []));
+    for (const r of revs) {
+      if (r) result.push(r);
     }
   } else if (card.mode === 'auto-gate') {
-    if (card.agent) result.push(card.agent);
-    if (Array.isArray(card.reviewers) && card.reviewers.length > 0) {
-      result.push(...card.reviewers);
-    } else if (ctx.registry?.defaults?.council) {
-      result.push(...ctx.registry.defaults.council);
+    const effectiveImpl = card.agent || preset?.implementer;
+    if (effectiveImpl) result.push(effectiveImpl);
+    const revs =
+      (Array.isArray(card.reviewers) && card.reviewers.length > 0
+        ? card.reviewers
+        : (preset?.reviewers ?? ctx.registry?.defaults?.council ?? []));
+    for (const r of revs) {
+      if (r) result.push(r);
     }
   }
-  return Array.from(new Set(result));
+  return Array.from(new Set(result.filter(Boolean)));
 }
 
 export function ensureScheduler(ctx: MawFeatureContext): void {
@@ -659,7 +901,7 @@ export function triggerImmediateTick(ctx: MawFeatureContext): void {
   debounceTickTimer.unref();
 }
 
-export function stopScheduler(): void {
+export function stopScheduler(ctx?: MawFeatureContext): void {
   if (schedulerTimer) {
     clearInterval(schedulerTimer);
     schedulerTimer = null;
@@ -668,6 +910,23 @@ export function stopScheduler(): void {
     clearTimeout(debounceTickTimer);
     debounceTickTimer = null;
   }
+  const targetCtx = ctx || activeCtx;
+  if (targetCtx && myLeaderToken) {
+    try {
+      const lockFile = getLockFile(targetCtx);
+      if (fs.existsSync(lockFile)) {
+        const raw = fs.readFileSync(lockFile, 'utf8').trim();
+        const current = raw ? (JSON.parse(raw) as SchedulerLock) : null;
+        if (current?.token === myLeaderToken && current.pid === process.pid) {
+          fs.unlinkSync(lockFile);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+  myLeaderToken = null;
+  activeCtx = null;
 }
 
 export async function handleTaskRetry(

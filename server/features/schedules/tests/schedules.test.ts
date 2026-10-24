@@ -6,6 +6,7 @@ import test from 'node:test';
 import type { MawFeatureContext } from '../../../lib/feature.ts';
 import { resolveServerPaths } from '../../../lib/paths.ts';
 import { loadAgentRegistry } from '../../../lib/registry.ts';
+import { getPlaybookRuns } from '../../playbooks/runs.ts';
 import { createCard, getCard, saveCard } from '../../tasks/store.ts';
 import { computeNextRunAt, validateWhenFormat } from '../parser.ts';
 import {
@@ -219,6 +220,109 @@ test('schedules: delete schedule and audit logging', async () => {
     assert.ok(fs.existsSync(ctx.paths.auditFile));
     const auditText = fs.readFileSync(ctx.paths.auditFile, 'utf8');
     assert.ok(auditText.includes('schedule_delete'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('schedules: saveSchedule validates project_path against projectsRoot for both card and playbook actions', async () => {
+  const { ctx, cleanup } = createSchedulesTestContext('project_path_validation');
+  try {
+    const outsidePath = path.resolve(os.tmpdir(), 'outside_sch_boundary');
+    fs.mkdirSync(outsidePath, { recursive: true });
+
+    // 1. Action type: card with outside project_path
+    await assert.rejects(
+      async () => {
+        await saveSchedule(ctx, {
+          name: 'Invalid Card Schedule',
+          when: 'every 10 minutes',
+          action: {
+            type: 'card',
+            card: {
+              title: 'Bad Card',
+              prompt: 'Bad prompt',
+              project_path: outsidePath,
+              agent: 'claude',
+              role: 'backend',
+            },
+          },
+        });
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.match(err.message, /not valid or outside projectsRoot/i);
+        return true;
+      }
+    );
+
+    // 2. Action type: playbook with outside project_path
+    await assert.rejects(
+      async () => {
+        await saveSchedule(ctx, {
+          name: 'Invalid Playbook Schedule',
+          when: 'every 10 minutes',
+          action: {
+            type: 'playbook',
+            project_path: outsidePath,
+            file: 'test.md',
+          },
+        });
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.match(err.message, /not valid or outside projectsRoot/i);
+        return true;
+      }
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('schedules: skip_if_running prevents overlapping playbook execution and sets schedule_id on playbook run', async () => {
+  const { ctx, projectDir, cleanup } = createSchedulesTestContext('pb_skip_if_running');
+  try {
+    const playbooksDir = path.join(projectDir, '.maw', 'playbooks');
+    fs.mkdirSync(playbooksDir, { recursive: true });
+    const playbookFile = path.join(playbooksDir, 'nightly.md');
+    fs.writeFileSync(playbookFile, '# Nightly\n- [ ] Run benchmarks\n', 'utf8');
+
+    const sch = await saveSchedule(ctx, {
+      name: 'Nightly Playbook',
+      when: 'every 15 minutes',
+      skip_if_running: true,
+      action: {
+        type: 'playbook',
+        project_path: projectDir,
+        file: playbookFile,
+        mode: 'task',
+        agent: 'antigravity',
+        role: 'backend',
+      },
+    });
+
+    // Run 1: triggers playbook
+    await runScheduleNow(ctx, sch.id);
+    const runsAfter1 = await getPlaybookRuns(ctx, projectDir);
+    assert.equal(runsAfter1.length, 1);
+    assert.equal(runsAfter1[0]!.schedule_id, sch.id);
+    assert.equal(runsAfter1[0]!.status, 'running');
+
+    // Fast forward next_run_at to past
+    const file = path.join(ctx.paths.featureDataDir('schedules'), 'schedules.json');
+    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+    data.schedules[0].next_run_at = new Date(Date.now() - 1000).toISOString();
+    fs.writeFileSync(file, JSON.stringify(data), 'utf8');
+
+    // Ticker runs: previous playbook run is still running -> should skip
+    await scheduleTicker(ctx);
+    const schAfter2 = (await getSchedules(ctx))[0]!;
+    assert.equal(schAfter2.last_result, 'skipped (previous still running)');
+
+    // Verify no new playbook run was created
+    const runsAfter2 = await getPlaybookRuns(ctx, projectDir);
+    assert.equal(runsAfter2.length, 1);
   } finally {
     cleanup();
   }

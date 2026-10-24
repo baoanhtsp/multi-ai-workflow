@@ -537,3 +537,276 @@ test('github: cancelled or missing describer job falls back to prompt and finish
     cleanup();
   }
 });
+
+test('github: project path outside projectsRoot rejected with 400 across all github routes', async () => {
+  const { ctx, projectDir, cleanup } = createGithubTestContext('gh_path_validation');
+  try {
+    const outsidePath = path.resolve(os.tmpdir(), 'outside_gh_boundary');
+    fs.mkdirSync(outsidePath, { recursive: true });
+
+    // 1. github_status
+    await assert.rejects(
+      async () => {
+        await feature.routes.github_status.handler(ctx as any, {
+          url: new URL(`http://localhost/github_status?project_path=${encodeURIComponent(outsidePath)}`),
+        } as any);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.match(err.message, /not valid or outside projectsRoot/i);
+        return true;
+      }
+    );
+
+    // 2. github_issues
+    await assert.rejects(
+      async () => {
+        await feature.routes.github_issues.handler(ctx as any, {
+          url: new URL(`http://localhost/github_issues?project_path=${encodeURIComponent(outsidePath)}`),
+        } as any);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.match(err.message, /not valid or outside projectsRoot/i);
+        return true;
+      }
+    );
+
+    // 3. github_prs
+    await assert.rejects(
+      async () => {
+        await feature.routes.github_prs.handler(ctx as any, {
+          url: new URL(`http://localhost/github_prs?project_path=${encodeURIComponent(outsidePath)}`),
+        } as any);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.match(err.message, /not valid or outside projectsRoot/i);
+        return true;
+      }
+    );
+
+    // 4. github_issue_import
+    await assert.rejects(
+      async () => {
+        await feature.routes.github_issue_import.handler(ctx as any, {
+          body: {
+            project_path: outsidePath,
+            number: 1,
+          },
+        } as any);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.match(err.message, /not valid or outside projectsRoot/i);
+        return true;
+      }
+    );
+
+    // 5. github_pr_feedback
+    await assert.rejects(
+      async () => {
+        await feature.routes.github_pr_feedback.handler(ctx as any, {
+          body: {
+            project_path: outsidePath,
+            number: 1,
+          },
+        } as any);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.match(err.message, /not valid or outside projectsRoot/i);
+        return true;
+      }
+    );
+
+    // 6. github_pr_create (via createPrRequest with card pointing to outsidePath)
+    // Create card in projectDir first, then mutate project_path to outsidePath
+    const badCard = await createCard(ctx, {
+      title: 'Valid card first',
+      prompt: 'Prompt',
+      project_path: projectDir,
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'backlog',
+    });
+    badCard.status = 'review';
+    badCard.project_path = outsidePath;
+    await saveCard(ctx, badCard);
+
+    await assert.rejects(
+      async () => {
+        await createPrRequest(ctx, { task_id: badCard.id });
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.match(err.message, /not valid or outside projectsRoot/i);
+        return true;
+      }
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('github: PR replay adopts existing open PR before calling gh pr create', async () => {
+  const { ctx, projectDir, cleanup } = createGithubTestContext('pr_replay_adopt');
+  try {
+    let prCreateCalled = false;
+    clearGhStatusCache();
+
+    setGhRunner(async (args) => {
+      if (args[0] === '--version' || args[0] === 'version') {
+        return { code: 0, stdout: 'gh version 2.50.0', stderr: '' };
+      }
+      if (args[0] === 'auth' && args[1] === 'status') {
+        return { code: 0, stdout: 'Logged in to github.com as testuser', stderr: '' };
+      }
+      if (args[0] === 'repo' && args[1] === 'view') {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ defaultBranchRef: { name: 'main' } }),
+          stderr: '',
+        };
+      }
+      // Replay check before pr create: gh pr list --head <branch> --base <base> --state open
+      if (args[0] === 'pr' && args[1] === 'list') {
+        return {
+          code: 0,
+          stdout: JSON.stringify([
+            {
+              number: 42,
+              url: 'https://github.com/owner/repo/pull/42',
+            },
+          ]),
+          stderr: '',
+        };
+      }
+      if (args[0] === 'pr' && args[1] === 'create') {
+        prCreateCalled = true;
+        return { code: 0, stdout: 'https://github.com/owner/repo/pull/99', stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+
+    setGitRunner(async (args) => {
+      if (args[0] === 'rev-parse') {
+        return { code: 0, stdout: 'feat-replay-branch', stderr: '' };
+      }
+      if (args[0] === 'push') {
+        return { code: 0, stdout: 'Everything up-to-date', stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+
+    const card = await createCard(ctx, {
+      title: 'PR Replay Task',
+      prompt: 'Replay feature prompt',
+      project_path: projectDir,
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'backlog',
+    });
+    card.status = 'review';
+    await saveCard(ctx, card);
+
+    const prReq = await createPrRequest(ctx, {
+      task_id: card.id,
+      branch: 'feat-replay-branch',
+      base: 'main',
+      ai_description: false,
+    });
+    assert.equal(prReq.state, 'pushing');
+
+    // Ticker runs: pushes and adopts existing open PR #42 in creating step
+    await githubTicker(ctx);
+
+    // Verify gh pr create was NEVER called
+    assert.equal(prCreateCalled, false, 'gh pr create should not be called when open PR exists');
+
+    const requests = await getPrRequests(ctx);
+    const current = requests.find((r) => r.id === prReq.id)!;
+    assert.equal(current.state, 'done');
+    assert.equal(current.pr_url, 'https://github.com/owner/repo/pull/42');
+
+    const updatedCard = (await getCard(ctx, card.id))!;
+    assert.deepEqual(updatedCard.pr, {
+      number: 42,
+      url: 'https://github.com/owner/repo/pull/42',
+    });
+
+    // Check audit file for github_pr_adopt
+    const auditText = fs.readFileSync(ctx.paths.auditFile, 'utf8');
+    assert.ok(auditText.includes('github_pr_adopt'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('github: concurrent duplicate issue imports serialize and throw 409 conflict', async () => {
+  const { ctx, projectDir, cleanup } = createGithubTestContext('concurrent_issue_import');
+  try {
+    clearGhStatusCache();
+
+    setGhRunner(async (args) => {
+      if (args[0] === '--version' || args[0] === 'version') {
+        return { code: 0, stdout: 'gh version 2.50.0', stderr: '' };
+      }
+      if (args[0] === 'auth' && args[1] === 'status') {
+        return { code: 0, stdout: 'Logged in as testuser', stderr: '' };
+      }
+      if (args[0] === 'version') {
+        return { code: 0, stdout: 'gh version 2.50.0', stderr: '' };
+      }
+      if (args[0] === 'issue' && args[1] === 'view') {
+        // Add a small delay to simulate real I/O and expose any race conditions
+        await new Promise((r) => setTimeout(r, 20));
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            number: 10,
+            title: 'Race Condition Issue',
+            body: 'Fix concurrency bug',
+            labels: [{ name: 'bug' }],
+            url: 'https://github.com/owner/repo/issues/10',
+          }),
+          stderr: '',
+        };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+
+    // Fire 2 simultaneous imports for issue 10
+    const [res1, res2] = await Promise.allSettled([
+      feature.routes.github_issue_import.handler(ctx as any, {
+        body: {
+          project_path: projectDir,
+          number: 10,
+          agent: 'antigravity',
+          role: 'backend',
+        },
+      } as any),
+      feature.routes.github_issue_import.handler(ctx as any, {
+        body: {
+          project_path: projectDir,
+          number: 10,
+          agent: 'antigravity',
+          role: 'backend',
+        },
+      } as any),
+    ]);
+
+    // Exactly one should fulfill and one should reject with 409
+    const fulfilled = [res1, res2].filter((r) => r.status === 'fulfilled');
+    const rejected = [res1, res2].filter((r) => r.status === 'rejected');
+
+    assert.equal(fulfilled.length, 1);
+    assert.equal(rejected.length, 1);
+
+    const rejectedErr = (rejected[0] as PromiseRejectedResult).reason;
+    assert.equal(rejectedErr.statusCode, 409);
+    assert.match(rejectedErr.message, /already been imported/i);
+  } finally {
+    cleanup();
+  }
+});

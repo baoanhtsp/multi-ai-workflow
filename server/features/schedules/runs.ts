@@ -1,6 +1,7 @@
 import path from 'node:path';
 import type { MawFeatureContext } from '../../lib/feature.ts';
-import { startPlaybookRun } from '../playbooks/runs.ts';
+import { resolveProjectPath } from '../../lib/paths.ts';
+import { getPlaybookRuns, startPlaybookRun } from '../playbooks/runs.ts';
 import {
   appendAudit,
   badRequest,
@@ -89,9 +90,20 @@ export async function saveSchedule(
     if (!actionRaw.card || typeof actionRaw.card !== 'object' || Array.isArray(actionRaw.card)) {
       throw badRequest("action.card must be an object for action type 'card'.");
     }
+    const cardObj = { ...(actionRaw.card as Record<string, unknown>) };
+    const rawProj = String(cardObj.project_path ?? '').trim();
+    if (!rawProj) {
+      throw badRequest("action.card.project_path is required.");
+    }
+    const validProj = resolveProjectPath(rawProj, ctx.paths.projectsRoot);
+    if (!validProj) {
+      throw badRequest(`action.card.project_path "${rawProj}" is not valid or outside projectsRoot.`);
+    }
+    cardObj.project_path = validProj;
+
     validatedAction = {
       type: 'card',
-      card: actionRaw.card as Record<string, unknown>,
+      card: cardObj,
     };
   } else {
     const proj = String(actionRaw.project_path ?? '').trim();
@@ -99,9 +111,13 @@ export async function saveSchedule(
     if (!proj || !fl) {
       throw badRequest("action.project_path and action.file are required for action type 'playbook'.");
     }
+    const validProj = resolveProjectPath(proj, ctx.paths.projectsRoot);
+    if (!validProj) {
+      throw badRequest(`action.project_path "${proj}" is not valid or outside projectsRoot.`);
+    }
     validatedAction = {
       type: 'playbook',
-      project_path: proj,
+      project_path: validProj,
       file: fl,
       mode: actionRaw.mode ? String(actionRaw.mode).trim() : undefined,
       agent: actionRaw.agent ? String(actionRaw.agent).trim() : undefined,
@@ -193,7 +209,7 @@ export async function executeScheduleAction(
     const card = await createCard(ctx, cardInput);
     return `created ${card.id}`;
   } else if (schedule.action.type === 'playbook') {
-    const pb = await startPlaybookRun(ctx, schedule.action);
+    const pb = await startPlaybookRun(ctx, schedule.action, { schedule_id: schedule.id });
     return `started playbook run ${pb.run.id}`;
   }
   return 'unknown action type';
@@ -244,19 +260,33 @@ export async function scheduleTicker(ctx: MawFeatureContext): Promise<void> {
       if (schedule.next_run_at && schedule.next_run_at <= nowIso) {
         // Check skip_if_running
         if (schedule.skip_if_running) {
-          const cards = await getCards(ctx);
-          const hasRunning = cards.some(
-            (c) =>
-              c.source?.kind === 'schedule' &&
-              c.source?.schedule_id === schedule.id &&
-              (c.status === 'queued' || c.status === 'running')
-          );
-          if (hasRunning) {
-            schedule.last_result = 'skipped (previous still running)';
-            schedule.last_run_at = nowIso;
-            schedule.next_run_at = computeNextRunAt(schedule.when, now);
-            modified = true;
-            continue;
+          if (schedule.action.type === 'card') {
+            const cards = await getCards(ctx);
+            const hasRunning = cards.some(
+              (c) =>
+                c.source?.kind === 'schedule' &&
+                c.source?.schedule_id === schedule.id &&
+                (c.status === 'queued' || c.status === 'running')
+            );
+            if (hasRunning) {
+              schedule.last_result = 'skipped (previous still running)';
+              schedule.last_run_at = nowIso;
+              schedule.next_run_at = computeNextRunAt(schedule.when, now);
+              modified = true;
+              continue;
+            }
+          } else if (schedule.action.type === 'playbook') {
+            const runs = await getPlaybookRuns(ctx);
+            const hasRunning = runs.some(
+              (r) => r.schedule_id === schedule.id && r.status === 'running'
+            );
+            if (hasRunning) {
+              schedule.last_result = 'skipped (previous still running)';
+              schedule.last_run_at = nowIso;
+              schedule.next_run_at = computeNextRunAt(schedule.when, now);
+              modified = true;
+              continue;
+            }
           }
         }
 

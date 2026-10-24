@@ -184,14 +184,24 @@ export function tickBoxInFile(
     // Atomic write
     const tmpFile = `${filePath}.tmp.${Date.now()}`;
     fs.writeFileSync(tmpFile, finalBuffer);
+    let renamed = false;
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
         fs.renameSync(tmpFile, filePath);
+        renamed = true;
         break;
       } catch {
         const end = Date.now() + 15 * (attempt + 1);
         while (Date.now() < end) {}
       }
+    }
+    if (!renamed) {
+      try {
+        fs.unlinkSync(tmpFile);
+      } catch {
+        // ignore cleanup
+      }
+      return false;
     }
   }
 

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MawFeature } from '../../lib/feature.ts';
+import { resolveProjectPath } from '../../lib/paths.ts';
 import { badRequest } from '../tasks/lib.ts';
 import { ensureScheduler, registerTicker, triggerImmediateTick } from '../tasks/scheduler.ts';
 import { parsePlaybookContent, validatePlaybookFile } from './parser.ts';
@@ -21,9 +22,13 @@ export const feature: MawFeature = {
       method: 'GET',
       handler: async (ctx, req) => {
         ensureScheduler(ctx);
-        const projectPath = String(req.url.searchParams.get('project_path') ?? '').trim();
-        if (!projectPath) {
+        const rawProjectPath = String(req.url.searchParams.get('project_path') ?? '').trim();
+        if (!rawProjectPath) {
           throw badRequest("Parameter 'project_path' is required.");
+        }
+        const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+        if (!projectPath) {
+          throw badRequest(`project_path "${rawProjectPath}" is not valid or outside projectsRoot.`);
         }
 
         const playbooksDir = path.win32.join(projectPath, '.maw', 'playbooks');
@@ -73,9 +78,13 @@ export const feature: MawFeature = {
       method: 'GET',
       handler: async (ctx, req) => {
         ensureScheduler(ctx);
-        const projectPath = String(req.url.searchParams.get('project_path') ?? '').trim();
-        if (!projectPath) {
+        const rawProjectPath = String(req.url.searchParams.get('project_path') ?? '').trim();
+        if (!rawProjectPath) {
           throw badRequest("Parameter 'project_path' is required.");
+        }
+        const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+        if (!projectPath) {
+          throw badRequest(`project_path "${rawProjectPath}" is not valid or outside projectsRoot.`);
         }
         const fileParam = String(req.url.searchParams.get('file') ?? '').trim();
         if (!fileParam) {

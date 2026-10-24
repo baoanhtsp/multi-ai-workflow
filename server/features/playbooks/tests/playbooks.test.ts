@@ -18,6 +18,7 @@ import {
   stopPlaybookRun,
 } from '../runs.ts';
 import { deleteCard, getCard, moveCard, saveCard } from '../../tasks/store.ts';
+import { feature as playbooksFeature } from '../index.ts';
 
 function createPlaybookTestContext(testName: string): {
   ctx: MawFeatureContext;
@@ -294,6 +295,115 @@ test('playbooks: ticker handles deleted cards and backlog re-queuing', async () 
     await playbookTicker(ctx);
     const refreshedCardB = (await getCard(ctx, tasks[1]!.id))!;
     assert.equal(refreshedCardB.status, 'queued');
+  } finally {
+    cleanup();
+  }
+});
+
+test('playbooks: project path outside projectsRoot rejected with 400 across list, preview, and run', async () => {
+  const { ctx, cleanup } = createPlaybookTestContext('path_validation');
+  try {
+    const outsidePath = path.resolve(os.tmpdir(), 'outside_project_boundary');
+    fs.mkdirSync(outsidePath, { recursive: true });
+
+    // 1. playbook_list
+    await assert.rejects(
+      async () => {
+        await playbooksFeature.routes.playbook_list.handler(ctx as any, {
+          url: new URL(`http://localhost/playbook_list?project_path=${encodeURIComponent(outsidePath)}`),
+        } as any);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.match(err.message, /not valid or outside projectsRoot/i);
+        return true;
+      }
+    );
+
+    // 2. playbook_preview
+    await assert.rejects(
+      async () => {
+        await playbooksFeature.routes.playbook_preview.handler(ctx as any, {
+          url: new URL(
+            `http://localhost/playbook_preview?project_path=${encodeURIComponent(outsidePath)}&file=test.md`
+          ),
+        } as any);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.match(err.message, /not valid or outside projectsRoot/i);
+        return true;
+      }
+    );
+
+    // 3. playbook_run
+    await assert.rejects(
+      async () => {
+        await playbooksFeature.routes.playbook_run.handler(ctx as any, {
+          body: {
+            project_path: outsidePath,
+            file: 'test.md',
+          },
+        } as any);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 400);
+        assert.match(err.message, /not valid or outside projectsRoot/i);
+        return true;
+      }
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('playbooks: tickBoxInFile failure keeps item in running state and retries on next tick', async () => {
+  const { ctx, projectDir, playbookFile, cleanup } = createPlaybookTestContext('tick_failure_retry');
+  try {
+    fs.writeFileSync(playbookFile, '# Steps\n- [ ] Critical Task\n', 'utf8');
+
+    const { tasks } = await startPlaybookRun(ctx, {
+      project_path: projectDir,
+      file: playbookFile,
+      mode: 'task',
+      agent: 'antigravity',
+      role: 'backend',
+    });
+
+    // Advance ticker: task starts running
+    await playbookTicker(ctx);
+    const runs1 = await getPlaybookRuns(ctx, projectDir);
+    assert.equal(runs1[0]!.items[0]!.state, 'running');
+
+    // Simulate task card completed (done)
+    const card = (await getCard(ctx, tasks[0]!.id))!;
+    card.status = 'done';
+    await saveCard(ctx, card);
+
+    // Simulate file write/rename failure by temporarily making the directory or file inaccessible
+    // On Windows, opening the file with exclusive lock causes renameSync to fail
+    const lockFd = fs.openSync(playbookFile, 'r+');
+
+    try {
+      // Ticker runs: tickBoxInFile will fail to rename because file is open/locked
+      await playbookTicker(ctx);
+      const runsAfterLock = await getPlaybookRuns(ctx, projectDir);
+      // Item must remain in 'running' state, cursor still 0!
+      assert.equal(runsAfterLock[0]!.items[0]!.state, 'running');
+      assert.equal(runsAfterLock[0]!.cursor, 0);
+    } finally {
+      fs.closeSync(lockFd);
+    }
+
+    // Now file is unlocked: next ticker call must succeed and mark item done
+    await playbookTicker(ctx);
+    const runsAfterUnlock = await getPlaybookRuns(ctx, projectDir);
+    assert.equal(runsAfterUnlock[0]!.items[0]!.state, 'done');
+    assert.equal(runsAfterUnlock[0]!.cursor, 1);
+    assert.equal(runsAfterUnlock[0]!.status, 'done');
+
+    const updatedContent = fs.readFileSync(playbookFile, 'utf8');
+    assert.ok(updatedContent.includes('- [x] Critical Task'));
   } finally {
     cleanup();
   }
