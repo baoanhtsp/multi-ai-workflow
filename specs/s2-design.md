@@ -292,6 +292,11 @@ Fix the review feedback on PR #N "<title>" (branch <head>).
 - github: fake `gh` (a `.cmd` shim on a temp `PATH`, or an injectable runner) for missing gh ⇒ 409, not logged in ⇒ 409, issue import ⇒ card, duplicate import ⇒ 409, PR feedback ⇒ prompt with comments and failed checks, PR create flow (describer job ⇒ push ⇒ `gh pr create` argument arrays).
 - One HTTP-level test through `createMawHttpServer({ mawHome, featuresDir: <repo>/server/features })`: `task_create` ⇒ `task_list` ⇒ `task_move`, and the §3.0 POST guard applies to a feature route.
 
+## 8b. Known limitations (accepted after the 4th Codex pass)
+- Cross-process issue-import lock: a lock older than 120 s is treated as stale. A single import is bounded by the 30 s `gh` timeout, so a live import cannot outlive the window; the token check before unlink still has a microsecond read/unlink gap that only matters if two servers take over the same stale lock at the same instant.
+- Restart reconciliation adopts the job that was launched for the card even if the user edited the queued card during the ≤ 30 s window before the crash (the job belongs to that card; the attempt shows what actually ran).
+- Proper fix for all of the above: the runner records `source: { feature: 'tasks', task_id }` in the job meta (Request 4) so reconciliation is by id, and a lifecycle hook (Request 1) instead of process-level timers.
+
 ## 9. Requests to Tech Lead
 1. **Feature lifecycle hook**: add `start?(ctx): void | Promise<void>` and `stop?(): void` to `MawFeature`, called by `main.ts` after `listen` (and `stop` on shutdown), never by `createMawHttpServer` in tests. S2 then drops the argv-based auto-start in `server/features/tasks/index.ts` and exports `start` on the feature.
 2. **`npm test` glob**: include feature tests: `node --test server/tests/*.test.ts server/features/*/tests/*.test.ts`.
@@ -299,3 +304,4 @@ Fix the review feedback on PR #N "<title>" (branch <head>).
 4. **Runner pass-through**: `run_job` / `ctx.startJob` should keep `isolate` (S1), `budget_usd` / `max_rounds` (S4 / Auto-Gate `-MaxRounds`) and an optional `source: { feature: 'tasks', task_id }` in the job meta, so the timeline (S3) and inbox can link a job to its card.
 5. **Mode `chat`** in the runner (S6) so `mode: "chat"` cards can start.
 6. **Main live-log hook**: `MAW.openJob(jobId)` to show an existing job in the live log panel (the board's "open log" link). Until then the board shows its own log tail from `task_get`.
+7. **S1 test isolation (found by S2):** `server/tests/s1-worktrees.test.ts` ("X1: SPEC Guard fails closed…") writes a crash stub to `env.paths.scriptsDir`, which resolved to the real installed `~/.gemini/config/skills/claude-leader/scripts/invoke-spec-guard.ps1` and broke SPEC Guard / api-smoke for every session (2026-10-25 02:26). S2 restored the installed file from the main checkout (stub kept as `invoke-spec-guard.ps1.s1-test-stub-20261025-022830`) and told S1. Please make sure that test uses a temp scripts dir before merging S1.
