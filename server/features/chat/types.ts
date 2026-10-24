@@ -7,6 +7,7 @@ export interface QueueItem {
   ts: string;
   attachments?: Array<{ name: string; path?: string; data_url?: string }>;
   system_generated?: boolean;
+  is_retry?: boolean;
 }
 
 export interface ConversationResume {

@@ -1180,7 +1180,7 @@
       <p class="sub faint ws-pad ws-path">${esc(t('ws.mem.file'))} <span class="mono">.maw/memory/decisions.md</span></p>
       ${MEM.err ? `<div class="empty t-err">${esc(MEM.err)}</div>` : ''}
       ${list.length ? list.map(e => `<article class="ws-mem" data-mem="${esc(e.id)}">
-        <div class="row"><button type="button" class="ws-star ${e.pinned ? 'on' : ''}" data-mpin="${esc(e.id)}" aria-pressed="${!!e.pinned}" title="${esc(t(e.pinned ? 'ws.mem.unpin' : 'ws.mem.pin'))}" aria-label="${esc(t(e.pinned ? 'ws.mem.unpin' : 'ws.mem.pin'))}">${e.pinned ? '📌' : '📍'}</button>
+        <div class="row"><button type="button" class="ws-star ${e.pinned ? 'on' : ''}" data-mpin="${esc(e.id)}" aria-pressed="${!!e.pinned}" title="${esc(t(e.pinned ? 'ws.mem.unpin' : 'ws.mem.pin'))}" aria-label="${esc(t(e.pinned ? 'ws.mem.unpin' : 'ws.mem.pin'))}">${e.pinned ? '★' : '☆'}</button>
           <strong class="ws-grow">${esc(e.id)} · ${esc(e.title)}</strong>
           <button type="button" class="ws-more" data-medit="${esc(e.id)}" aria-label="${esc(t('ws.mem.edit'))}" title="${esc(t('ws.mem.edit'))}">✎</button>
           <button type="button" class="ws-more" data-mdel="${esc(e.id)}" aria-label="${esc(t('ws.m.del'))}" title="${esc(t('ws.m.del'))}">×</button></div>

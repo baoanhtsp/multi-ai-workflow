@@ -349,6 +349,20 @@ let isTicking = false;
 let tickTimer: NodeJS.Timeout | null = null;
 let lastKnownCtx: MawFeatureContext | null = null;
 
+let worktreeFeatureChecker: ((ctx: MawFeatureContext) => boolean) | null = null;
+
+export function setWorktreeFeatureCheckerForTest(fn: ((ctx: MawFeatureContext) => boolean) | null): void {
+  worktreeFeatureChecker = fn;
+}
+
+export function isWorktreeFeatureAvailable(ctx: MawFeatureContext): boolean {
+  if (worktreeFeatureChecker) {
+    return worktreeFeatureChecker(ctx);
+  }
+  const indexPath = path.win32.join(ctx.paths.repoRoot, 'server', 'features', 'worktrees', 'index.ts');
+  return fs.existsSync(indexPath);
+}
+
 export function resetTickTimerForTest(): void {
   if (tickTimer) {
     clearInterval(tickTimer);
@@ -592,6 +606,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
               id: 'q_' + generateMessageId().slice(2, 8),
               text: lastUserText,
               ts: new Date(Date.now() + backoffSec * 1000).toISOString(),
+              is_retry: true,
             });
           }
         }
@@ -777,6 +792,8 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
     }
 
     if (statusUpper === 'CANCELLED') {
+      const parsedRes = parseStructuredHandoffResult(parsed.reply, parsed.cost_usd);
+      h.result = parsedRes.ok ? parsedRes.result : parsedRes.fallbackResult;
       await finalizeHandoff(ctx, h, 'cancelled', {
         actual_model: parsed.actual_model,
         parsed_reply: parsed.reply,
@@ -784,14 +801,20 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         tokens_in: parsed.tokens_in,
         tokens_out: parsed.tokens_out,
       }, convsData, handoffsData);
-    } else if (statusUpper === 'FAILED' && !logText.includes('```json')) {
+    } else if (statusUpper === 'FAILED') {
+      // Item 2: A FAILED job must never become a completed handoff, even if its log contains a valid ```json block
+      // with status "completed": FAILED -> status failed (keep the parsed result for display, add parse_error "job exited with code N")
+      const parsedRes = parseStructuredHandoffResult(parsed.reply, parsed.cost_usd);
+      h.result = parsedRes.ok ? parsedRes.result : parsedRes.fallbackResult;
+      const exitCode = typeof meta.exit_code === 'number' ? meta.exit_code : 1;
+      h.parse_error = `job exited with code ${exitCode}`;
       await finalizeHandoff(ctx, h, 'failed', {
         actual_model: parsed.actual_model,
         parsed_reply: parsed.reply,
         parsed_cost: parsed.cost_usd,
         tokens_in: parsed.tokens_in,
         tokens_out: parsed.tokens_out,
-        error: 'Job failed without json block',
+        error: h.parse_error,
       }, convsData, handoffsData);
     } else {
       const parsedRes = parseStructuredHandoffResult(parsed.reply, parsed.cost_usd);
@@ -847,24 +870,35 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
               }
             }
 
-            try {
-              const guardRes = await handleSpecGuard(
-                { project_path: checkDir, owner: h.platform },
-                ctx.paths
-              );
-              if (guardRes && guardRes.verdict === 'FAIL') {
-                const guardViolations = Array.isArray(guardRes.violations)
-                  ? (guardRes.violations as Array<{ path?: string }>)
-                      .map((v) => String(v.path ?? ''))
-                      .filter((p) => p.length > 0)
-                  : [];
-                for (const gv of guardViolations) {
-                  if (!violations.includes(gv)) {
-                    violations.push(gv);
+            // Item 4: SPEC Guard errors must not pass the gate: when the guard (isolated path)
+            // throws or returns no verdict, mark the handoff needs_review with parse_error "SPEC Guard could not run: <msg>"
+            if (h.isolated && h.worktree) {
+              try {
+                const guardRes = await handleSpecGuard(
+                  { project_path: h.worktree, owner: h.platform },
+                  ctx.paths
+                );
+                if (!guardRes || !guardRes.verdict) {
+                  h.parse_error = 'SPEC Guard could not run: no verdict returned';
+                  finalStatus = 'needs_review';
+                } else if (guardRes.verdict === 'FAIL') {
+                  const guardViolations = Array.isArray(guardRes.violations)
+                    ? (guardRes.violations as Array<{ path?: string }>)
+                        .map((v) => String(v.path ?? ''))
+                        .filter((p) => p.length > 0)
+                    : [];
+                  for (const gv of guardViolations) {
+                    if (!violations.includes(gv)) {
+                      violations.push(gv);
+                    }
                   }
                 }
+              } catch (guardErr: unknown) {
+                const msg = guardErr instanceof Error ? guardErr.message : String(guardErr);
+                h.parse_error = `SPEC Guard could not run: ${msg}`;
+                finalStatus = 'needs_review';
               }
-            } catch {}
+            }
 
             if (violations.length > 0) {
               h.scope_violations = violations;
@@ -912,7 +946,13 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       }
     }
 
-    // Item 3: When not isolated, run that team's handoffs one at a time (effective max_parallel = 1)
+    // Item 1: Decide isolation BEFORE starting members:
+    // Treat isolation as available only when the S1 feature is present
+    // (<paths.repoRoot>\server\features\worktrees\index.ts exists); otherwise use effective max_parallel = 1 from the very first start.
+    const worktreesAvailable = isWorktreeFeatureAvailable(ctx);
+    if (!worktreesAvailable) {
+      isolate = false;
+    }
     if (!isolate) {
       maxParallel = 1;
     }
@@ -1231,9 +1271,36 @@ export async function startTurnJob(
   agent: Agent,
   chatDir: string
 ): Promise<void> {
-  const targetPlatform = item.platform || conv.platform || agent.platform;
-  const targetModel = item.model || conv.model || agent.model;
-  const targetEffort = item.effort || conv.effort || agent.effort;
+  // Item 6: Reset retry_attempts when a new user (non-retry) turn starts
+  if (!item.is_retry) {
+    conv.retry_attempts = 0;
+  }
+
+  // Item 5: Queued model / effort: when a queue item has a platform, use its model / effort exactly ('' = platform default);
+  // never fall back to the conversation's previous platform's model/effort (use ?? semantics on the item, then the agent's values only when the platform equals the agent's platform).
+  const itemPlatformSpecified = Boolean(item.platform && item.platform.trim());
+  const targetPlatform = String(item.platform ?? conv.platform ?? agent.platform).trim().toLowerCase();
+
+  let targetModel = '';
+  let targetEffort = '';
+
+  if (itemPlatformSpecified) {
+    const itemModel = item.model !== undefined && item.model !== null ? String(item.model).trim() : undefined;
+    const itemEffort = item.effort !== undefined && item.effort !== null ? String(item.effort).trim() : undefined;
+    targetModel = itemModel ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.model || '') : '');
+    targetEffort = itemEffort ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.effort || '') : '');
+  } else {
+    const itemModel = item.model !== undefined && item.model !== null ? String(item.model).trim() : undefined;
+    const itemEffort = item.effort !== undefined && item.effort !== null ? String(item.effort).trim() : undefined;
+    const convPlatform = (conv.platform || agent.platform).toLowerCase();
+    if (targetPlatform === convPlatform) {
+      targetModel = itemModel ?? (conv.model || (targetPlatform === agent.platform.toLowerCase() ? agent.model : ''));
+      targetEffort = itemEffort ?? (conv.effort || (targetPlatform === agent.platform.toLowerCase() ? agent.effort : ''));
+    } else {
+      targetModel = itemModel ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.model || '') : '');
+      targetEffort = itemEffort ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.effort || '') : '');
+    }
+  }
 
   const msgs = readConversationMessages(chatDir, conv.id);
 
@@ -1447,33 +1514,53 @@ export async function startCompactionJob(
   const msgs = readConversationMessages(chatDir, conv.id);
   const relevantMsgs = msgs.filter((m) => m.seq > conv.summary_seq);
 
-  const historyLines: string[] = [];
-  if (conv.summary) {
-    historyLines.push(`Previous summary:\n${conv.summary}\n`);
-  }
-  historyLines.push('Conversation history:');
-  for (const m of relevantMsgs) {
-    historyLines.push(`${m.role.toUpperCase()}: ${m.text}`);
-  }
+  // Item 7: truncate each history message to 3000 chars and drop the oldest until the whole prompt is <= 17000;
+  // if even the summary + newest message does not fit, trim the summary.
+  const truncatedMsgs = relevantMsgs.map((m) => ({
+    role: m.role,
+    text: m.text.length > 3000 ? m.text.slice(0, 3000) : m.text,
+  }));
 
   const header =
     'Summarize this conversation for your own continuation: goals, decisions, current state, open items, file paths. ≤ 1200 words.\n\n';
-  let historyText = historyLines.join('\n');
 
-  // Item 5: cap compaction prompt to 17000 chars (keeping newest)
-  if (header.length + historyText.length > 17000) {
-    while (relevantMsgs.length > 1 && header.length + historyText.length > 17000) {
-      relevantMsgs.shift(); // drop oldest
-      const trimmedLines = [
-        conv.summary ? `Previous summary:\n${conv.summary}\n` : '',
-        'Conversation history:',
-        ...relevantMsgs.map((m) => `${m.role.toUpperCase()}: ${m.text}`),
-      ];
-      historyText = trimmedLines.join('\n');
+  let summary = conv.summary ? conv.summary.trim() : '';
+
+  const assembleCompactionPrompt = (
+    historyList: Array<{ role: string; text: string }>,
+    prevSummary: string
+  ): string => {
+    const lines: string[] = [];
+    if (prevSummary) {
+      lines.push(`Previous summary:\n${prevSummary}\n`);
+    }
+    lines.push('Conversation history:');
+    for (const m of historyList) {
+      lines.push(`${m.role.toUpperCase()}: ${m.text}`);
+    }
+    return header + lines.join('\n');
+  };
+
+  const currentHistory = [...truncatedMsgs];
+  while (currentHistory.length > 1 && assembleCompactionPrompt(currentHistory, summary).length > 17000) {
+    currentHistory.shift(); // drop oldest
+  }
+
+  if (assembleCompactionPrompt(currentHistory, summary).length > 17000) {
+    const promptNoSummary = assembleCompactionPrompt(currentHistory, '');
+    const allowedSummaryLen = 17000 - promptNoSummary.length - 'Previous summary:\n\n\n'.length;
+    if (allowedSummaryLen > 50) {
+      summary = summary.slice(0, allowedSummaryLen);
+    } else {
+      summary = '';
     }
   }
 
-  const prompt = header + historyText;
+  let prompt = assembleCompactionPrompt(currentHistory, summary);
+  if (prompt.length > 17000) {
+    prompt = prompt.slice(0, 17000);
+  }
+
   const platform = conv.platform || agent.platform;
   const newSession = newSessionFor(ctx, platform);
 

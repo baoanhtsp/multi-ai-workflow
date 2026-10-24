@@ -322,13 +322,36 @@ export const feature: MawFeature = {
             throw new ApiValidationError(`Message too long for this agent (max ${maxAllowedChars} chars)`, 400);
           }
 
+          const platformSpecified = Boolean(body.platform && String(body.platform).trim());
           const targetPlatform = String(body.platform ?? conv.platform ?? agent.platform).trim().toLowerCase();
           const registryAgent = ctx.registry.agents.find((a) => a.id === targetPlatform);
           if (!registryAgent) {
             throw new ApiValidationError(`Invalid platform '${targetPlatform}'.`, 400);
           }
 
-          const targetModel = String(body.model ?? conv.model ?? agent.model).trim();
+          // Item 5: when body has platform, use its model / effort exactly ('' = platform default);
+          // never fall back to conversation's previous platform's model/effort
+          let targetModel = '';
+          let targetEffort = '';
+
+          if (platformSpecified) {
+            const bodyModel = body.model !== undefined && body.model !== null ? String(body.model).trim() : undefined;
+            const bodyEffort = body.effort !== undefined && body.effort !== null ? String(body.effort).trim() : undefined;
+            targetModel = bodyModel ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.model || '') : '');
+            targetEffort = bodyEffort ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.effort || '') : '');
+          } else {
+            const bodyModel = body.model !== undefined && body.model !== null ? String(body.model).trim() : undefined;
+            const bodyEffort = body.effort !== undefined && body.effort !== null ? String(body.effort).trim() : undefined;
+            const convPlatform = (conv.platform || agent.platform).toLowerCase();
+            if (targetPlatform === convPlatform) {
+              targetModel = bodyModel ?? (conv.model || (targetPlatform === agent.platform.toLowerCase() ? agent.model : ''));
+              targetEffort = bodyEffort ?? (conv.effort || (targetPlatform === agent.platform.toLowerCase() ? agent.effort : ''));
+            } else {
+              targetModel = bodyModel ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.model || '') : '');
+              targetEffort = bodyEffort ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.effort || '') : '');
+            }
+          }
+
           if (targetModel && !registryAgent.models.includes(targetModel)) {
             throw new ApiValidationError(
               `Invalid model '${targetModel}'. Allowed: ${registryAgent.models.join(', ')}.`,
@@ -336,7 +359,6 @@ export const feature: MawFeature = {
             );
           }
 
-          const targetEffort = String(body.effort ?? conv.effort ?? agent.effort).trim();
           if (targetEffort && !registryAgent.efforts.includes(targetEffort)) {
             throw new ApiValidationError(
               `Invalid effort '${targetEffort}'. Allowed: ${registryAgent.efforts.join(', ')}.`,
@@ -522,6 +544,8 @@ export const feature: MawFeature = {
           }
 
           // Idle: start turn job directly
+          // Item 6: Reset retry_attempts when a new user (non-retry) turn starts
+          conv.retry_attempts = 0;
           const qItem: QueueItem = {
             id: generateQueueId(),
             text,

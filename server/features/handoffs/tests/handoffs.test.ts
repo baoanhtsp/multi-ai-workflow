@@ -10,7 +10,7 @@ import { runCommand } from '../../../lib/proc.ts';
 import { ApiValidationError } from '../../../lib/validate.ts';
 import { getBaseCommit, getWorktreeChangedFiles } from '../../agents-ws/lib/git.ts';
 import { feature as chatFeature } from '../../chat/index.ts';
-import { tick } from '../../chat/tick.ts';
+import { setWorktreeFeatureCheckerForTest, tick } from '../../chat/tick.ts';
 import { BUILTIN_FULL_TEMPLATE } from '../../teams/defaults.ts';
 import { feature as teamsFeature } from '../../teams/index.ts';
 import { feature } from '../index.ts';
@@ -39,9 +39,11 @@ function setupHandoffTestContext() {
   let nextReply = 'Default reply';
   let nextJobStatus = 'DONE';
   let nextWorktree = '';
+  let nextExitCode: number | null = null;
 
   baseCtx.startJob = async (body: Record<string, unknown>) => {
     const jobId = 'job_' + crypto.randomBytes(4).toString('hex');
+    const computedExitCode = nextExitCode !== null ? nextExitCode : (nextJobStatus === 'DONE' ? 0 : 1);
     const meta: Record<string, unknown> = {
       job_id: jobId,
       pid: process.pid,
@@ -49,7 +51,7 @@ function setupHandoffTestContext() {
       agent: body.agent || 'codex',
       role: body.role || 'backend',
       status: nextJobStatus,
-      exit_code: nextJobStatus === 'RUNNING' ? null : (nextJobStatus === 'DONE' ? 0 : 1),
+      exit_code: nextJobStatus === 'RUNNING' ? null : computedExitCode,
       started_at: new Date().toISOString(),
       started_ts: Date.now(),
       project_path: body.project_path || testProj,
@@ -68,7 +70,7 @@ function setupHandoffTestContext() {
 [Connected] Model: test-model
 ${nextReply}
 [Completed | Tokens: 250 in / 100 out | Cost: $0.0080]
-=== [JOB_FINISHED exit_code=${meta.exit_code}] ===
+=== [JOB_FINISHED exit_code=${computedExitCode}] ===
 `;
     fs.writeFileSync(path.win32.join(paths.jobsDir, `${jobId}.log`), log, 'utf8');
 
@@ -76,7 +78,7 @@ ${nextReply}
       ok: true,
       job_id: jobId,
       status: 'RUNNING',
-      pid: 99999,
+      pid: process.pid,
     };
   };
 
@@ -110,6 +112,9 @@ ${nextReply}
     },
     setNextWorktree: (w: string) => {
       nextWorktree = w;
+    },
+    setNextExitCode: (c: number | null) => {
+      nextExitCode = c;
     },
   };
 }
@@ -742,5 +747,210 @@ test('handoffs: [Item 3] non-isolated handoff in git repo triggers write-scope v
     'Violation list must include the created file'
   );
 });
+
+test('handoffs: [Item 1] isolation decided before starting members: absence of worktrees feature enforces effective max_parallel = 1', async () => {
+  const { makeReq, testProj, baseCtx, setNextJobStatus } = setupHandoffTestContext();
+
+  // Save and apply team with max_parallel = 3 and isolate = true
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: {
+      ...BUILTIN_FULL_TEMPLATE.team,
+      shared: {
+        ...BUILTIN_FULL_TEMPLATE.team.shared,
+        workdir: testProj,
+        max_parallel: 3,
+        isolate: true,
+      },
+    },
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  setNextJobStatus('RUNNING');
+
+  // Intercept ctx.startJob to capture whether isolate was true/false
+  let capturedIsolate: boolean | undefined;
+  const origStartJob = baseCtx.startJob;
+  baseCtx.startJob = async (body: Record<string, unknown>) => {
+    capturedIsolate = body.isolate as boolean;
+    return origStartJob(body);
+  };
+
+  try {
+    // Inject worktrees feature as absent (e.g. S1 worktrees feature not present)
+    setWorktreeFeatureCheckerForTest(() => false);
+
+    // Dispatch 2 handoffs to worker
+    const dispReq1 = makeReq({
+      lead_conversation_id: leadConvId,
+      to: 'worker',
+      task: 'Task 1',
+    });
+    const dispRes1 = (await feature.routes['handoff_dispatch']!.handler(dispReq1, dispReq1)) as any;
+    const hId1 = dispRes1.handoff.id;
+
+    const dispReq2 = makeReq({
+      lead_conversation_id: leadConvId,
+      to: 'worker',
+      task: 'Task 2',
+    });
+    const dispRes2 = (await feature.routes['handoff_dispatch']!.handler(dispReq2, dispReq2)) as any;
+    const hId2 = dispRes2.handoff.id;
+
+    // Call tick: should keep 1 running and 1 started because effective max_parallel = 1!
+    await tick(baseCtx);
+
+    const listRes = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+    const h1 = listRes.handoffs.find((h: any) => h.id === hId1);
+    const h2 = listRes.handoffs.find((h: any) => h.id === hId2);
+
+    assert.equal(h1.status, 'running', 'First handoff should start running');
+    assert.equal(h2.status, 'started', 'Second handoff must remain started because max_parallel = 1');
+    assert.equal(capturedIsolate, false, 'startJob must receive isolate: false when worktree feature is absent');
+  } finally {
+    setWorktreeFeatureCheckerForTest(null);
+  }
+});
+
+test('handoffs: [Item 2] FAILED job with completed json block becomes failed with parse_error', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply, setNextJobStatus, setNextExitCode } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: {
+      ...BUILTIN_FULL_TEMPLATE.team,
+      shared: {
+        ...BUILTIN_FULL_TEMPLATE.team.shared,
+        workdir: testProj,
+      },
+    },
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  // Job log contains a completed json block, but the job status is FAILED with exit_code 42
+  setNextReply(`
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Finished all work successfully",
+  "files_changed": []
+}
+\`\`\`
+`);
+  setNextJobStatus('FAILED');
+  setNextExitCode(42);
+
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Execute task that crashes',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  const handoffId = dispRes.handoff.id;
+
+  // Tick 1: starts job
+  await tick(baseCtx);
+
+  // Tick 2: processes finished job
+  await tick(baseCtx);
+
+  const listRes2 = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const finalH = listRes2.handoffs.find((h: any) => h.id === handoffId);
+  assert.equal(finalH.status, 'failed', 'FAILED job must never become completed');
+  assert.equal(finalH.parse_error, 'job exited with code 42', 'parse_error must record job exit code');
+  assert.equal(finalH.result?.summary, 'Finished all work successfully', 'parsed result is preserved for display');
+});
+
+test('handoffs: [Item 4] SPEC Guard error in isolated path marks handoff needs_review with parse_error', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply, setNextWorktree } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: {
+      ...BUILTIN_FULL_TEMPLATE.team,
+      shared: {
+        ...BUILTIN_FULL_TEMPLATE.team.shared,
+        workdir: testProj,
+      },
+    },
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  // Create isolated temp worktree directory with valid git repo (so git status passes)
+  const fakeWorktree = path.join(testProj, 'worktree-broken');
+  fs.mkdirSync(fakeWorktree, { recursive: true });
+  await runCommand('git.exe', ['-C', fakeWorktree, 'init']);
+  await runCommand('git.exe', ['-C', fakeWorktree, 'config', 'user.name', 'Tester']);
+  await runCommand('git.exe', ['-C', fakeWorktree, 'config', 'user.email', 'test@example.com']);
+  fs.writeFileSync(path.join(fakeWorktree, 'dummy.txt'), 'hello\n');
+  await runCommand('git.exe', ['-C', fakeWorktree, 'add', '.']);
+  await runCommand('git.exe', ['-C', fakeWorktree, 'commit', '-m', 'Initial commit']);
+  setNextWorktree(fakeWorktree);
+
+  // Set scriptsDir to an empty directory so handleSpecGuard fails/throws invoke-spec-guard.ps1 not found
+  const emptyScriptsDir = path.join(testProj, 'empty-scripts');
+  fs.mkdirSync(emptyScriptsDir, { recursive: true });
+  (baseCtx.paths as any).scriptsDir = emptyScriptsDir;
+
+  setNextReply(`
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Completed isolated work",
+  "files_changed": []
+}
+\`\`\`
+`);
+
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Isolated task with broken spec guard',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  const handoffId = dispRes.handoff.id;
+
+  // Tick 1: starts job
+  await tick(baseCtx);
+  // Tick 2: processes completion, calls spec guard on isolated worktree
+  await tick(baseCtx);
+
+  const listRes = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const h = listRes.handoffs.find((item: any) => item.id === handoffId);
+  assert.ok(h);
+  assert.equal(h.status, 'needs_review', 'Handoff must be needs_review when SPEC Guard fails');
+  assert.ok(
+    h.parse_error && h.parse_error.includes('SPEC Guard could not run'),
+    `parse_error must indicate SPEC Guard failure, got: ${h.parse_error}`
+  );
+});
+
 
 

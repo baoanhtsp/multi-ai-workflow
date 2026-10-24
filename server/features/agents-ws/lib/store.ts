@@ -5,16 +5,46 @@ import { withFileLock } from './mutex.ts';
 
 export async function readJsonStore<T>(filePath: string, defaultValue: T): Promise<T> {
   return withFileLock(filePath, async () => {
+    if (!fs.existsSync(filePath)) {
+      return defaultValue;
+    }
+    let raw = '';
     try {
-      if (!fs.existsSync(filePath)) {
-        return defaultValue;
-      }
-      const raw = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '').trim();
-      if (!raw) {
-        return defaultValue;
-      }
-      return JSON.parse(raw) as T;
+      raw = fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, '').trim();
     } catch {
+      return defaultValue;
+    }
+    if (!raw) {
+      return defaultValue;
+    }
+    try {
+      return JSON.parse(raw) as T;
+    } catch (err: unknown) {
+      // Item 3: Corrupt store must not be silently replaced:
+      // move to <file>.corrupt-<timestamp>, append audit line, start from default
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const corruptPath = `${filePath}.corrupt-${ts}`;
+      try {
+        fs.renameSync(filePath, corruptPath);
+      } catch {
+        try {
+          fs.copyFileSync(filePath, corruptPath);
+          fs.unlinkSync(filePath);
+        } catch {}
+      }
+
+      const featureDir = path.dirname(filePath);
+      try {
+        await appendAuditLog(featureDir, {
+          action: 'store_corrupt',
+          target: path.basename(filePath),
+          detail: {
+            error: err instanceof Error ? err.message : String(err),
+            backup: corruptPath,
+          },
+        });
+      } catch {}
+
       return defaultValue;
     }
   });

@@ -831,4 +831,187 @@ test('chat: [Item 6] text limit 15,000 chars validation and buildPrompt progress
   assert.equal(trimmedPrompt.includes('Deliver structured JSON API responses'), false);
 });
 
+test('chat: [Item 5] queued item with new platform uses exact model/effort and does not fall back to previous platform values', async () => {
+  const { makeReq, testProj, baseCtx } = setupChatTestContext();
+
+  // Create an agent whose default platform is claude with opus and high
+  const agReq = makeReq({
+    agent: {
+      name: 'MultiPlatformBot',
+      platform: 'claude',
+      model: 'opus',
+      effort: 'high',
+      workdir: testProj,
+    },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const agentId = agRes.agent.id;
+
+  const convReq = makeReq({ agent_id: agentId });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // Intercept startJob to record parameters received
+  const capturedJobs: Array<Record<string, unknown>> = [];
+  const origStartJob = baseCtx.startJob;
+  baseCtx.startJob = async (body: Record<string, unknown>) => {
+    capturedJobs.push(body);
+    return origStartJob(body);
+  };
+
+  // Turn 1 starts directly on claude
+  await feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'First message on claude' }),
+    makeReq()
+  );
+  assert.equal(capturedJobs.length, 1);
+  assert.equal(capturedJobs[0]!.agent, 'claude');
+  assert.equal(capturedJobs[0]!.model, 'opus');
+  assert.equal(capturedJobs[0]!.effort, 'high');
+
+  // While busy with turn 1, send turn 2 with platform: 'codex' and NO model/effort
+  const queueRes = (await feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'Second message on codex', platform: 'codex' }),
+    makeReq()
+  )) as any;
+  assert.equal(queueRes.queued, true);
+  // Verify queued item model and effort are empty/default, not opus/high
+  assert.equal(queueRes.queue_item.platform, 'codex');
+  assert.equal(queueRes.queue_item.model, '');
+  assert.equal(queueRes.queue_item.effort, '');
+
+  // Tick 1: completes turn 1, starts queued turn 2
+  await tick(baseCtx);
+
+  assert.equal(capturedJobs.length, 2);
+  // Turn 2 must NOT inherit 'opus' or 'high' from claude!
+  assert.equal(capturedJobs[1]!.agent, 'codex');
+  assert.equal(capturedJobs[1]!.model, undefined);
+  assert.equal(capturedJobs[1]!.effort, undefined);
+});
+
+test('chat: [Item 6] reset retry_attempts when a new user (non-retry) turn starts', async () => {
+  const { makeReq, testProj, baseCtx, setNextJobStatus } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: {
+      name: 'RetryResetBot',
+      platform: 'claude',
+      workdir: testProj,
+      retry_policy: { max_attempts: 1, backoff_sec: 0 },
+    },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const agentId = agRes.agent.id;
+
+  const convReq = makeReq({ agent_id: agentId });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // Make turn 1 fail and its retry fail
+  setNextJobStatus('FAILED');
+  await feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'Turn 1 fails' }),
+    makeReq()
+  );
+
+  // Tick 1: turn 1 fails -> queues retry item (retry_attempts becomes 1)
+  await tick(baseCtx);
+  // Tick 2: retry turn fails -> exhausted retries
+  await tick(baseCtx);
+
+  const get1 = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.equal(get1.conversation.retry_attempts, 1);
+
+  // Now user sends a brand new message (Turn 2) while job succeeds
+  setNextJobStatus('DONE');
+  await feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'Turn 2 user message' }),
+    makeReq()
+  );
+
+  // Conversation retry_attempts must have been reset to 0 upon starting new user turn!
+  const get2 = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.equal(get2.conversation.retry_attempts, 0, 'retry_attempts must be reset when a new user turn starts');
+});
+
+test('chat: [Item 7] compaction prompt truncates history messages to 3000 chars and stays <= 17000 with 30000-char assistant message', async () => {
+  const { makeReq, testProj, baseCtx } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: { name: 'GiantBot', platform: 'claude', workdir: testProj },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const convReq = makeReq({ agent_id: agRes.agent.id });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // Append a 30,000-char assistant message directly to conversation messages file
+  const chatDir = baseCtx.paths.featureDataDir('chat');
+  const msgsFile = path.win32.join(chatDir, 'conv', `${convId}.jsonl`);
+  const hugeText = 'A'.repeat(30000);
+  const msgObj = {
+    seq: 1,
+    id: 'msg_huge',
+    role: 'assistant',
+    text: hugeText,
+    ts: new Date().toISOString(),
+    platform: 'claude',
+    model: 'haiku',
+    effort: 'low',
+    actual_model: 'haiku',
+    job_id: 'job_test',
+    status: 'done',
+    cost_usd: 0.01,
+    tokens_in: 100,
+    tokens_out: 5000,
+    duration_sec: 10,
+    attachments: [],
+    handoff_id: '',
+    steered: false,
+  };
+  fs.mkdirSync(path.dirname(msgsFile), { recursive: true });
+  fs.writeFileSync(msgsFile, JSON.stringify(msgObj) + '\n', 'utf8');
+
+  // Intercept startJob to capture the compaction prompt
+  let capturedCompactionPrompt = '';
+  const origStartJob = baseCtx.startJob;
+  baseCtx.startJob = async (body: Record<string, unknown>) => {
+    capturedCompactionPrompt = String(body.prompt ?? '');
+    return origStartJob(body);
+  };
+
+  // Trigger manual chat_compact
+  const compactRes = (await feature.routes['chat_compact']!.handler(
+    makeReq({ conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.equal(compactRes.ok, true);
+
+  // Verify the prompt passed to startJob
+  assert.ok(capturedCompactionPrompt.length > 0, 'Compaction prompt must be captured');
+  assert.ok(
+    capturedCompactionPrompt.length <= 17000,
+    `Compaction prompt length (${capturedCompactionPrompt.length}) must be <= 17000`
+  );
+  // Verify the 30,000 char message was truncated to 3000 chars:
+  // It should contain 'A'.repeat(3000) but NOT 'A'.repeat(3001)
+  assert.ok(
+    capturedCompactionPrompt.includes('A'.repeat(3000)),
+    'Prompt contains truncated 3000-char message chunk'
+  );
+  assert.equal(
+    capturedCompactionPrompt.includes('A'.repeat(3001)),
+    false,
+    'Prompt must not contain more than 3000 chars of the message'
+  );
+});
+
+
 

@@ -224,3 +224,40 @@ test('store: [partial update] partial agent and group updates preserve existing 
   assert.equal(partAgRes.agent.platform, 'codex'); // Preserved!
   assert.equal(partAgRes.agent.workdir, testProj); // Preserved!
 });
+
+test('store: [Item 3] corrupt store file is renamed to .corrupt-<timestamp>, audited, and not overwritten', async () => {
+  const { makeReq, paths } = setupTestContext();
+
+  const agentsDir = paths.featureDataDir('agents-ws');
+  fs.mkdirSync(agentsDir, { recursive: true });
+  const agentsFile = path.win32.join(agentsDir, 'agents.json');
+
+  // Write garbage text to agents.json
+  const garbageText = 'THIS IS NOT VALID JSON {[[ 12345';
+  fs.writeFileSync(agentsFile, garbageText, 'utf8');
+
+  // Request ws_state (which reads agents.json)
+  const req = makeReq();
+  const res = (await feature.routes['ws_state']!.handler(req, req)) as any;
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.agents, []); // safely returned default
+
+  // Check that agents.json is no longer the garbage file
+  assert.equal(fs.existsSync(agentsFile), false);
+
+  // Check that corrupt backup file exists and contains the exact garbage text
+  const dirFiles = fs.readdirSync(agentsDir);
+  const corruptFile = dirFiles.find((f) => f.startsWith('agents.json.corrupt-'));
+  assert.ok(corruptFile, 'corrupt backup file must exist');
+  const backupContent = fs.readFileSync(path.win32.join(agentsDir, corruptFile), 'utf8');
+  assert.equal(backupContent, garbageText, 'backup file must preserve original unreadable content');
+
+  // Check audit log
+  const auditFile = path.win32.join(agentsDir, 'audit.jsonl');
+  assert.ok(fs.existsSync(auditFile), 'audit.jsonl must exist');
+  const auditLines = fs.readFileSync(auditFile, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const corruptAudit = auditLines.find((e) => e.action === 'store_corrupt' && e.target === 'agents.json');
+  assert.ok(corruptAudit, 'audit log must record store_corrupt event for agents.json');
+  assert.ok(corruptAudit.detail.backup.includes(corruptFile));
+});
+
