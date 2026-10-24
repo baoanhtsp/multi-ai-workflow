@@ -3,7 +3,7 @@
     "SessionStart": [
       {
         "type": "command",
-        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"%USERPROFILE%\\.gemini\\config\\skills\\claude-leader\\scripts\\save-agentapi-env.ps1\"",
+        "command": "powershell -NoProfile -ExecutionPolicy Bypass -File skills/claude-leader/scripts/save-agentapi-env.ps1",
         "timeout": 5
       }
     ],
@@ -13,7 +13,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"%USERPROFILE%\\.gemini\\config\\skills\\claude-leader\\scripts\\save-agentapi-env.ps1\"",
+            "command": "powershell -NoProfile -ExecutionPolicy Bypass -File skills/claude-leader/scripts/save-agentapi-env.ps1",
             "timeout": 5
           }
         ]
