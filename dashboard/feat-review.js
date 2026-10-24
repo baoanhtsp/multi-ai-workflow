@@ -34,7 +34,7 @@
     'rv.sendFix': 'Gửi góp ý cho agent', 'rv.sendFixN': 'Gửi góp ý cho agent ({n})',
     'rv.fixTitle': 'Gửi góp ý thành prompt sửa lỗi', 'rv.agent': 'Agent', 'rv.role': 'Vai trò', 'rv.note': 'Ghi chú thêm',
     'rv.preview': 'Xem trước prompt', 'rv.startFix': 'Chạy job sửa', 'rv.makeCard': 'Tạo thẻ S2',
-    'rv.fixStarted': 'Đã chạy job sửa {id}', 'rv.cardMade': 'Đã tạo thẻ trong bảng việc.', 'rv.noComments': 'Chưa có góp ý nào chưa gửi.',
+    'rv.fixStarted': 'Đã chạy job sửa {id}', 'rv.fixRemaining': 'còn {n} góp ý cho lần sửa sau', 'rv.cardMade': 'Đã tạo thẻ trong bảng việc.', 'rv.noComments': 'Chưa có góp ý nào chưa gửi.',
     'rv.verdict': 'Kết luận', 'rv.score': 'Điểm', 'rv.saveVerdict': 'Lưu kết luận', 'rv.verdictSaved': 'Đã lưu kết luận.',
     'rv.noCheckpoint': 'Job này không có checkpoint (S1) — đang hiển thị working tree.',
     'rv.showFiles': 'Danh sách tệp', 'rv.stats': '{files} tệp · +{add} −{del}',
@@ -67,7 +67,7 @@
     'rv.sendFix': 'Send feedback to agent', 'rv.sendFixN': 'Send feedback to agent ({n})',
     'rv.fixTitle': 'Turn comments into a fix prompt', 'rv.agent': 'Agent', 'rv.role': 'Role', 'rv.note': 'Extra note',
     'rv.preview': 'Preview prompt', 'rv.startFix': 'Run fix job', 'rv.makeCard': 'Create S2 card',
-    'rv.fixStarted': 'Fix job {id} started', 'rv.cardMade': 'Card created on the board.', 'rv.noComments': 'No unsent comments yet.',
+    'rv.fixStarted': 'Fix job {id} started', 'rv.fixRemaining': '{n} comments left for the next fix', 'rv.cardMade': 'Card created on the board.', 'rv.noComments': 'No unsent comments yet.',
     'rv.verdict': 'Verdict', 'rv.score': 'Score', 'rv.saveVerdict': 'Save verdict', 'rv.verdictSaved': 'Verdict saved.',
     'rv.noCheckpoint': 'This job has no checkpoint (S1) — showing the working tree instead.',
     'rv.showFiles': 'File list', 'rv.stats': '{files} files · +{add} −{del}',
@@ -674,11 +674,9 @@
         if (a === 'preview') await preview();
         else if (a === 'run') {
           const r = await api('review_send_fix', req({}));
-          (session().fix_jobs ||= []).push(r.job_id);
-          for (const c of unsent()) c.sent_at = new Date().toISOString();
-          toast(t('rv.fixStarted', { id: r.job_id }), 'ok');
+          toast(t('rv.fixStarted', { id: r.job_id }) + (r.remaining ? ' · ' + t('rv.fixRemaining', { n: r.remaining }) : ''), r.remaining ? 'warn' : 'ok');
           close();
-          renderFoot();
+          load(true); // the server marks only the comments that fitted in the prompt as sent
           if (typeof MAW.watchJob === 'function') MAW.watchJob(r.job_id);
         } else if (a === 'card') {
           const prompt = await preview();
