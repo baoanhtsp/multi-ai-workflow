@@ -733,54 +733,155 @@ test('Codex Review #3 Item 2: retry in flight blocks approve with 409 processed;
   }
 });
 
-test('Codex Review #3 Item 3: claim file of a dead pid or stale timestamp is automatically recovered', async () => {
+test('Codex Review #4 Item 1: path traversal protection on inbox id', async () => {
   const { paths, cleanup } = createTempTestPaths();
-  let startJobCalls = 0;
-
   const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
-  ctx.startJob = async () => {
-    startJobCalls++;
-    return { ok: true, job_id: 'job_recovered_123' };
-  };
+
+  try {
+    const maliciousId = '..\\..\\x';
+
+    // 1. performInboxAction with traversal id throws 400
+    await assert.rejects(
+      async () => await performInboxAction(ctx, maliciousId, 'dismiss', undefined, 'ui'),
+      (err: any) => err.statusCode === 400 && err.message.includes('Invalid inbox item id')
+    );
+
+    // 2. handleInboxGet with traversal id throws 400
+    const fakeGetReq = {
+      path: '/api/features/inbox/inbox_get',
+      method: 'GET',
+      query: new URLSearchParams({ id: maliciousId }),
+      body: {},
+      headers: new Headers(),
+    };
+    assert.throws(
+      () => handleInboxGet(ctx, fakeGetReq as any),
+      (err: any) => err.statusCode === 400 && err.message.includes('Invalid inbox item id')
+    );
+
+    // 3. handleInboxAct with traversal id throws 400
+    const fakeActReq = {
+      path: '/api/features/inbox/inbox_act',
+      method: 'POST',
+      query: new URLSearchParams(),
+      body: { id: maliciousId, action: 'dismiss' },
+      headers: new Headers(),
+    };
+    await assert.rejects(
+      async () => await handleInboxAct(ctx, fakeActReq as any),
+      (err: any) => err.statusCode === 400 && err.message.includes('Invalid inbox item id')
+    );
+
+    // 4. Verify no file was created outside claims directory
+    const claimsDir = path.join(paths.featureDataDir('inbox'), 'claims');
+    const traversalTarget = path.join(paths.featureDataDir('inbox'), '..', 'x.lock');
+    assert.equal(fs.existsSync(traversalTarget), false);
+    if (fs.existsSync(claimsDir)) {
+      const files = fs.readdirSync(claimsDir);
+      assert.equal(files.length, 0);
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #4 Item 2: live claims are never stolen, dead pid or corrupt > 10m is recovered', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
 
   try {
     const { item } = addInboxItem(paths, {
       kind: 'failed',
-      title: 'Stale claim recovery test',
-      actions: ['retry', 'dismiss'],
-      retry: {
-        mode: 'task',
-        agent: 'claude',
-        role: 'backend',
-        prompt: 'Fix it',
-      },
+      title: 'Live claim test',
+      actions: ['dismiss'],
     });
 
-    // 1. Create a claim file with a dead pid (e.g. 999999)
     const claimsDir = path.join(paths.featureDataDir('inbox'), 'claims');
     fs.mkdirSync(claimsDir, { recursive: true });
     const claimFile = path.join(claimsDir, `${item.id}.lock`);
-    fs.writeFileSync(claimFile, JSON.stringify({ pid: 999999, ts: Date.now() }) + '\n', 'utf8');
 
-    // Action should detect dead pid, remove stale claim atomically, acquire claim, and succeed
-    const res1 = await performInboxAction(ctx, item.id, 'retry', undefined, 'ui');
-    assert.equal(res1.ok, true);
-    assert.equal(startJobCalls, 1);
-    assert.equal(getInboxItem(paths, item.id)?.status, 'done');
+    // 1. Claim held by current process (live PID) with timestamp 5 minutes old (300,000ms)
+    fs.writeFileSync(
+      claimFile,
+      JSON.stringify({ pid: process.pid, ts: Date.now() - 300_000 }) + '\n',
+      'utf8'
+    );
 
-    // 2. Add another item and test stale timestamp (> 120s old)
+    // Action MUST throw 409 because the PID is alive! Live claim is NEVER stolen!
+    await assert.rejects(
+      async () => await performInboxAction(ctx, item.id, 'dismiss', undefined, 'ui'),
+      (err: any) => err.statusCode === 409 && err.message.includes('already being processed')
+    );
+
+    // 2. Dead PID (e.g. 999999): should be recognized as stale and recovered
+    fs.writeFileSync(
+      claimFile,
+      JSON.stringify({ pid: 999999, ts: Date.now() }) + '\n',
+      'utf8'
+    );
+    const resDead = await performInboxAction(ctx, item.id, 'dismiss', undefined, 'ui');
+    assert.equal(resDead.ok, true);
+    assert.equal(getInboxItem(paths, item.id)?.status, 'dismissed');
+
+    // 3. Corrupt claim file older than 10 minutes: should be recovered
     const { item: item2 } = addInboxItem(paths, {
       kind: 'needs_login',
-      title: 'Stale timestamp test',
+      title: 'Corrupt claim test',
       actions: ['dismiss'],
     });
     const claimFile2 = path.join(claimsDir, `${item2.id}.lock`);
-    // Stale timestamp: 200 seconds ago
-    fs.writeFileSync(claimFile2, JSON.stringify({ pid: process.pid, ts: Date.now() - 200_000 }) + '\n', 'utf8');
+    fs.writeFileSync(claimFile2, '{not-valid-json', 'utf8');
+    const oldTime = (Date.now() - 700_000) / 1000;
+    fs.utimesSync(claimFile2, oldTime, oldTime);
 
-    const res2 = await performInboxAction(ctx, item2.id, 'dismiss', undefined, 'ui');
-    assert.equal(res2.ok, true);
+    const resCorrupt = await performInboxAction(ctx, item2.id, 'dismiss', undefined, 'ui');
+    assert.equal(resCorrupt.ok, true);
     assert.equal(getInboxItem(paths, item2.id)?.status, 'dismissed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #4 Item 3: items.json store-level lock with withItemsLock', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  const dataDir = paths.featureDataDir('inbox');
+  fs.mkdirSync(dataDir, { recursive: true });
+  const lockFile = path.join(dataDir, 'items.lock');
+
+  try {
+    // 1. Lock held by live PID -> addInboxItem throws 503 "Inbox is busy, try again."
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n',
+      'utf8'
+    );
+
+    assert.throws(
+      () => {
+        addInboxItem(paths, {
+          kind: 'failed',
+          title: 'Should fail due to busy lock',
+        });
+      },
+      (err: any) => err.statusCode === 503 && err.message.includes('Inbox is busy')
+    );
+
+    // Clean up live lock file before next test step
+    fs.unlinkSync(lockFile);
+
+    // 2. Lock held by dead PID -> should be recognized as stale and recovered
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({ pid: 999999, ts: Date.now() }) + '\n',
+      'utf8'
+    );
+
+    const res = addInboxItem(paths, {
+      kind: 'failed',
+      title: 'Should succeed after recovering dead lock',
+    });
+    assert.equal(res.created, true);
+    assert.equal(fs.existsSync(lockFile), false, 'lock file must be unlinked after completion');
   } finally {
     cleanup();
   }

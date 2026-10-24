@@ -13,6 +13,7 @@ import {
   readInboxData,
   unmarkInboxResolved,
   updateInboxItemStatus,
+  withItemsLock,
   writeInboxData,
   type InboxAction,
   type InboxItem,
@@ -119,13 +120,17 @@ export function handleInboxGet(
   ctx: MawFeatureContext,
   req: MawFeatureRequest
 ): Record<string, unknown> {
-  const id = req.query.get('id');
-  if (!id || id.trim() === '') {
+  const rawId = req.query.get('id');
+  if (!rawId || rawId.trim() === '') {
     throw new ApiValidationError("Missing 'id' parameter.", 400);
   }
-  const item = getInboxItem(ctx.paths, id.trim());
+  const id = rawId.trim().toLowerCase();
+  if (!/^i[0-9a-z]{6}$/i.test(id)) {
+    throw new ApiValidationError(`Invalid inbox item id '${rawId}'. Expected format ^i[0-9a-z]{6}$.`, 400);
+  }
+  const item = getInboxItem(ctx.paths, id);
   if (!item) {
-    throw new ApiValidationError(`Inbox item '${id}' not found.`, 404);
+    throw new ApiValidationError(`Inbox item '${rawId}' not found.`, 404);
   }
   return {
     ok: true,
@@ -217,11 +222,19 @@ export function handleInboxAdd(
 const inFlightActionIds = new Set<string>();
 
 function tryAcquireInboxClaim(paths: ServerPaths, id: string, isRetry = false): { release: () => void } {
+  const normId = String(id ?? '').trim().toLowerCase();
+  if (!/^i[0-9a-z]{6}$/i.test(normId)) {
+    throw new ApiValidationError(`Invalid inbox item id '${id}'. Expected format ^i[0-9a-z]{6}$.`, 400);
+  }
   const claimsDir = path.win32.join(paths.featureDataDir('inbox'), 'claims');
   if (!fs.existsSync(claimsDir)) {
     fs.mkdirSync(claimsDir, { recursive: true });
   }
-  const claimFile = path.win32.join(claimsDir, `${id}.lock`);
+  const resolvedClaimsDir = path.win32.resolve(claimsDir);
+  const claimFile = path.win32.resolve(path.win32.join(resolvedClaimsDir, `${normId}.lock`));
+  if (!claimFile.startsWith(resolvedClaimsDir + '\\')) {
+    throw new ApiValidationError(`Invalid inbox item id '${id}'. Path traversal detected.`, 400);
+  }
   let fd: number | null = null;
   try {
     fd = fs.openSync(claimFile, 'wx');
@@ -234,16 +247,27 @@ function tryAcquireInboxClaim(paths: ServerPaths, id: string, isRetry = false): 
         try {
           const raw = fs.readFileSync(claimFile, 'utf8');
           const data = JSON.parse(raw);
-          const pid = Number(data.pid);
-          const ts = Number(data.ts);
-          if (ts && Date.now() - ts > 120_000) {
-            isStale = true;
-          } else if (pid && !isProcessRunning(pid)) {
-            isStale = true;
+          const pid = Number(data?.pid);
+          if (pid > 0) {
+            if (!isProcessRunning(pid)) {
+              isStale = true;
+            }
+          } else {
+            const stat = fs.statSync(claimFile);
+            if (Date.now() - stat.mtimeMs > 600_000) {
+              isStale = true;
+            }
           }
         } catch {
-          // Corrupt or unreadable claim file is treated as stale
-          isStale = true;
+          // Corrupt or unreadable claim file is stale ONLY if > 10m old
+          try {
+            const stat = fs.statSync(claimFile);
+            if (Date.now() - stat.mtimeMs > 600_000) {
+              isStale = true;
+            }
+          } catch {
+            // ignore
+          }
         }
 
         if (isStale) {
@@ -255,10 +279,10 @@ function tryAcquireInboxClaim(paths: ServerPaths, id: string, isRetry = false): 
             } catch {
               // ignore
             }
-            return tryAcquireInboxClaim(paths, id, true);
+            return tryAcquireInboxClaim(paths, normId, true);
           } catch {
             // Another process won rename race, retry claim once
-            return tryAcquireInboxClaim(paths, id, true);
+            return tryAcquireInboxClaim(paths, normId, true);
           }
         }
       }
@@ -293,6 +317,14 @@ export async function performInboxAction(
   text?: string,
   by?: string
 ): Promise<Record<string, unknown>> {
+  const normId = String(id ?? '').trim().toLowerCase();
+  if (!/^i[0-9a-z]{6}$/i.test(normId)) {
+    throw new ApiValidationError(
+      `Invalid inbox item id '${id}'. Expected format ^i[0-9a-z]{6}$.`,
+      400
+    );
+  }
+
   const normAction = action.trim().toLowerCase();
   const allowedActs = new Set(['dismiss', 'done', 'retry', 'approve', 'reject', 'reply']);
   if (!allowedActs.has(normAction)) {
@@ -303,14 +335,14 @@ export async function performInboxAction(
   }
 
   // Acquire claim lock FIRST for every state-changing action (Codex Review #3 Item 2)
-  const claim = tryAcquireInboxClaim(ctx.paths, id);
-  inFlightActionIds.add(id);
+  const claim = tryAcquireInboxClaim(ctx.paths, normId);
+  inFlightActionIds.add(normId);
 
   try {
     // Re-read item from disk AFTER acquiring the claim lock
-    const item = getInboxItem(ctx.paths, id);
+    const item = getInboxItem(ctx.paths, normId);
     if (!item) {
-      throw new ApiValidationError(`Inbox item '${id}' not found.`, 404);
+      throw new ApiValidationError(`Inbox item '${normId}' not found.`, 404);
     }
 
     // Check status after claim acquisition
@@ -322,20 +354,20 @@ export async function performInboxAction(
           item,
         };
       }
-      throw new ApiValidationError(`Inbox item '${id}' is already resolved (${item.status}).`, 409);
+      throw new ApiValidationError(`Inbox item '${normId}' is already resolved (${item.status}).`, 409);
     }
 
     // Action must be in item.actions, unless it is dismiss (which is always allowed)
     if (normAction !== 'dismiss' && !item.actions.includes(normAction as InboxAction)) {
       throw new ApiValidationError(
-        `Action '${normAction}' is not allowed for item '${id}' (allowed: ${item.actions.join(', ')})`,
+        `Action '${normAction}' is not allowed for item '${normId}' (allowed: ${item.actions.join(', ')})`,
         400
       );
     }
 
     const resolvedBy = by || 'ui';
     const now = new Date().toISOString();
-    logInboxAudit(ctx, id, normAction, resolvedBy);
+    logInboxAudit(ctx, normId, normAction, resolvedBy);
 
     if (normAction === 'dismiss' || normAction === 'done' || normAction === 'approve' || normAction === 'reject') {
       const newStatus: InboxStatus =
@@ -354,7 +386,7 @@ export async function performInboxAction(
         at: now,
       };
 
-      const updated = updateInboxItemStatus(ctx.paths, id, newStatus, resolution);
+      const updated = updateInboxItemStatus(ctx.paths, normId, newStatus, resolution);
       if (updated) {
         await fireInboxResolved(updated);
       }
@@ -366,7 +398,7 @@ export async function performInboxAction(
 
     if (normAction === 'retry') {
       if (!item.retry) {
-        throw new ApiValidationError(`Inbox item '${id}' has no retry configuration.`, 400);
+        throw new ApiValidationError(`Inbox item '${normId}' has no retry configuration.`, 400);
       }
 
       const jobResult = await ctx.startJob(item.retry as unknown as Record<string, unknown>);
@@ -379,7 +411,7 @@ export async function performInboxAction(
         job_id: newJobId,
       };
 
-      const updated = updateInboxItemStatus(ctx.paths, id, 'done', resolution);
+      const updated = updateInboxItemStatus(ctx.paths, normId, 'done', resolution);
       if (updated) {
         await fireInboxResolved(updated);
       }
@@ -404,7 +436,7 @@ export async function performInboxAction(
         at: now,
       };
 
-      const updated = updateInboxItemStatus(ctx.paths, id, 'done', resolution);
+      const updated = updateInboxItemStatus(ctx.paths, normId, 'done', resolution);
       try {
         let handled = false;
         if (updated) {
@@ -422,16 +454,18 @@ export async function performInboxAction(
           const jobRes = await ctx.startJob(followUpBody as unknown as Record<string, unknown>);
           followUpJobId = (jobRes?.job_id as string) ?? null;
           if (updated && followUpJobId) {
-            updated.resolution = {
-              ...resolution,
-              job_id: followUpJobId,
-            };
-            const data = readInboxData(ctx.paths);
-            const idx = data.items.findIndex((it) => it.id === updated.id);
-            if (idx !== -1) {
-              data.items[idx] = updated;
-              writeInboxData(ctx.paths, data);
-            }
+            withItemsLock(ctx.paths, () => {
+              updated.resolution = {
+                ...resolution,
+                job_id: followUpJobId ?? undefined,
+              };
+              const data = readInboxData(ctx.paths);
+              const idx = data.items.findIndex((it) => it.id === updated.id);
+              if (idx !== -1) {
+                data.items[idx] = updated;
+                writeInboxData(ctx.paths, data);
+              }
+            });
           }
         }
 
@@ -442,15 +476,15 @@ export async function performInboxAction(
         };
       } catch (err) {
         // Roll back to 'open' and clear resolution if follow-up job start fails
-        updateInboxItemStatus(ctx.paths, id, 'open', null);
-        unmarkInboxResolved(id);
+        updateInboxItemStatus(ctx.paths, normId, 'open', null);
+        unmarkInboxResolved(normId);
         throw err;
       }
     }
 
     throw new ApiValidationError(`Unsupported action '${normAction}'.`, 400);
   } finally {
-    inFlightActionIds.delete(id);
+    inFlightActionIds.delete(normId);
     claim.release();
   }
 }
@@ -460,9 +494,16 @@ export async function handleInboxAct(
   req: MawFeatureRequest
 ): Promise<Record<string, unknown>> {
   const body = req.body;
-  const id = String(body.id ?? '').trim();
-  if (!id) {
+  const rawId = String(body.id ?? '').trim();
+  if (!rawId) {
     throw new ApiValidationError("Missing 'id' in request body.", 400);
+  }
+  const id = rawId.toLowerCase();
+  if (!/^i[0-9a-z]{6}$/i.test(id)) {
+    throw new ApiValidationError(
+      `Invalid inbox item id '${rawId}'. Expected format ^i[0-9a-z]{6}$.`,
+      400
+    );
   }
 
   const action = String(body.action ?? '').trim().toLowerCase();

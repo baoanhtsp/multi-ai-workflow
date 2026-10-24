@@ -307,7 +307,7 @@ test('Telegram Major 6 regression: /retry, callback query, and reply invoke perf
     fs.mkdirSync(dataDir, { recursive: true });
     const itemsFile = path.join(dataDir, 'items.json');
     const initialItem = {
-      id: 'i11111',
+      id: 'i111111',
       kind: 'failed',
       severity: 'error',
       title: 'Failed compile',
@@ -337,7 +337,7 @@ test('Telegram Major 6 regression: /retry, callback query, and reply invoke perf
       if (urlStr.includes('/getUpdates')) {
         tick++;
         if (tick === 1) {
-          // Send /retry i11111
+          // Send /retry i111111
           return new Response(
             JSON.stringify({
               ok: true,
@@ -347,7 +347,7 @@ test('Telegram Major 6 regression: /retry, callback query, and reply invoke perf
                   message: {
                     message_id: 10,
                     chat: { id: 12345 },
-                    text: '/retry i11111',
+                    text: '/retry i111111',
                   },
                 },
               ],
@@ -390,11 +390,11 @@ test('Telegram Major 6 regression: /retry, callback query, and reply invoke perf
     // Verify /retry called startJob
     assert.equal(startedJobs.length, 1, '/retry command must call ctx.startJob');
     assert.equal(startedJobs[0]!.agent, 'claude');
-    assert.ok(sentMessages.some((m) => m.includes("Action 'retry' applied to i11111")));
+    assert.ok(sentMessages.some((m) => m.includes("Action 'retry' applied to i111111")));
 
-    // 2. Test callback query "a:retry:i22222"
+    // 2. Test callback query "a:retry:i222222"
     const item2 = {
-      id: 'i22222',
+      id: 'i222222',
       kind: 'failed',
       severity: 'error',
       title: 'Second failure',
@@ -430,7 +430,7 @@ test('Telegram Major 6 regression: /retry, callback query, and reply invoke perf
                     id: 'cb_query_1',
                     from: { id: 12345 },
                     message: { message_id: 50, chat: { id: 12345 } },
-                    data: 'a:retry:i22222',
+                    data: 'a:retry:i222222',
                   },
                 },
               ],
@@ -467,7 +467,7 @@ test('Telegram Major 6 regression: /retry, callback query, and reply invoke perf
 
     // 3. Test reply to pushed message starts follow-up job
     const item3 = {
-      id: 'i33333',
+      id: 'i333333',
       kind: 'needs_input',
       severity: 'warn',
       title: 'Need guidance',
@@ -495,7 +495,7 @@ test('Telegram Major 6 regression: /retry, callback query, and reply invoke perf
         offset: 0,
         push_since: new Date().toISOString(),
         last_digest: { morning: '', evening: '' },
-        msg_map: { '777': 'i33333' },
+        msg_map: { '777': 'i333333' },
       }),
       'utf8'
     );
@@ -580,7 +580,7 @@ test('Telegram Review #2 Item 2: reply to mapped approval item sends usage hint 
     fs.mkdirSync(dataDir, { recursive: true });
     const itemsFile = path.join(dataDir, 'items.json');
     const approvalItem = {
-      id: 'i_appr_1',
+      id: 'iappr01',
       kind: 'approval',
       severity: 'warn',
       title: 'Deployment approval needed',
@@ -593,7 +593,7 @@ test('Telegram Review #2 Item 2: reply to mapped approval item sends usage hint 
     };
     fs.writeFileSync(itemsFile, JSON.stringify({ version: 1, items: [approvalItem] }), 'utf8');
 
-    // Map message 500 -> approval item i_appr_1
+    // Map message 500 -> approval item iappr01
     const stateFile = path.join(paths.featureDataDir('telegram'), 'state.json');
     fs.writeFileSync(
       stateFile,
@@ -601,7 +601,7 @@ test('Telegram Review #2 Item 2: reply to mapped approval item sends usage hint 
         offset: 0,
         push_since: new Date().toISOString(),
         last_digest: { morning: '', evening: '' },
-        msg_map: { '500': 'i_appr_1' },
+        msg_map: { '500': 'iappr01' },
       }),
       'utf8'
     );
@@ -656,7 +656,7 @@ test('Telegram Review #2 Item 2: reply to mapped approval item sends usage hint 
     // Verify response text instructed /approve or /reject
     assert.equal(sentMessages.length, 1);
     assert.ok(
-      sentMessages[0]!.includes('This item needs /approve i_appr_1 or /reject i_appr_1'),
+      sentMessages[0]!.includes('This item needs /approve iappr01 or /reject iappr01'),
       'Must prompt with approve or reject command'
     );
 

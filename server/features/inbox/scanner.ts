@@ -9,6 +9,7 @@ import {
   addInboxItem,
   readInboxData,
   updateInboxItemStatus,
+  withItemsLock,
   writeInboxData,
   type InboxAction,
   type InboxItem,
@@ -237,18 +238,20 @@ export async function runJobScanner(paths: ServerPaths): Promise<void> {
     // Job ended: clean up running tracker and resolve any needs_input
     if (runningTrackers.has(jobId)) {
       runningTrackers.delete(jobId);
-      const inboxData = readInboxData(paths);
-      let changed = false;
-      for (const item of inboxData.items) {
-        if (item.job_id === jobId && item.kind === 'needs_input' && item.status === 'open') {
-          item.status = 'done';
-          item.updated_at = new Date().toISOString();
-          changed = true;
+      withItemsLock(paths, () => {
+        const inboxData = readInboxData(paths);
+        let changed = false;
+        for (const item of inboxData.items) {
+          if (item.job_id === jobId && item.kind === 'needs_input' && item.status === 'open') {
+            item.status = 'done';
+            item.updated_at = new Date().toISOString();
+            changed = true;
+          }
         }
-      }
-      if (changed) {
-        writeInboxData(paths, inboxData);
-      }
+        if (changed) {
+          writeInboxData(paths, inboxData);
+        }
+      });
     }
 
     // A job that becomes DONE auto-resolves older inbox items for that job (Item 13: memoized)
@@ -258,18 +261,20 @@ export async function runJobScanner(paths: ServerPaths): Promise<void> {
       if (memo && memo.status === 'DONE') {
         continue;
       }
-      const inboxData = readInboxData(paths);
-      let changed = false;
-      for (const item of inboxData.items) {
-        if (item.job_id === jobId && item.status === 'open') {
-          item.status = 'done';
-          item.updated_at = new Date().toISOString();
-          changed = true;
+      withItemsLock(paths, () => {
+        const inboxData = readInboxData(paths);
+        let changed = false;
+        for (const item of inboxData.items) {
+          if (item.job_id === jobId && item.status === 'open') {
+            item.status = 'done';
+            item.updated_at = new Date().toISOString();
+            changed = true;
+          }
         }
-      }
-      if (changed) {
-        writeInboxData(paths, inboxData);
-      }
+        if (changed) {
+          writeInboxData(paths, inboxData);
+        }
+      });
       memoMap.set(jobId, { status: 'DONE', logSize, lastScannedAt: now });
       continue;
     }
