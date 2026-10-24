@@ -52,10 +52,32 @@
 [data-skin="neon"] .s1-wt, [data-skin="neon"] .s1-bo, [data-skin="neon"] .s1-launch { background: rgba(10, 13, 32, .55); border-color: rgba(34, 211, 238, .28); }
 [data-skin="neon"] .s1-bo-c.is-win { background: rgba(63, 185, 80, .12); box-shadow: inset 0 3px 0 var(--ok), 0 0 18px rgba(63, 185, 80, .18); }
 
+/* C1 cleanup */
+.s1-clg { border: 1px solid var(--border); border-radius: 8px; margin-bottom: 10px; overflow: hidden; }
+.s1-clg-h { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--surface-2); border-bottom: 1px solid var(--border); font-size: 13px; }
+.s1-clg-h .s1-sp { flex: 1; }
+.s1-cll { margin: 0; padding: 0; list-style: none; max-height: 320px; overflow: auto; }
+.s1-cll li { border-bottom: 1px solid var(--border); }
+.s1-cll li:last-child { border-bottom: 0; }
+.s1-cll li.is-risky { box-shadow: inset 3px 0 0 var(--err); }
+.s1-cli { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: start; gap: 10px; padding: 8px 12px; cursor: pointer; }
+.s1-cli:hover { background: var(--hover); }
+.s1-cli input { margin-top: 2px; }
+.s1-cli-main { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; }
+.s1-cli-main .s1-mono { overflow-wrap: anywhere; }
+.s1-cli-sub { flex-basis: 100%; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; }
+.s1-cli-size { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.s1-clfoot { position: sticky; bottom: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px; margin-top: 4px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-size: 13px; z-index: 1; }
+.s1-clfoot .s1-sp { flex: 1; }
+[data-skin="neon"] .s1-clg { background: rgba(10, 13, 32, .55); border-color: rgba(34, 211, 238, .28); }
+[data-skin="neon"] .s1-clfoot { background: rgba(12, 15, 36, .92); }
+
 @media (max-width: 720px) {
   .s1-sec { padding: 10px 12px 14px; }
   .s1-cand { grid-template-columns: 20px minmax(0, 1fr) auto; }
   .s1-cand select[data-s1-model] { grid-column: 2; }
   .s1-log li { grid-template-columns: auto minmax(0, 1fr); }
   .s1-log .s1-meta { grid-column: 2; }
+  .s1-cli { grid-template-columns: auto minmax(0, 1fr); }
+  .s1-cli-size { grid-column: 2; }
 }

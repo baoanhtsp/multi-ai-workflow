@@ -11,6 +11,19 @@
 
   M.addI18n('vi', {
     wtTab: 'Worktree', wtViewList: 'Worktree', wtViewBo: 'Best-of-N', wtViewGit: 'Git',
+    wtViewClean: 'Dọn dẹp', wtGuardChecks: 'Cổng kiểm thử (S4) đang đỏ nên merge bị chặn. Sửa lỗi hoặc dùng override của S4 rồi merge lại.',
+    clScan: 'Quét', clNotScanned: 'Bấm Quét để xem những gì có thể dọn (chưa xoá gì cả).', clEmpty: 'Không có gì cần dọn.',
+    clKind_merged_branch: 'Nhánh đã merge', clKind_kept_worktree: 'Worktree đã merge, hết hạn giữ', clKind_orphan_worktree: 'Worktree mồ côi',
+    clKind_stale_worktree: 'Worktree lâu không dùng', clKind_stale_branch: 'Nhánh chưa merge, lâu không dùng', clKind_checkpoint_excess: 'Checkpoint vượt giới hạn',
+    clKind_checkpoint_orphan: 'Checkpoint của thư mục đã mất', clKind_trash_expired: 'Bản sao lưu đã hết hạn',
+    clRisky: 'rủi ro', clDirty: 'chưa commit', clMerged: 'đã merge', clAll: 'Chọn cả nhóm',
+    clSelected: '{n} mục đã chọn · thu hồi {size}', clApply: 'Dọn dẹp…', clConfirmTitle: 'Xác nhận dọn dẹp',
+    clConfirmQ: 'Xoá {n} mục dưới đây? Không hoàn tác được, trừ nhánh chưa merge và worktree có thay đổi (được sao lưu vào refs/maw/trash).',
+    clRiskyAck: 'Tôi hiểu {n} mục là nhánh chưa merge hoặc có thay đổi chưa commit; chúng được sao lưu {d} ngày rồi mới mất hẳn.',
+    clDone: 'Đã xoá {n} mục, thu hồi {size}.', clSkipped: 'Bỏ qua {n} mục', clLastScan: 'Quét lúc {t}',
+    clSettings: 'Cài đặt dọn dẹp', clKeepDays: 'Giữ worktree sau khi merge (ngày, 0 = xoá ngay)', clStaleDays: 'Coi là lâu không dùng sau (ngày)', clSave: 'Lưu', clSaved: 'Đã lưu cài đặt dọn dẹp.',
+    clTrash: 'Thùng rác (bản sao lưu nhánh)', clTrashEmpty: 'Thùng rác trống.', clRestore: 'Khôi phục', clRestored: 'Đã khôi phục nhánh {b}.', clExpires: 'hết hạn {t}',
+    clRestoreQ: 'Tạo lại nhánh {b} từ bản sao lưu {r}?', clProject: 'Dọn dẹp…',
     wtNew: 'Worktree mới', wtRunIso: 'Chạy cô lập', wtShowAll: 'Cả đã merge / huỷ', wtEmpty: 'Chưa có worktree nào cho dự án này.',
     wtBase: 'Nhánh gốc', wtName: 'Tên (tuỳ chọn)', wtNameHint: 'chữ thường, số, . _ -', wtCreate: 'Tạo',
     wtCreated: 'Đã tạo {branch}.', wtCopied: 'Đã chép {n} tệp từ .worktreeinclude.', wtSetupFail: 'Script .maw/setup.ps1 lỗi (exit {code}).',
@@ -42,6 +55,19 @@
   });
   M.addI18n('en', {
     wtTab: 'Worktrees', wtViewList: 'Worktrees', wtViewBo: 'Best-of-N', wtViewGit: 'Git',
+    wtViewClean: 'Cleanup', wtGuardChecks: 'The test gate (S4) is red, so the merge is blocked. Fix the checks or use S4\'s override, then merge again.',
+    clScan: 'Scan', clNotScanned: 'Press Scan to see what can be cleaned up (nothing is deleted yet).', clEmpty: 'Nothing to clean up.',
+    clKind_merged_branch: 'Merged branches', clKind_kept_worktree: 'Merged worktrees past their keep time', clKind_orphan_worktree: 'Orphan worktrees',
+    clKind_stale_worktree: 'Stale worktrees', clKind_stale_branch: 'Stale unmerged branches', clKind_checkpoint_excess: 'Checkpoints over the limit',
+    clKind_checkpoint_orphan: 'Checkpoints of removed folders', clKind_trash_expired: 'Expired backups',
+    clRisky: 'risky', clDirty: 'uncommitted', clMerged: 'merged', clAll: 'Select group',
+    clSelected: '{n} selected · {size} reclaimed', clApply: 'Clean up…', clConfirmTitle: 'Confirm cleanup',
+    clConfirmQ: 'Delete these {n} items? This cannot be undone, except unmerged branches and worktrees with changes (backed up to refs/maw/trash).',
+    clRiskyAck: 'I understand {n} items are unmerged branches or have uncommitted work; they are backed up for {d} days, then gone for good.',
+    clDone: 'Deleted {n} items, {size} reclaimed.', clSkipped: 'Skipped {n} items', clLastScan: 'Scanned {t}',
+    clSettings: 'Cleanup settings', clKeepDays: 'Keep worktrees after merge (days, 0 = remove at once)', clStaleDays: 'Stale after (days)', clSave: 'Save', clSaved: 'Cleanup settings saved.',
+    clTrash: 'Trash (branch backups)', clTrashEmpty: 'Trash is empty.', clRestore: 'Restore', clRestored: 'Restored branch {b}.', clExpires: 'expires {t}',
+    clRestoreQ: 'Recreate branch {b} from backup {r}?', clProject: 'Clean up…',
     wtNew: 'New worktree', wtRunIso: 'Run isolated', wtShowAll: 'Include merged / discarded', wtEmpty: 'No worktrees for this project yet.',
     wtBase: 'Base branch', wtName: 'Name (optional)', wtNameHint: 'lower-case letters, digits, . _ -', wtCreate: 'Create',
     wtCreated: 'Created {branch}.', wtCopied: 'Copied {n} files from .worktreeinclude.', wtSetupFail: '.maw/setup.ps1 failed (exit {code}).',
@@ -97,6 +123,8 @@
   const branchDatalist = id => `<datalist id="${id}">${branchList().map(b => `<option value="${esc(b)}">`).join('')}</datalist>`;
   const dur = s => { s = Math.round(Number(s) || 0); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s` : `${Math.floor(s / 3600)}h${String(Math.floor(s % 3600 / 60)).padStart(2, '0')}m`; };
   const money = v => v == null ? '—' : '$' + Number(v).toFixed(Number(v) < 1 ? 3 : 2);
+  const bytes = v => { if (v == null) return '—'; let n = Number(v) || 0, u = 0; const U = ['B', 'KB', 'MB', 'GB']; while (n >= 1024 && u < 3) { n /= 1024; u++; } return `${n.toFixed(u ? 1 : 0)} ${U[u]}`; };
+  const CL_KINDS = ['merged_branch', 'kept_worktree', 'orphan_worktree', 'checkpoint_excess', 'checkpoint_orphan', 'trash_expired', 'stale_worktree', 'stale_branch'];
   // Jobs started by S1 actions run outside the main Run button; show them in the live job box when the page offers it.
   function watch(r, msg) {
     toast(msg, 'ok');
@@ -113,9 +141,10 @@
   const W = {
     project: '', view: 'list', list: [], all: false, at: 0, loading: false, error: '',
     bo: { runs: [], at: 0, loading: false, error: '', timer: null },
-    git: { target: '', info: null, log: [], at: 0, loading: false, error: '', out: '' }
+    git: { target: '', info: null, log: [], at: 0, loading: false, error: '', out: '' },
+    cl: { data: null, sel: new Set(), loading: false, error: '', trash: [], cfg: null, skipped: [], ver: 0 }
   };
-  try { W.view = ['list', 'bo', 'git'].includes(localStorage.getItem('maw_s1_view')) ? localStorage.getItem('maw_s1_view') : 'list'; } catch {}
+  try { W.view = ['list', 'bo', 'git', 'clean'].includes(localStorage.getItem('maw_s1_view')) ? localStorage.getItem('maw_s1_view') : 'list'; } catch {}
   let tab = null;
   const visible = () => tab && !tab.panel.classList.contains('hidden');
   const proj = () => M.project()?.path || '';
@@ -125,6 +154,7 @@
     if (p === W.project) return false;
     W.project = p; W.list = []; W.at = 0; W.error = '';
     W.bo.runs = []; W.bo.at = 0; W.git.target = p; W.git.info = null; W.git.log = []; W.git.at = 0; W.git.out = '';
+    W.cl.data = null; W.cl.sel = new Set(); W.cl.error = ''; W.cl.trash = []; W.cl.skipped = [];
     return true;
   }
 
@@ -173,12 +203,37 @@
     } catch (e) { G.error = e.message; G.log = []; }
     finally { G.loading = false; G.at = Date.now(); paint(); }
   }
+  // C1 cleanup: preview is a dry run; nothing is deleted before cleanup_apply.
+  async function loadClean() {
+    const C = W.cl, p = W.project;
+    if (!p || C.loading) return;
+    C.loading = true; C.ver++; paint();
+    try {
+      const [prev, trash, cfg] = await Promise.all([
+        api(q('cleanup_preview', { project_path: p })),
+        api(q('cleanup_trash', { project_path: p })).catch(() => ({ items: [] })),
+        api('cleanup_config').catch(() => null)
+      ]);
+      if (p !== W.project) return;
+      C.data = prev;
+      C.sel = new Set((prev.candidates || []).filter(c => c.default_selected && !c.risky && !c.protected).map(c => c.id));
+      C.trash = Array.isArray(trash.items) ? trash.items : Array.isArray(trash.trash) ? trash.trash : [];
+      C.cfg = cfg?.config || cfg;
+      C.error = '';
+    } catch (e) { C.error = e.message; C.data = null; }
+    finally { C.loading = false; C.ver++; paint(); }
+  }
+  async function cleanupConfig() {
+    if (!W.cl.cfg) { try { const r = await api('cleanup_config'); W.cl.cfg = r.config || r; } catch {} }
+    return W.cl.cfg || {};
+  }
   function refresh(force) {
     syncProject();
     if (!visible() && !force) return;
     if (W.view === 'list') loadList(force);
     if (W.view === 'bo') loadBo(force);
     if (W.view === 'git') { loadGit(force); if (!W.list.length) loadList(force); }
+    if (W.view === 'clean' && force && W.cl.data) loadClean();
   }
   // Active best-of-N runs are polled every 5 s while their view is open.
   function pollBo() {
@@ -203,10 +258,13 @@
     }
     const active = M.state.data?.feature_data?.worktrees?.active;
     tab.setCount(Number.isFinite(active) ? active : W.list.filter(w => w.status === 'active').length);
-    panel.querySelector('[data-wt="nav"]').innerHTML = [['list', 'wtViewList'], ['bo', 'wtViewBo'], ['git', 'wtViewGit']]
-      .map(([v, k]) => `<button type="button" data-wt-view="${v}" aria-pressed="${W.view === v}">${esc(t(k))}</button>`).join('');
+    const byProj = M.state.data?.feature_data?.worktrees?.cleanup?.by_project || {};
+    const clCount = Object.entries(byProj).find(([k]) => k.toLowerCase() === W.project.toLowerCase())?.[1] || 0;
+    panel.querySelector('[data-wt="nav"]').innerHTML = [['list', 'wtViewList'], ['bo', 'wtViewBo'], ['git', 'wtViewGit'], ['clean', 'wtViewClean']]
+      .map(([v, k]) => `<button type="button" data-wt-view="${v}" aria-pressed="${W.view === v}">${esc(t(k))}${v === 'clean' && clCount ? ` <span class="count">${esc(clCount)}</span>` : ''}</button>`).join('');
     const tools = panel.querySelector('[data-wt="tools"]');
     const body = panel.querySelector('[data-wt="body"]');
+    if (W.view !== 'clean') delete body.dataset.clKey;
     if (!W.project) { tools.innerHTML = ''; body.innerHTML = `<div class="empty">${esc(t('s1PickProject'))}</div>`; return; }
     if (W.view === 'list') {
       tools.innerHTML = `<label class="s1-check"><input type="checkbox" data-wt="all"${W.all ? ' checked' : ''}> ${esc(t('wtShowAll'))}</label>
@@ -217,10 +275,86 @@
     } else if (W.view === 'bo') {
       tools.innerHTML = `<button type="button" class="btn btn-sm" data-wt="refresh">${esc(t('s1Refresh'))}</button>`;
       paintBo(body);
-    } else {
+    } else if (W.view === 'git') {
       tools.innerHTML = `<button type="button" class="btn btn-sm" data-wt="refresh">${esc(t('s1Refresh'))}</button>`;
       paintGit(body);
+    } else {
+      tools.innerHTML = `<button type="button" class="btn btn-sm btn-primary" data-cl="scan"${W.cl.loading ? ' disabled' : ''}>${esc(W.cl.loading ? t('s1Loading') : t('clScan'))}</button>`;
+      paintClean(body);
     }
+  }
+
+  function paintClean(body) {
+    const C = W.cl, d = C.data;
+    const key = `${C.ver}|${M.lang}|${C.loading}|${W.project}`;
+    if (body.dataset.clKey === key) { paintCleanSum(); return; }
+    body.dataset.clKey = key;
+    const cands = d?.candidates || [];
+    let html = '';
+    if (C.error) html += `<div class="s1-errbox">${esc(C.error)}</div>`;
+    else if (!d) html += `<div class="empty">${esc(C.loading ? t('s1Loading') : t('clNotScanned'))}</div>`;
+    else if (!cands.length) html += `<div class="empty">${esc(t('clEmpty'))}</div>`;
+    else {
+      html += `<div class="sub" style="margin-bottom:8px">${esc(t('clLastScan', { t: S().absTime(d.scanned_at) }))}</div>`;
+      for (const kind of CL_KINDS.concat([...new Set(cands.map(c => c.kind))].filter(k => !CL_KINDS.includes(k)))) {
+        const items = cands.filter(c => c.kind === kind);
+        if (!items.length) continue;
+        const sel = items.filter(c => C.sel.has(c.id)).length;
+        html += `<section class="s1-clg"><div class="s1-clg-h"><label class="s1-check"><input type="checkbox" data-cl-group="${esc(kind)}"${sel === items.length ? ' checked' : ''}${items.some(c => c.protected) ? ' disabled' : ''} aria-label="${esc(t('clAll'))}"></label>
+            <b>${esc(t('clKind_' + kind) === 'clKind_' + kind ? kind : t('clKind_' + kind))}</b> <span class="count">${items.length}</span>
+            <span class="s1-sp"></span><span class="sub">${esc(bytes(items.reduce((a, c) => a + (Number(c.size_bytes) || 0), 0)))}</span></div>
+          <ul class="s1-cll">${items.map(c => `<li${c.risky ? ' class="is-risky"' : ''}>
+            <label class="s1-cli"><input type="checkbox" data-cl-item="${esc(c.id)}"${C.sel.has(c.id) ? ' checked' : ''}${c.protected ? ' disabled' : ''}>
+              <span class="s1-cli-main"><span class="s1-mono">${esc(c.name)}</span>
+                ${c.merged ? badge(t('clMerged'), 'b-ok') : ''}${c.risky ? badge(t('clRisky'), 'b-err') : ''}${c.dirty ? badge(t('clDirty'), 'b-warn') : ''}
+                <span class="s1-cli-sub">${esc(c.reason || '')}${c.last_commit_at ? ` · <span title="${esc(S().absTime(c.last_commit_at))}">${esc(S().relTime(c.last_commit_at))}</span>` : ''}${c.path ? ` · <span class="s1-mono">${esc(c.path)}</span>` : ''}</span></span>
+              <span class="s1-cli-size">${esc(bytes(c.size_bytes))}${c.size_approx ? '+' : ''}</span></label></li>`).join('')}</ul></section>`;
+      }
+      html += `<div class="s1-clfoot"><span data-cl="sum"></span><span class="s1-sp"></span><button type="button" class="btn btn-primary btn-danger-solid" data-cl="apply">${esc(t('clApply'))}</button></div>`;
+    }
+    if (C.skipped.length) html += `<div class="s1-warn" style="margin-top:10px"><b>${esc(t('clSkipped', { n: C.skipped.length }))}</b><ul class="s1-filelist" style="margin-top:6px">${C.skipped.map(x => `<li><span class="s1-mono">${esc(x.id)}</span> — ${esc(x.reason || '')}</li>`).join('')}</ul></div>`;
+    const cfg = C.cfg || {};
+    html += `<details class="s1-launch" style="margin-top:14px"><summary>${esc(t('clSettings'))}</summary>
+        <div class="s1-grid2"><div><label class="lbl" for="s1ClKeep">${esc(t('clKeepDays'))}</label><input class="input" id="s1ClKeep" type="number" min="0" max="90" value="${esc(cfg.keep_after_merge_days ?? 0)}"></div>
+          <div><label class="lbl" for="s1ClStale">${esc(t('clStaleDays'))}</label><input class="input" id="s1ClStale" type="number" min="1" max="365" value="${esc(cfg.stale_branch_days ?? 14)}"></div></div>
+        <div class="s1-row"><span style="flex:1"></span><button type="button" class="btn btn-sm" data-cl="save">${esc(t('clSave'))}</button></div></details>
+      <div class="section-title" style="margin-top:14px">${esc(t('clTrash'))}</div>
+      ${C.trash.length ? `<ul class="s1-log">${C.trash.map(x => `<li><span class="s1-mono">${esc(x.branch || x.ref)}</span><span class="s1-subj" title="${esc(x.ref)}">${esc(x.last_commit_subject || x.ref)}</span>
+          <span class="s1-meta">${x.expires_at ? esc(t('clExpires', { t: S().relTime(x.expires_at) })) : ''} <button type="button" class="btn btn-sm" data-cl-restore="${esc(x.ref)}" data-b="${esc(x.branch || '')}">${esc(t('clRestore'))}</button></span></li>`).join('')}</ul>`
+        : `<div class="empty">${esc(d ? t('clTrashEmpty') : '')}</div>`}`;
+    body.innerHTML = html;
+    paintCleanSum();
+  }
+  function paintCleanSum() {
+    const el = tab?.panel.querySelector('[data-cl="sum"]');
+    if (!el) return;
+    const cands = W.cl.data?.candidates || [];
+    const chosen = cands.filter(c => W.cl.sel.has(c.id));
+    el.textContent = t('clSelected', { n: chosen.length, size: bytes(chosen.reduce((a, c) => a + (Number(c.size_bytes) || 0), 0)) });
+    const btn = tab.panel.querySelector('[data-cl="apply"]');
+    if (btn) btn.disabled = !chosen.length;
+  }
+  async function applyClean() {
+    const C = W.cl, project = W.project;
+    const chosen = (C.data?.candidates || []).filter(c => C.sel.has(c.id));
+    if (!chosen.length) return;
+    const risky = chosen.filter(c => c.risky || c.dirty);
+    const trashDays = C.cfg?.trash_days ?? 30;
+    const html = `<p style="margin:0">${esc(t('clConfirmQ', { n: chosen.length }))}</p>
+      <ul class="s1-filelist">${chosen.map(c => `<li><span class="s1-mono">${esc(c.name)}</span>${c.risky ? badge(t('clRisky'), 'b-err') : ''}${c.dirty ? badge(t('clDirty'), 'b-warn') : ''}<span style="margin-left:auto">${esc(bytes(c.size_bytes))}</span></li>`).join('')}</ul>
+      ${risky.length ? `<label class="s1-check s1-errbox" style="display:flex"><input type="checkbox" id="s1ClAck"> ${esc(t('clRiskyAck', { n: risky.length, d: trashDays }))}</label>` : ''}`;
+    await S().openModal({ title: t('clConfirmTitle'), html, buttons: [{ id: 'ok', label: t('clApply').replace('…', ''), cls: 'btn-primary btn-danger-solid' }],
+      onOpen: (body, dlg) => {
+        const ack = body.querySelector('#s1ClAck'), ok = dlg.querySelector('[data-act="ok"]');
+        if (ack && ok) { ok.disabled = true; ack.addEventListener('change', () => { ok.disabled = !ack.checked; }); }
+      },
+      onAction: async () => {
+        const r = await api('cleanup_apply', { project_path: project, items: chosen.map(c => c.id), confirm: true, confirm_risky: risky.map(c => c.id) });
+        const deleted = Array.isArray(r.deleted) ? r.deleted : [];
+        C.skipped = Array.isArray(r.skipped) ? r.skipped : [];
+        toast(t('clDone', { n: deleted.length, size: bytes(r.freed_bytes || 0) }), deleted.length ? 'ok' : 'warn');
+        W.at = 0; loadClean();
+      } });
   }
 
   function paintList() {
@@ -467,6 +601,11 @@
       const btn = dlg.querySelector('[data-act="ok"]'); if (btn) btn.textContent = t('wtMergeAnyway');
       return false;
     }
+    if (r.blocked === 'checks') {
+      const items = Array.isArray(r.checks?.items) ? r.checks.items : [];
+      box.innerHTML = `<div class="s1-errbox">${esc(t('wtGuardChecks'))}</div>${items.length ? `<ul class="s1-filelist">${items.map(x => `<li>${esc(x.label || x.id || x.name || '')} ${x.status ? badge(x.status, /pass|ok|green/i.test(x.status) ? 'b-ok' : 'b-err') : ''}</li>`).join('')}</ul>` : ''}`;
+      return false;
+    }
     if (r.blocked === 'conflicts') {
       const files = Array.isArray(r.conflicts) ? r.conflicts : [];
       box.innerHTML = `<div class="s1-errbox">${esc(t('wtConflicts', { n: files.length }))}</div>
@@ -499,9 +638,10 @@
   const readStrategy = body => body.querySelector('[data-strategy][aria-pressed="true"]')?.dataset.strategy || 'squash';
 
   async function mergeWorktree(w) {
+    const keepDays = Number((await cleanupConfig()).keep_after_merge_days) || 0;
     const ctx = { force: false, owner: w.owner || '', worktreeId: w.id, okMsg: r => t('wtMerged', { branch: w.branch, commit: String(r.commit || '').slice(0, 7) }) };
     const html = `${mergeFields(w.owner)}
-      <label class="s1-check"><input type="checkbox" id="s1MgRemove" checked> ${esc(t('wtRemove'))}</label>
+      <label class="s1-check"><input type="checkbox" id="s1MgRemove"${keepDays > 0 ? '' : ' checked'}> ${esc(t('wtRemove'))}</label>
       <div class="sub">${esc(t('wtMergeNote'))}</div><div data-mg="res"></div>`;
     await S().openModal({ title: `${t('wtMerge')} ${w.branch} → ${w.base}`, html, buttons: [{ id: 'ok', label: t('wtMerge') }],
       onOpen: wireStrategy,
@@ -593,10 +733,32 @@
       try { await api('bestof_cancel', { id: d.boCancel, confirm: true }); toast(t('boCancelled', { id: d.boCancel }), 'ok'); } catch (ex) { toast(ex.message, 'err'); }
       W.bo.at = 0; loadBo(true); return;
     }
+    if (d.cl === 'scan') return loadClean();
+    if (d.cl === 'apply') return applyClean();
+    if (d.cl === 'save') {
+      const panel = tab.panel;
+      try {
+        const r = await api('cleanup_config_save', { keep_after_merge_days: Math.round(Number(panel.querySelector('#s1ClKeep').value)), stale_branch_days: Math.round(Number(panel.querySelector('#s1ClStale').value)) });
+        W.cl.cfg = r.config || r; toast(t('clSaved'), 'ok');
+      } catch (ex) { toast(ex.message, 'err'); }
+      return;
+    }
+    if (d.clRestore) {
+      if (!(await S().confirmBox({ title: t('clRestore'), html: `<p style="margin:0">${esc(t('clRestoreQ', { b: d.b || d.clRestore, r: d.clRestore }))}</p>` }))) return;
+      try { const r = await api('cleanup_restore', { project_path: W.project, ref: d.clRestore, confirm: true }); toast(t('clRestored', { b: r.branch || d.b }), 'ok'); loadClean(); }
+      catch (ex) { toast(ex.message, 'err'); }
+      return;
+    }
     if (d.git === 'changes') return S().showDiff(t('gtChanges'), 'git_diff', { project_path: W.git.target || W.project });
     if (d.git) return gitOp(d.git, W.git.target || W.project);
   }
   function onChange(e) {
+    const it = e.target.dataset.clItem, grp = e.target.dataset.clGroup;
+    if (it) { if (e.target.checked) W.cl.sel.add(it); else W.cl.sel.delete(it); paintCleanSum(); return; }
+    if (grp) {
+      for (const c of (W.cl.data?.candidates || []).filter(x => x.kind === grp && !x.protected)) { if (e.target.checked) W.cl.sel.add(c.id); else W.cl.sel.delete(c.id); }
+      W.cl.ver++; paint(); return;
+    }
     if (e.target.dataset.wt === 'all') { W.all = e.target.checked; W.at = 0; loadList(true); }
     if (e.target.dataset.wt === 'gitdir') { W.git.target = e.target.value; W.git.info = null; W.git.log = []; W.git.out = ''; W.git.at = 0; paint(); loadGit(true); }
   }
@@ -615,6 +777,7 @@
   };
   M.addProjectAction({ id: 'wt-new', label: () => t('wtNew'), run: p => { openTab('list'); newWorktree(p.path); } });
   M.addProjectAction({ id: 'wt-iso', label: () => t('wtRunIso'), run: p => { openTab('list'); runIsolated(p.path); } });
+  M.addProjectAction({ id: 'wt-clean', label: () => t('clProject'), run: () => { openTab('clean'); loadClean(); } });
   M.addProjectAction({ id: 'wt-bestof', label: () => t('wtViewBo') + '…', run: () => { openTab('bo'); setTimeout(() => { if (launcher) { launcher.open = true; launcher.querySelector('#s1BoPrompt')?.focus(); } }, 50); } });
 
   // #3 Fork a job: same prompt + previous result summary, in a new worktree, optionally on another agent.
