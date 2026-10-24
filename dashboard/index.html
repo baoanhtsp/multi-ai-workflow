@@ -2367,12 +2367,13 @@ $('guideBtn').onclick = () => {
 
 // ---------- Tabs (remembered per browser) ----------
 function selectTab(name) {
-  document.querySelectorAll('#tabsCard [data-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
-  document.querySelectorAll('#tabsCard [data-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
+  // Only the top-level tabs / panels: feature panels may contain their own [data-tab] / [data-panel] widgets.
+  document.querySelectorAll('#tabsCard > .tabs > [data-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+  document.querySelectorAll('#tabsCard > [data-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
   store.set('maw_tab', name);
 }
 // Delegated, so tabs added later by feature plugins work too.
-document.querySelector('#tabsCard .tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) selectTab(b.dataset.tab); });
+document.querySelector('#tabsCard > .tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) selectTab(b.dataset.tab); });
 selectTab(['audit', 'sessions', 'stats', 'notify'].includes(store.get('maw_tab')) ? store.get('maw_tab') : 'audit');
 
 // ---------- Feature plugins (SPEC §9.0) ----------
@@ -2397,11 +2398,11 @@ window.MAW = {
   addI18n(lang, dict) { if (I18N[lang]) Object.assign(I18N[lang], dict); },
   // A tab next to Audit / Sessions / Stats / Notifications. render(panel) is called on every data refresh.
   addTab({ id, title, render }) {
-    if (!/^[a-z][a-z0-9-]{1,31}$/.test(id) || document.querySelector(`#tabsCard [data-tab="${id}"]`)) return;
+    if (!/^[a-z][a-z0-9-]{1,31}$/.test(id) || document.querySelector(`#tabsCard > .tabs > [data-tab="${id}"]`)) return;
     const btn = document.createElement('button');
     btn.type = 'button'; btn.setAttribute('role', 'tab'); btn.dataset.tab = id;
     btn.innerHTML = `<span></span> <span class="count"></span>`;
-    document.querySelector('#tabsCard .tabs').appendChild(btn);
+    document.querySelector('#tabsCard > .tabs').appendChild(btn);
     const panel = document.createElement('div');
     panel.dataset.panel = id; panel.setAttribute('role', 'tabpanel'); panel.className = 'hidden feature-panel';
     $('tabsCard').appendChild(panel);
