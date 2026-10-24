@@ -1,4 +1,4 @@
-﻿param(
+param(
     [Parameter(Mandatory=$true)]
     [ValidateSet("send-latest", "send", "new", "status", "list-active", "wait")]
     [string]$Action,
@@ -87,7 +87,7 @@ if ($env:ANTIGRAVITY_LS_ADDRESS -match ':(\d+)$') {
 
 if (-not $env:ANTIGRAVITY_CSRF_TOKEN -or -not $env:ANTIGRAVITY_LS_ADDRESS -or -not $isListening) {
     try {
-        $lsProc = Get-CimInstance Win32_Process -Filter "Name = 'language_server.exe'" -ErrorAction SilentlyContinue |
+        $lsProc = Get-CimInstance Win32_Process -Filter "Name LIKE 'language_server%.exe'" -ErrorAction SilentlyContinue |
             Sort-Object CreationDate -Descending |
             Select-Object -First 1
         if ($lsProc -and $lsProc.CommandLine -match '--csrf_token\s+([^\s"]+)') {
@@ -303,6 +303,9 @@ function Get-ConversationTurnResponse([string]$cid, [int]$minStepIndex = -1) {
 function Wait-AntigravityTurn([string]$cid, [int]$initialStepIndex, [int]$timeoutSec) {
     $elapsed = 0
     $lastResult = $null
+    $lastLoggedStep = $initialStepIndex
+    $ts = (Get-Date).ToString("HH:mm:ss")
+    Write-Output "[$ts] Waiting for Antigravity IDE (Conversation: $cid)..."
     while ($elapsed -lt $timeoutSec) {
         $res = Get-ConversationTurnResponse -cid $cid -minStepIndex $initialStepIndex
         $lastResult = $res
@@ -310,6 +313,11 @@ function Wait-AntigravityTurn([string]$cid, [int]$initialStepIndex, [int]$timeou
             Write-Output "[Step $($res.StepIndex) - $($res.CreatedAt)]:"
             Write-Output $res.Content
             return
+        }
+        if ($res.StepIndex -gt $lastLoggedStep) {
+            $lastLoggedStep = $res.StepIndex
+            $stepTs = (Get-Date).ToString("HH:mm:ss")
+            Write-Output "[$stepTs] Antigravity executing step $($res.StepIndex)..."
         }
         Start-Sleep -Seconds 2
         $elapsed += 2
@@ -431,4 +439,3 @@ switch ($Action) {
         }
     }
 }
-

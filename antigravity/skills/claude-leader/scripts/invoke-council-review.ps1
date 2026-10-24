@@ -30,6 +30,7 @@ if (-not (Test-Path $codexScript)) {
 }
 
 $startTime = Get-Date
+Write-Output "[$(Get-Date -Format 'HH:mm:ss')] Launching Parallel AI Council (Claude Sonnet + OpenAI Codex) in $WorkDir..."
 
 $claudeJob = Start-Job -ScriptBlock {
     param($scriptPath, $workDir, $prompt, $promptFile, $continueSession)
@@ -73,15 +74,43 @@ $codexJob = Start-Job -ScriptBlock {
     & $scriptPath @invokeParams 2>&1
 } -ArgumentList $codexScript, $WorkDir, $Prompt, $PromptFile, $CommitSha, $BaseBranch
 
-Wait-Job -Job @($claudeJob, $codexJob) | Out-Null
+$claudeLines = [System.Collections.Generic.List[string]]::new()
+$codexLines  = [System.Collections.Generic.List[string]]::new()
 
-$claudeOut = (Receive-Job -Job $claudeJob) -join "`n"
-$codexOut  = (Receive-Job -Job $codexJob) -join "`n"
+while ($claudeJob.State -eq "Running" -or $codexJob.State -eq "Running") {
+    $cChunk = @(Receive-Job -Job $claudeJob -ErrorAction SilentlyContinue)
+    foreach ($line in $cChunk) {
+        $s = $line.ToString()
+        $claudeLines.Add($s)
+        if ($s -match '^\[(Connected|Action|Completed)') {
+            Write-Output "[Claude] $s"
+        }
+    }
+    $xChunk = @(Receive-Job -Job $codexJob -ErrorAction SilentlyContinue)
+    foreach ($line in $xChunk) {
+        $s = $line.ToString()
+        $codexLines.Add($s)
+        if ($s -match '^\[(Connected|Action|Done|Completed)') {
+            Write-Output "[Codex] $s"
+        }
+    }
+    Start-Sleep -Milliseconds 800
+}
+
+foreach ($line in @(Receive-Job -Job $claudeJob -ErrorAction SilentlyContinue)) {
+    $claudeLines.Add($line.ToString())
+}
+foreach ($line in @(Receive-Job -Job $codexJob -ErrorAction SilentlyContinue)) {
+    $codexLines.Add($line.ToString())
+}
 
 Remove-Job -Job @($claudeJob, $codexJob) -Force -ErrorAction SilentlyContinue
 
-$elapsed = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
+$claudeOut = ($claudeLines -join "`n")
+$codexOut  = ($codexLines -join "`n")
+$elapsed   = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
 
+Write-Output ""
 Write-Output "================================================================"
 Write-Output "  UNIFIED AI COUNCIL REVIEW REPORT (Parallel Execution: ${elapsed}s)"
 Write-Output "================================================================"

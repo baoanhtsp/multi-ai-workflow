@@ -36,10 +36,14 @@ New-Item -ItemType Directory -Force -Path $codexSkillAgentsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $codexMultiAiAgentsDir | Out-Null
 
 # 2. Helper to replace hardcoded C:\Users\Admin with current user's $env:USERPROFILE
+#    Writes UTF-8 WITHOUT BOM for .md/.yaml files so YAML frontmatter parsers (like Rust codex_core) never fail,
+#    and UTF-8 WITH BOM for .ps1 scripts so Windows PowerShell 5.1 reads Unicode strings accurately.
 function Copy-WithUserPath([string]$src, [string]$dest) {
     $content = Get-Content -Path $src -Raw -Encoding UTF8
     $content = $content.Replace("C:\Users\Admin", $env:USERPROFILE)
-    Set-Content -Path $dest -Value $content -Encoding UTF8
+    $useBom = $dest.EndsWith(".ps1", [System.StringComparison]::OrdinalIgnoreCase)
+    $enc = New-Object System.Text.UTF8Encoding($useBom)
+    [System.IO.File]::WriteAllText($dest, $content, $enc)
 }
 
 # 3. Install Antigravity Global Rules & Skills (/multi-ai + alias /claude-leader)
@@ -47,8 +51,9 @@ Copy-WithUserPath "$repoRoot\antigravity\rules\claude-leader-workflow.md" "$gemi
 
 $ruleBody = (Get-Content -Path "$repoRoot\antigravity\rules\claude-leader-workflow.md" -Raw -Encoding UTF8) -replace "(?s)^---.*?---\s*", ""
 $ruleBody = $ruleBody.Replace("C:\Users\Admin", $env:USERPROFILE)
-Set-Content -Path "$geminiConfigDir\GEMINI.md" -Value $ruleBody -Encoding UTF8
-Set-Content -Path "$geminiDir\GEMINI.md" -Value $ruleBody -Encoding UTF8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText("$geminiConfigDir\GEMINI.md", $ruleBody, $utf8NoBom)
+[System.IO.File]::WriteAllText("$geminiDir\GEMINI.md", $ruleBody, $utf8NoBom)
 
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\SKILL.md" "$geminiSkillDir\SKILL.md"
 if (Test-Path "$repoRoot\antigravity\skills\multi-ai\SKILL.md") {

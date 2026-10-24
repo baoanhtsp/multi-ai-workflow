@@ -1131,13 +1131,24 @@ if ($action === 'init_spec') {
         $projectName = basename($realTarget);
     }
 
+    $gitInitialized = false;
+    if (!is_dir($realTarget . '\\.git')) {
+        $gitOut = [];
+        $gitRc = 0;
+        @exec('git -C ' . escapeshellarg($realTarget) . ' init 2>&1', $gitOut, $gitRc);
+        if ($gitRc === 0 && is_dir($realTarget . '\\.git')) {
+            $gitInitialized = true;
+        }
+    }
+
     $specDest = $realTarget . '\\SPEC.md';
     if (is_file($specDest)) {
         respondJson([
             'ok' => true,
             'created' => false,
+            'git_initialized' => $gitInitialized,
             'spec_path' => $specDest,
-            'message' => 'SPEC.md already exists in ' . $projectName,
+            'message' => ($gitInitialized ? 'Initialized Git repository; ' : '') . 'SPEC.md already exists in ' . $projectName,
         ]);
     }
 
@@ -1155,8 +1166,9 @@ if ($action === 'init_spec') {
             respondJson([
                 'ok' => true,
                 'created' => false,
+                'git_initialized' => $gitInitialized,
                 'spec_path' => $specDest,
-                'message' => 'SPEC.md already exists in ' . $projectName,
+                'message' => ($gitInitialized ? 'Initialized Git repository; ' : '') . 'SPEC.md already exists in ' . $projectName,
             ]);
         }
         respondJson(['ok' => false, 'error' => 'Permission denied or unable to create SPEC.md in target folder.'], 500);
@@ -1174,8 +1186,9 @@ if ($action === 'init_spec') {
     respondJson([
         'ok' => true,
         'created' => true,
+        'git_initialized' => $gitInitialized,
         'spec_path' => $specDest,
-        'message' => 'Successfully initialized SPEC.md in ' . $projectName,
+        'message' => 'Successfully initialized ' . ($gitInitialized ? 'Git & ' : '') . 'SPEC.md in ' . $projectName,
     ]);
 }
 
