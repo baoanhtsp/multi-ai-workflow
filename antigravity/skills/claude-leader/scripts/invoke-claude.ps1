@@ -76,11 +76,11 @@ if (-not $claudeExe -or -not (Test-Path $claudeExe)) {
     exit 1
 }
 
-# 2. Configure Token-Optimal Flags per Role
-# NOTE: Never pass an empty string "" in @roleFlags to native .exe in PowerShell 5.1,
-# because PS 5.1 drops empty strings and shifts the next flag (--append-system-prompt) into --tools!
+# 2. Configure Token-Optimal Flags per Role with Real-Time stream-json Output
 $commonFlags = @(
     "-p",
+    "--verbose",
+    "--output-format", "stream-json",
     "--disable-slash-commands",
     "--strict-mcp-config",
     "--exclude-dynamic-system-prompt-sections"
@@ -90,7 +90,6 @@ $sessionFlag = if ($ContinueSession) { "--continue" } else { "--no-session-persi
 
 switch ($Role) {
     "architect" {
-        # Opus: Architecture, API contract, SPEC.md authoring & UI design system seed
         $model  = if ($ModelOverride) { $ModelOverride } else { "opus" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "high" }
         $roleFlags = @(
@@ -105,7 +104,6 @@ switch ($Role) {
         )
     }
     "frontend" {
-        # Sonnet: 100% Frontend implementation with restricted file tools only (no Bash/Grep wandering)
         $model  = if ($ModelOverride) { $ModelOverride } else { "sonnet" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "medium" }
         $roleFlags = @(
@@ -120,7 +118,6 @@ switch ($Role) {
         )
     }
     "reviewer" {
-        # Sonnet: Code review & scoring based on pre-collected git diff + test output
         $model  = if ($ModelOverride) { $ModelOverride } else { "sonnet" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "medium" }
         $roleFlags = @(
@@ -135,7 +132,6 @@ switch ($Role) {
         )
     }
     "ui-tweak" {
-        # Haiku: Fast, low-cost minor UI adjustments, CSS fixes, or API variable alignment checks
         $model  = if ($ModelOverride) { $ModelOverride } else { "haiku" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "low" }
         $roleFlags = @(
@@ -153,7 +149,6 @@ switch ($Role) {
 
 Push-Location $WorkDir
 try {
-    # Automatically attach compact workspace file snapshot for architect/frontend if not already in prompt
     if ($Role -in @("architect", "frontend") -and (Test-Path $WorkDir)) {
         $topItems = @(Get-ChildItem -Path $WorkDir -Force -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -notin @('.git', 'node_modules', 'vendor', '.idea', '.vscode') } |
@@ -183,13 +178,61 @@ try {
         exit 1
     }
 
-    Write-Output "[$(Get-Date -Format 'HH:mm:ss')] Invoking Claude Code (Role: $Role | Model: $model | Effort: $effort | WorkDir: $WorkDir)..."
     $allArgs = $commonFlags + $roleFlags
-    $capturedOut = [System.Collections.Generic.List[string]]::new()
+    $capturedText = [System.Collections.Generic.List[string]]::new()
+    $resolvedModel = $model
+    $realInTokens  = 0
+    $realOutTokens = 0
+    $realCostUsd   = 0.0
+
     $Prompt | & $claudeExe @allArgs 2>&1 | ForEach-Object {
-        $line = $_.ToString()
-        $capturedOut.Add($line)
-        Write-Output $line
+        $rawLine = $_.ToString()
+        if (-not $rawLine.Trim().StartsWith("{")) {
+            Write-Output $rawLine
+            return
+        }
+        try {
+            $ev = $rawLine | ConvertFrom-Json -ErrorAction Stop
+            switch ($ev.type) {
+                "system" {
+                    if ($ev.subtype -eq "init") {
+                        if ($ev.model) { $resolvedModel = [string]$ev.model }
+                        Write-Output "[Connected] Model: $resolvedModel | Role: $Role | Effort: $effort"
+                    }
+                }
+                "assistant" {
+                    if ($ev.message -and $ev.message.content) {
+                        foreach ($block in $ev.message.content) {
+                            if ($block.type -eq "tool_use") {
+                                $tName = $block.name
+                                $tTarget = if ($block.input.file_path) { $block.input.file_path } elseif ($block.input.path) { $block.input.path } else { "" }
+                                Write-Output "[Action] $tName $tTarget"
+                            } elseif ($block.type -eq "text" -and $block.text) {
+                                $capturedText.Add([string]$block.text)
+                                Write-Output $block.text
+                            }
+                        }
+                    }
+                }
+                "result" {
+                    if ($null -ne $ev.total_cost_usd) {
+                        $realCostUsd = [Math]::Round([double]$ev.total_cost_usd, 5)
+                    }
+                    if ($ev.usage) {
+                        $realInTokens  = [int]($ev.usage.input_tokens + $ev.usage.cache_read_input_tokens + $ev.usage.cache_creation_input_tokens)
+                        $realOutTokens = [int]$ev.usage.output_tokens
+                    }
+                    if ($capturedText.Count -eq 0 -and $ev.result) {
+                        $capturedText.Add([string]$ev.result)
+                        Write-Output $ev.result
+                    }
+                    $durSec = if ($ev.duration_ms) { [Math]::Round($ev.duration_ms / 1000.0, 1) } else { 0 }
+                    Write-Output "`n[Completed in ${durSec}s | Tokens: $realInTokens in / $realOutTokens out | Actual Cost: `$$realCostUsd]"
+                }
+            }
+        } catch {
+            Write-Output $rawLine
+        }
     }
 
     try {
@@ -198,7 +241,7 @@ try {
         if (-not (Test-Path $auditDir)) {
             New-Item -ItemType Directory -Path $auditDir -Force | Out-Null
         }
-        $fullOut = ($capturedOut -join "`n")
+        $fullOut = ($capturedText -join "`n")
         $verdict = if ($fullOut -match '\bCHANGES_REQUESTED\b') {
             "CHANGES_REQUESTED"
         } elseif ($fullOut -match '\bAPPROVED\b') {
@@ -211,25 +254,27 @@ try {
         } else {
             ""
         }
-        $inTokens  = [Math]::Max(1, [int][Math]::Ceiling($Prompt.Length / 3.8))
-        $outTokens = [Math]::Max(1, [int][Math]::Ceiling($fullOut.Length / 3.8))
-        $rates = if ($model -match 'opus') { @{ in = 15.0; out = 75.0 } }
-                 elseif ($model -match 'haiku') { @{ in = 0.8; out = 4.0 } }
-                 elseif ($model -match 'fable') { @{ in = 6.0; out = 30.0 } }
-                 else { @{ in = 3.0; out = 15.0 } }
-        $costUsd = [Math]::Round(($inTokens * $rates.in + $outTokens * $rates.out) / 1000000.0, 5)
+        if ($realInTokens -le 0)  { $realInTokens  = [Math]::Max(1, [int][Math]::Ceiling($Prompt.Length / 3.8)) }
+        if ($realOutTokens -le 0) { $realOutTokens = [Math]::Max(1, [int][Math]::Ceiling($fullOut.Length / 3.8)) }
+        if ($realCostUsd -le 0) {
+            $rates = if ($resolvedModel -match 'opus') { @{ in = 15.0; out = 75.0 } }
+                     elseif ($resolvedModel -match 'haiku') { @{ in = 0.8; out = 4.0 } }
+                     elseif ($resolvedModel -match 'fable') { @{ in = 6.0; out = 30.0 } }
+                     else { @{ in = 3.0; out = 15.0 } }
+            $realCostUsd = [Math]::Round(($realInTokens * $rates.in + $realOutTokens * $rates.out) / 1000000.0, 5)
+        }
         [ordered]@{
             Timestamp    = (Get-Date).ToString("o")
             Tool         = "claude"
             Role         = $Role
-            Model        = $model
+            Model        = $resolvedModel
             Effort       = $effort
             WorkDir      = $WorkDir
             PromptChars  = $Prompt.Length
             OutputChars  = $fullOut.Length
-            InputTokens  = $inTokens
-            OutputTokens = $outTokens
-            CostUsd      = $costUsd
+            InputTokens  = $realInTokens
+            OutputTokens = $realOutTokens
+            CostUsd      = $realCostUsd
             Score        = $score
             Verdict      = $verdict
         } | ConvertTo-Json -Compress | Add-Content -Path $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue
