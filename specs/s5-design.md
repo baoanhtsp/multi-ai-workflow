@@ -25,6 +25,8 @@ Tests live next to the code: `server/features/<name>/*.test.ts` (run with `node 
 | `job` | job id | `before` = the lowest-numbered ref under `refs/maw/checkpoints/<job_id>/` (S1, `git for-each-ref`); `after` = `refs/maw/checkpoints/<job_id>/finish` when it exists, else the working tree (`git diff <before>` + untracked files not in `git ls-tree -r --name-only <before>`). The working dir is the job meta's `worktree` (S1) when set, else its `project_path`. No checkpoint ⇒ `404 "No checkpoint for this job."` (UI offers the working-tree diff instead) | job worktree / project when `after` is the working tree, else `null` |
 | `commit` | sha or ref | `git diff-tree -p --root -m --first-parent --no-color -U<ctx> <ref>` | the project (reject = revert that hunk from the working tree) |
 
+For `source=job`, `project_path` is optional: the server takes it from the job meta (validated with `resolveProjectPath`), so the job action only needs the job id.
+
 Common query params: `context` (0–20, default 3), `ignore_ws` (`1` ⇒ `-w`), `path` (limit to one path, `-- <path>`), `full` (`1` lifts the per-file guard for that `path`).
 
 ### 1.2 Parser and guards (server-side, in-house)
@@ -61,9 +63,9 @@ Common query params: `context` (0–20, default 3), `ignore_ws` (`1` ⇒ `-w`), 
   2. Build a patch = the file header (`diff --git`, mode / new / deleted / rename lines, `---`, `+++`) + the hunk (or all hunks), written to a temp file with LF endings preserved byte-for-byte from the raw diff.
   3. `git apply --check -R --whitespace=nowarn <patch>` then `git apply -R --whitespace=nowarn <patch>` in `target_path`. A failed check ⇒ `409 { error: "Patch does not apply cleanly.", detail }` (snapshot is kept).
   4. Binary files: reject of the whole file only, `git checkout <before> -- <path>` (`HEAD` for `worktree`; a new untracked binary file is deleted). Hunks of binary files do not exist.
-- Response `{ ok, action, path, hunk_id, state, snapshot_ref? }`. Reject writes the audit line.
+- Response `{ ok, action, path, hunk_id, state: "accept"|"reject"|null, snapshot_ref? }` (the stored session state is `accepted` / `rejected`). Reject writes the audit line.
 
-**`POST review_comment { project_path, source, ref, base, op: "add"|"edit"|"delete"|"resolve", id?, path, line, side: "new"|"old", quote, body }`**
+**`POST review_comment { project_path, source, ref, base, op: "add"|"edit"|"delete"|"resolve", id?, path, line, side: "new"|"old", quote, body, resolved? }`** (`resolve` sets `resolved`, default `true`, so a comment can be reopened)
 → `{ ok, comments }`. Comment = `{ id (8 hex), path, line, side, quote (≤ 500 chars), body (1–4000 chars), created_at, updated_at, resolved: false, sent_at: null }`. Max 500 comments per session.
 
 **`POST review_send_fix { project_path, source, ref, base, agent?, role?, model?, effort?, note?, dry_run? }`**
@@ -126,7 +128,7 @@ Session file: `$MAW_HOME/data/review/sessions/<review_key>.json` = `{ review_key
 - Resolving `exe`: an absolute `.exe` path that exists; else search `PATH` × `PATHEXT`. If it resolves to a `.cmd` / `.bat` shim (never run: that needs `cmd.exe`), look for the real exe of VS Code-family shims: `<shim dir>\..\{Code.exe, Code - Insiders.exe, Cursor.exe, Windsurf.exe, VSCodium.exe}`. Nothing found ⇒ `400 "Editor '<cmd>' was not found as an .exe. Set its full path in Files → Editor."`.
 - ⇒ `{ ok, command: [exe, ...args] }`.
 
-**`GET files_config`** / **`POST files_config { editor: string[] }`** → `{ ok, editor, default_editor }`. Default `["code", "--goto", "{file}:{line}"]`. Validation: 1–16 items, each a string ≤ 500 chars without NUL, first item non-empty, at least one item contains `{file}`. Stored in `$MAW_HOME/data/files/config.json`.
+**`POST files_config {}`** (read) / **`POST files_config { editor: string[] }`** (save) — POST only, because a feature action has exactly one method (F0) → `{ ok, editor, default_editor }`. Default `["code", "--goto", "{file}:{line}"]`. Validation: 1–16 items, each a string ≤ 500 chars without NUL, first item non-empty, at least one item contains `{file}`. Stored in `$MAW_HOME/data/files/config.json`.
 
 **`GET files_history?project_path=&path=&limit=30`** (path optional = whole repo)
 → `{ ok, commits: [{ sha, short, author, date, subject, additions, deletions }] }` from `git log --follow -n <limit> --format=%x1e%H%x1f%h%x1f%an%x1f%aI%x1f%s --numstat -- <path>` (`--follow` only with a path). Limit 1–200.
@@ -145,7 +147,7 @@ Session file: `$MAW_HOME/data/review/sessions/<review_key>.json` = `{ review_key
 | :--- | :--- | :--- |
 | `live` | job `RUNNING`, agent `antigravity`, conversation id known | `invoke-antigravity.ps1 -Action send -ConversationId <cid> -WorkDir <proj> -Title "Steer from Mission Control" -PromptFile <file> -NoWait` (runCommand, 60 s timeout) |
 | `queue` | job `RUNNING`, any other agent | stored; delivered as the next turn (`resume` or `summary`) as soon as the job is no longer `RUNNING`. Several queued messages for a job are merged into one turn |
-| `resume` | job finished, session ref known **and** the session still exists | a **steer job** (see 3.3) running the agent's own resume command with the message on stdin |
+| `resume` | job finished, session ref known **and** the session still exists | a **steer job** (see 3.3) running the agent's own resume command with the message on stdin; for Antigravity: `invoke-antigravity.ps1 -Action send -ConversationId <cid> -PromptFile <steer prompt>` (waits for the turn, output in the steer job log) |
 | `summary` | job finished, always possible | `ctx.startJob({ mode: "task", agent, role, model, effort, project_path, prompt })` with the previous context (§9.2 "a new job that starts with the previous summary") |
 
 `auto` (default) = `live` → `queue` while running; `resume` → `summary` when finished.
@@ -207,6 +209,7 @@ Role outside the role set ⇒ `backend`; legacy `claude|codex` modes map to agen
 - `MAW.ext.steer.open(job_id)` for S6.
 
 ## 4. Requests to Tech Lead
+0. **Feature routes with two methods**: allow a feature action to declare `GET` and `POST` (e.g. `methods: ['GET', 'POST']`), so read / write pairs like `files_config` do not have to be POST-only.
 1. **Tests**: let `npm test` also run `server/features/*/*.test.ts` (`node --test server/tests/*.test.ts server/features/*/*.test.ts`), so feature tests stay inside each stream's paths.
 2. **`MAW.watchJob(job_id)`** in `index.html`: attach the live job box (log, SSE, cancel, job actions) to an existing job id, so steer / fix jobs can be followed in the main log box. Until then the steer dialog shows its own tail.
 3. **Runner reuse**: export a `launchJob({ meta, commandLine, prompt })` helper from `server/actions/jobs.ts` (the runner template + launcher) so `steer/launch.ts` can drop its copy of the template.
