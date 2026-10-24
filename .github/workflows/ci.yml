@@ -32,7 +32,7 @@ jobs:
           foreach ($script in $scripts) {
               $errors = $null
               [void][System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$null, [ref]$errors)
-              if ($errors -and $errors.Count -gt 0) {
+          if ($errors -and $errors.Count -gt 0) {
                   $hasSyntaxErrors = $true
                   Write-Host "❌ Syntax error(s) in $($script.FullName):" -ForegroundColor Red
                   foreach ($err in $errors) {
@@ -60,7 +60,10 @@ jobs:
               "antigravity/rules/claude-leader-workflow.md",
               "antigravity/skills/claude-leader/SKILL.md",
               "claude/CLAUDE.md",
-              "claude/commands/antigravity.md"
+              "claude/commands/antigravity.md",
+              "codex/AGENTS.md",
+              "codex/skills/multi-ai-leader/SKILL.md",
+              "codex/skills/multi-ai-leader/agents/openai.yaml"
           )
 
           $missing = @()
@@ -86,12 +89,14 @@ jobs:
               throw "install.ps1 exited with code $LASTEXITCODE"
           }
 
-          $expectedTargets = @(
+          $installedFiles = @(
               "$env:USERPROFILE\.gemini\config\skills\claude-leader\SKILL.md",
-              "$env:USERPROFILE\.claude\CLAUDE.md"
+              "$env:USERPROFILE\.claude\CLAUDE.md",
+              "$env:USERPROFILE\.codex\AGENTS.md",
+              "$env:USERPROFILE\.codex\skills\multi-ai-leader\SKILL.md"
           )
 
-          foreach ($target in $expectedTargets) {
+          foreach ($target in $installedFiles) {
               if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
                   throw "Installer verification failed: expected file not created at $target"
               }
