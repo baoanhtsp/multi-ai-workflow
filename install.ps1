@@ -14,6 +14,7 @@ $geminiConfigDir = Join-Path $geminiDir "config"
 $geminiRulesDir = Join-Path $geminiConfigDir "rules"
 $geminiSkillDir = Join-Path $geminiConfigDir "skills\claude-leader"
 $geminiScriptsDir = Join-Path $geminiSkillDir "scripts"
+$geminiTemplatesDir = Join-Path $geminiSkillDir "templates"
 
 $claudeDir = Join-Path $env:USERPROFILE ".claude"
 $claudeCommandsDir = Join-Path $claudeDir "commands"
@@ -21,6 +22,7 @@ $claudeCommandsDir = Join-Path $claudeDir "commands"
 # 1. Create target directories
 New-Item -ItemType Directory -Force -Path $geminiRulesDir | Out-Null
 New-Item -ItemType Directory -Force -Path $geminiScriptsDir | Out-Null
+New-Item -ItemType Directory -Force -Path $geminiTemplatesDir | Out-Null
 New-Item -ItemType Directory -Force -Path $claudeCommandsDir | Out-Null
 
 # 2. Helper to replace hardcoded C:\Users\Admin with current user's $env:USERPROFILE
@@ -42,7 +44,12 @@ Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\SKILL.md" "$gemini
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-claude.ps1" "$geminiScriptsDir\invoke-claude.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-codex.ps1" "$geminiScriptsDir\invoke-codex.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-antigravity.ps1" "$geminiScriptsDir\invoke-antigravity.ps1"
+Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-council-review.ps1" "$geminiScriptsDir\invoke-council-review.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\save-agentapi-env.ps1" "$geminiScriptsDir\save-agentapi-env.ps1"
+
+if (Test-Path "$repoRoot\templates\SPEC.template.md") {
+    Copy-WithUserPath "$repoRoot\templates\SPEC.template.md" "$geminiTemplatesDir\SPEC.template.md"
+}
 
 # 4. Install Claude Code Global Memory & Slash Command (/antigravity)
 Copy-WithUserPath "$repoRoot\claude\CLAUDE.md" "$claudeDir\CLAUDE.md"

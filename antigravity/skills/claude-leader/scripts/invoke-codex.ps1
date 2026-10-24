@@ -85,6 +85,7 @@ try {
         }
     }
 
+    $capturedOut = @()
     switch ($Role) {
         "review-diff" {
             # Native non-interactive git diff / commit code review
@@ -101,9 +102,11 @@ try {
             }
 
             if ($Prompt) {
-                $Prompt | & $codexExe @argsList -
+                $outputLines = $Prompt | & $codexExe @argsList - | Tee-Object -Variable capturedOut
+                $outputLines
             } else {
-                & $codexExe @argsList
+                $outputLines = & $codexExe @argsList | Tee-Object -Variable capturedOut
+                $outputLines
             }
         }
         "critic" {
@@ -118,7 +121,8 @@ try {
             if ($ModelOverride) {
                 $argsList += @("-m", $ModelOverride)
             }
-            $Prompt | & $codexExe @argsList -
+            $outputLines = $Prompt | & $codexExe @argsList - | Tee-Object -Variable capturedOut
+            $outputLines
         }
         "coder" {
             # Non-interactive implementation / test writer (optionally in an isolated git worktree)
@@ -134,9 +138,41 @@ try {
             if ($ModelOverride) {
                 $argsList += @("-m", $ModelOverride)
             }
-            $Prompt | & $codexExe @argsList -
+            $outputLines = $Prompt | & $codexExe @argsList - | Tee-Object -Variable capturedOut
+            $outputLines
         }
     }
+
+    try {
+        $auditFile = Join-Path $env:USERPROFILE ".gemini\antigravity\multi-ai-audit.jsonl"
+        $auditDir = Split-Path -Parent $auditFile
+        if (-not (Test-Path $auditDir)) {
+            New-Item -ItemType Directory -Path $auditDir -Force | Out-Null
+        }
+        $fullOut = ($capturedOut -join "`n")
+        $verdict = if ($fullOut -match '\bCHANGES_REQUESTED\b') {
+            "CHANGES_REQUESTED"
+        } elseif ($fullOut -match '\bAPPROVED\b') {
+            "APPROVED"
+        } else {
+            "COMPLETED"
+        }
+        $score = if ($fullOut -match '\b(\d+(?:\.\d+)?\s*/\s*10)\b') {
+            $Matches[1]
+        } else {
+            ""
+        }
+        [ordered]@{
+            Timestamp   = (Get-Date).ToString("o")
+            Tool        = "codex"
+            Role        = $Role
+            Model       = $(if ($ModelOverride) { $ModelOverride } else { "default" })
+            WorkDir     = $WorkDir
+            PromptChars = $(if ($Prompt) { $Prompt.Length } else { 0 })
+            Score       = $score
+            Verdict     = $verdict
+        } | ConvertTo-Json -Compress | Add-Content -Path $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch {}
 } finally {
     Pop-Location
 }
