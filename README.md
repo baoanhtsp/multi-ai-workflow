@@ -1,4 +1,4 @@
-# 🚀 Multi-AI Coding Workflow: Antigravity (Gemini 4 Argon) + Claude Code + OpenAI Codex CLI
+﻿# 🚀 Multi-AI Coding Workflow: Antigravity (Gemini 4 Argon) + Claude Code + OpenAI Codex CLI
 
 Hệ thống điều phối **Đa Tác Tử AI (Multi-AI Coding Orchestration)** theo kiến trúc **Spec-Driven Development (SDD)** + **Git Branch Isolation** + **Bounded Review Loop**, giúp kết hợp sức mạnh tốt nhất của cả 3 nền tảng AI hàng đầu hiện nay mà vẫn **tiết kiệm 70%–85% Token của Claude**.
 
@@ -73,7 +73,7 @@ flowchart TD
 Clone repository này về máy và chạy script `install.ps1` bằng PowerShell:
 
 ```powershell
-git clone https://github.com/<your-username>/multi-ai-workflow.git
+git clone https://github.com/baoanhtsp/multi-ai-workflow.git
 cd multi-ai-workflow
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
@@ -131,3 +131,4 @@ multi-ai-workflow/
     └── commands/
         └── antigravity.md                                 # Lệnh tắt /antigravity bên trong Claude Code
 ```
+
