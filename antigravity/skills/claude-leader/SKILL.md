@@ -11,10 +11,10 @@ description: >-
 ## 1. Core Division of Responsibilities (STRICT WHEN ACTIVE)
 
 - **You (Antigravity - Main Backend Coder, Branch Coordinator & Context Filter)**:
-  - Scan the workspace, read existing files/database schemas, and prepare ultra-compact context summaries (`SPEC.md`) so Claude and Codex NEVER waste tokens running `Grep`, `Glob`, or exploring the repo.
+  - Scan the workspace, read existing files/database schemas, and prepare ultra-compact context summaries (`SPEC.md` based on `~/.gemini/config/skills/claude-leader/templates/SPEC.template.md`) so Claude and Codex NEVER waste tokens running `Grep`, `Glob`, or exploring the repo.
   - Write **Backend, API, Database, Core Logic, and Automated Tests** (using parallel Subagents on separate branches when appropriate).
   - **NEVER write or edit Frontend files yourself** (`*.html`, `*.css`, frontend `*.js`/`*.jsx`/`*.tsx`/`*.vue`/`*.blade.php`/`*.ejs`). **100% of Frontend MUST be delegated to Claude Code** (`-Role frontend` or `-Role ui-tweak`).
-  - **Automatic Callback & Review Submission**: As soon as you finish Backend/Test tasks (including when woken up by `"Task from Claude Leader"`), automatically notify Claude and submit your `git diff` + test logs via `invoke-claude.ps1 -Role reviewer -IncludeGitDiff` (add `-ContinueSession` to push your report directly into the latest Claude conversation in that project directory) and/or Codex (`-Role review-diff` / `-Role critic`) for grading (`X/10`) before committing (`git commit`).
+  - **Automatic Callback & Review Submission**: As soon as you finish Backend/Test tasks (including when woken up by `"Task from Claude Leader"`), automatically notify Claude and submit your `git diff` + test logs via `invoke-council-review.ps1` (runs Claude + Codex in parallel) or `invoke-claude.ps1 -Role reviewer -IncludeGitDiff` (add `-ContinueSession` to push your report directly into the latest Claude conversation in that project directory) for grading (`X/10`) before committing (`git commit`).
 
 - **Claude Code (`claude.exe` - Tech Lead, Reviewer & 100% Frontend)**:
   - **Opus (`architect` role)**: Designs overall architecture, Database/API Contracts (`SPEC.md`), delegates Backend tasks, and defines the Frontend Design System.
@@ -84,16 +84,28 @@ description: >-
   -Prompt "<scoped_coding_task>"
 ```
 
+### C. Parallel AI Council Review ([invoke-council-review.ps1](./scripts/invoke-council-review.ps1))
+
+> Runs **Claude Sonnet (`-Role reviewer -IncludeGitDiff`)** and **OpenAI Codex (`-Role review-diff`)** simultaneously as parallel background jobs, cutting total review time in half and logging combined audit metrics to `~/.gemini/antigravity/multi-ai-audit.jsonl`.
+
+```powershell
+# Run Claude Sonnet Reviewer + OpenAI Codex Diff Reviewer in parallel:
+& "$env:USERPROFILE\.gemini\config\skills\claude-leader\scripts\invoke-council-review.ps1" `
+  -WorkDir "<project_path>" `
+  -Prompt "Backend & Tests completed. Verify against SPEC.md and score X/10."
+```
+
 ---
 
 ## 3. Step-by-Step Standard Loop (Spec-Driven + Bounded Review)
 
 1. **Pre-Filter Context & Lock `SPEC.md` (Antigravity + Opus)**:
+   - Use `~/.gemini/config/skills/claude-leader/templates/SPEC.template.md` as the starting structure for `SPEC.md`.
    - Extract essential repo context and call `invoke-claude.ps1 -Role architect` to lock down API Contracts, schemas, and file boundaries in `SPEC.md`.
 2. **Parallel Implementation by File Boundaries**:
    - **Backend/Core**: Antigravity (or parallel Subagents / Codex `-Role coder`) implements Backend/API/DB/Tests on isolated branches.
    - **100% Frontend**: Claude (`invoke-claude.ps1 -Role frontend` or `ui-tweak`) implements all UI/Frontend files.
 3. **Bounded Review Loop & Automatic Callback (Max 2 Rounds)**:
    - Run automated tests first.
-   - Submit `git diff` + test logs to Claude (`invoke-claude.ps1 -Role reviewer -IncludeGitDiff`, optionally with `-ContinueSession`) and/or Codex (`invoke-codex.ps1 -Role review-diff` / `critic`).
+   - Submit `git diff` + test logs via `invoke-council-review.ps1 -WorkDir "<project_path>"` (or individually via `invoke-claude.ps1 -Role reviewer -IncludeGitDiff -ContinueSession` and `invoke-codex.ps1 -Role review-diff`).
    - Fix all blocking findings until `APPROVED`, then merge branches and `git commit`.
