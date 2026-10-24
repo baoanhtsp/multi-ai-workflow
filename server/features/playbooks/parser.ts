@@ -129,13 +129,15 @@ export function parsePlaybookContent(content: string): PlaybookItem[] {
   return items;
 }
 
+export type TickBoxResult = 'ticked' | 'already' | 'failed';
+
 export function tickBoxInFile(
   filePath: string,
   targetLine: number,
   targetText: string
-): boolean {
+): TickBoxResult {
   if (!fs.existsSync(filePath)) {
-    return false;
+    return 'failed';
   }
 
   const rawBuffer = fs.readFileSync(filePath);
@@ -151,10 +153,21 @@ export function tickBoxInFile(
   const lines = content.split(/\r?\n/);
 
   const firstTextLine = targetText.split('\n')[0]!.trim();
-  let modified = false;
+  const isAlreadyChecked = (line: string) =>
+    /^\s*[-*]\s+\[[xX]\]/.test(line) && line.includes(firstTextLine);
 
   // Try the targetLine first (1-based)
   const lineIdx = targetLine - 1;
+  if (lineIdx >= 0 && lineIdx < lines.length) {
+    const candidate = lines[lineIdx]!;
+    if (isAlreadyChecked(candidate)) {
+      return 'already';
+    }
+  }
+
+  let modified = false;
+
+  // Try the targetLine first (1-based)
   if (lineIdx >= 0 && lineIdx < lines.length) {
     const candidate = lines[lineIdx]!;
     if (/^\s*[-*]\s+\[ \]/i.test(candidate) && candidate.includes(firstTextLine)) {
@@ -175,35 +188,41 @@ export function tickBoxInFile(
     }
   }
 
-  if (modified) {
-    const updatedBody = lines.join(lineEnding);
-    const finalBuffer = hasBom
-      ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(updatedBody, 'utf8')])
-      : Buffer.from(updatedBody, 'utf8');
-
-    // Atomic write
-    const tmpFile = `${filePath}.tmp.${Date.now()}`;
-    fs.writeFileSync(tmpFile, finalBuffer);
-    let renamed = false;
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        fs.renameSync(tmpFile, filePath);
-        renamed = true;
-        break;
-      } catch {
-        const end = Date.now() + 15 * (attempt + 1);
-        while (Date.now() < end) {}
-      }
+  if (!modified) {
+    const alreadyAnywhere = lines.some((l) => isAlreadyChecked(l));
+    if (alreadyAnywhere) {
+      return 'already';
     }
-    if (!renamed) {
-      try {
-        fs.unlinkSync(tmpFile);
-      } catch {
-        // ignore cleanup
-      }
-      return false;
-    }
+    return 'failed';
   }
 
-  return modified;
+  const updatedBody = lines.join(lineEnding);
+  const finalBuffer = hasBom
+    ? Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(updatedBody, 'utf8')])
+    : Buffer.from(updatedBody, 'utf8');
+
+  // Atomic write
+  const tmpFile = `${filePath}.tmp.${Date.now()}`;
+  fs.writeFileSync(tmpFile, finalBuffer);
+  let renamed = false;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      fs.renameSync(tmpFile, filePath);
+      renamed = true;
+      break;
+    } catch {
+      const end = Date.now() + 15 * (attempt + 1);
+      while (Date.now() < end) {}
+    }
+  }
+  if (!renamed) {
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch {
+      // ignore cleanup
+    }
+    return 'failed';
+  }
+
+  return 'ticked';
 }

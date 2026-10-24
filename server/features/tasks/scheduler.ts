@@ -90,8 +90,13 @@ export function tryAcquireLeaderLock(ctx: MawFeatureContext): boolean {
 
   // Check if an existing lock exists
   let existing: SchedulerLock | null = null;
+  let lockFileExists = false;
+  let lockMtimeMs = 0;
   try {
     if (fs.existsSync(lockFile)) {
+      lockFileExists = true;
+      const st = fs.statSync(lockFile);
+      lockMtimeMs = st.mtimeMs;
       const raw = fs.readFileSync(lockFile, 'utf8').trim();
       if (raw) {
         existing = JSON.parse(raw) as SchedulerLock;
@@ -101,36 +106,76 @@ export function tryAcquireLeaderLock(ctx: MawFeatureContext): boolean {
     existing = null;
   }
 
-  if (existing) {
-    // If the existing lock has my pid, refresh it
-    if (existing.pid === process.pid) {
-      if (!myLeaderToken || !existing.token) {
-        myLeaderToken = existing.token || crypto.randomBytes(16).toString('hex');
-        existing.token = myLeaderToken;
-      }
-      if (existing.token === myLeaderToken) {
-        existing.heartbeat_at = nowIso;
-        try {
-          writeJsonAtomic(lockFile, existing);
-          return true;
-        } catch {
-          return false;
+  if (lockFileExists) {
+    if (existing) {
+      // If the existing lock has my pid, refresh it
+      if (existing.pid === process.pid) {
+        if (!myLeaderToken || !existing.token) {
+          myLeaderToken = existing.token || crypto.randomBytes(16).toString('hex');
+          existing.token = myLeaderToken;
+        }
+        if (existing.token === myLeaderToken) {
+          existing.heartbeat_at = nowIso;
+          try {
+            writeJsonAtomic(lockFile, existing);
+            return true;
+          } catch {
+            return false;
+          }
         }
       }
+
+      const alive = existing.pid ? isProcessRunning(existing.pid) : false;
+      const heartbeatAge = Date.now() - (Date.parse(existing.heartbeat_at) || 0);
+      if (alive && heartbeatAge <= 60000) {
+        return false; // Active leader exists with fresh heartbeat
+      }
+    } else {
+      // Empty or unparsable lock file: if younger than 60s, wait/stay passive
+      const mtimeAge = Date.now() - lockMtimeMs;
+      if (mtimeAge <= 60000) {
+        return false;
+      }
     }
 
-    const alive = existing.pid ? isProcessRunning(existing.pid) : false;
-    const heartbeatAge = Date.now() - (Date.parse(existing.heartbeat_at) || 0);
-    if (alive && heartbeatAge <= 60000) {
-      return false; // Active leader exists with fresh heartbeat
-    }
-
-    // Stale lock: atomic rename to lock.stale-<ts>
-    const staleFile = `${lockFile}.stale-${Date.now()}`;
+    // Stale lock: atomic rename to unique stale file
+    const judgedStaleToken = existing?.token ?? null;
+    const staleFile = `${lockFile}.stale-${process.pid}-${Date.now()}`;
     try {
       fs.renameSync(lockFile, staleFile);
     } catch {
       // Rename failed (someone else took it or file disappeared) -> stay passive
+      return false;
+    }
+
+    // Verify token of the renamed file to guard against race where we moved a fresh lock
+    let movedToken: string | null = null;
+    try {
+      const movedRaw = fs.readFileSync(staleFile, 'utf8').trim();
+      if (movedRaw) {
+        try {
+          const parsedMoved = JSON.parse(movedRaw) as SchedulerLock;
+          movedToken = parsedMoved?.token ?? null;
+        } catch {
+          movedToken = null;
+        }
+      }
+    } catch {
+      movedToken = null;
+    }
+
+    if (movedToken !== judgedStaleToken) {
+      // We moved someone else's fresh lock! Put it back and stay passive
+      try {
+        fs.linkSync(staleFile, lockFile);
+      } catch {
+        // If lockFile already exists, leave it
+      }
+      try {
+        fs.unlinkSync(staleFile);
+      } catch {
+        // ignore
+      }
       return false;
     }
   }
@@ -255,6 +300,120 @@ function readJobLogTail(logFile: string, maxBytes = 65536): string {
   }
 }
 
+export async function reconcileStartingCard(
+  ctx: MawFeatureContext,
+  card: Card,
+  allCards: Card[],
+  usedJobIds?: Set<string>
+): Promise<{ adopted: boolean; card: Card | null }> {
+  if (!usedJobIds) {
+    usedJobIds = new Set<string>();
+    for (const c of allCards) {
+      if (c.job_id) usedJobIds.add(c.job_id);
+      if (Array.isArray(c.attempts)) {
+        for (const a of c.attempts) {
+          if (a.job_id) usedJobIds.add(a.job_id);
+        }
+      }
+    }
+  }
+
+  let bestMatch: { jobId: string; meta: JobMeta; startedTs: number } | null = null;
+  const startingAtTs = card.starting ? Math.floor(Date.parse(card.starting.at) / 1000) : 0;
+
+  try {
+    if (fs.existsSync(ctx.paths.jobsDir)) {
+      const jobFiles = fs
+        .readdirSync(ctx.paths.jobsDir)
+        .filter((f) => f.startsWith('job_') && f.endsWith('.json'));
+
+      for (const jf of jobFiles) {
+        const metaPath = path.win32.join(ctx.paths.jobsDir, jf);
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as JobMeta;
+          if (!meta.job_id || usedJobIds.has(meta.job_id)) {
+            continue;
+          }
+          const metaStartedTs =
+            meta.started_ts ??
+            (meta.started_at ? Math.floor(Date.parse(meta.started_at) / 1000) : 0);
+          const projectMatches =
+            meta.project_path &&
+            path.resolve(meta.project_path).toLowerCase() ===
+              path.resolve(card.project_path).toLowerCase();
+
+          if (projectMatches && metaStartedTs >= startingAtTs - 5) {
+            let matched = false;
+            const metaSha = (meta as unknown as Record<string, unknown>).prompt_sha256;
+            if (metaSha && metaSha === card.starting?.prompt_sha) {
+              matched = true;
+            } else {
+              const promptFile = path.win32.join(ctx.paths.jobsDir, `${meta.job_id}.prompt.txt`);
+              if (fs.existsSync(promptFile)) {
+                let promptContent = fs.readFileSync(promptFile, 'utf8');
+                if (promptContent.charCodeAt(0) === 0xfeff) promptContent = promptContent.slice(1);
+                const sha = crypto.createHash('sha256').update(promptContent).digest('hex');
+                if (sha === card.starting?.prompt_sha) {
+                  matched = true;
+                }
+              }
+            }
+
+            if (matched) {
+              // Take the earliest started_ts >= starting.at - 5
+              if (!bestMatch || metaStartedTs < bestMatch.startedTs) {
+                bestMatch = { jobId: meta.job_id, meta, startedTs: metaStartedTs };
+              }
+            }
+          }
+        } catch {
+          // skip
+        }
+      }
+    }
+  } catch {
+    // skip
+  }
+
+  if (bestMatch) {
+    usedJobIds.add(bestMatch.jobId);
+    const kind =
+      card.pending_run?.kind || (card.attempts.length === 0 ? 'start' : 'retry');
+    const attempt: TaskAttempt = {
+      n: card.attempts.length + 1,
+      job_id: bestMatch.jobId,
+      agent: card.agent,
+      role: card.role,
+      mode: card.mode,
+      kind,
+      started_at: bestMatch.meta.started_at ?? new Date().toISOString(),
+      status: 'RUNNING',
+      exit_code: null,
+      prompt_chars: card.prompt.length,
+    };
+
+    const patched = await patchCard(ctx, card.id, (c) => {
+      c.status = 'running';
+      c.job_id = bestMatch!.jobId;
+      c.status_reason = '';
+      c.started_at = c.started_at ?? attempt.started_at;
+      c.pending_run = null;
+      c.starting = null;
+      c.attempts.push(attempt);
+      if (c.attempts.length > 20) c.attempts.shift();
+    });
+    return { adopted: true, card: patched };
+  } else {
+    const patched = await patchCard(ctx, card.id, (c) => {
+      c.status = 'failed';
+      c.status_reason =
+        'start interrupted (server stopped while starting); retry to run again';
+      c.starting = null;
+    });
+    return { adopted: false, card: patched };
+  }
+}
+
 export async function startCardJob(
   ctx: MawFeatureContext,
   card: Card,
@@ -272,6 +431,26 @@ export async function startCardJob(
     }
     if (currentCard.status === 'running') {
       throw conflict(`Card ${card.id} is already running.`);
+    }
+
+    if (currentCard.starting) {
+      const startingAge = Date.now() - (Date.parse(currentCard.starting.at) || 0);
+      if (startingAge <= 30000) {
+        throw conflict('Card is starting.');
+      }
+      // Older than 30s: run reconciliation first
+      const allCards = await getCards(ctx);
+      const reconciled = await reconcileStartingCard(ctx, currentCard, allCards);
+      if (reconciled.adopted && reconciled.card) {
+        return reconciled.card.job_id || '';
+      }
+      // Re-fetch card after reconciliation (which marked it failed)
+      const afterRecon = await getCard(ctx, card.id);
+      if (!afterRecon || (afterRecon.status !== 'queued' && afterRecon.status !== 'backlog')) {
+        throw conflict(
+          afterRecon?.status_reason || 'Card is not startable after reconciling interrupted start.'
+        );
+      }
     }
 
     const allCards = await getCards(ctx);
@@ -361,7 +540,15 @@ export async function startCardJob(
       };
     });
 
-    const jobResp = await ctx.startJob(runBody);
+    let jobResp;
+    try {
+      jobResp = await ctx.startJob(runBody);
+    } catch (err: unknown) {
+      await patchCard(ctx, card.id, (c) => {
+        c.starting = null;
+      }).catch(() => {});
+      throw err;
+    }
     const jobId = String(jobResp.job_id ?? '');
 
     const attempt: TaskAttempt = {
@@ -459,99 +646,22 @@ export async function tick(ctx: MawFeatureContext): Promise<void> {
 
     // 1. Reconcile running and interrupted starting cards
     // 1a. Reconcile queued cards that were left in starting state (> 30s ago)
+    const usedJobIds = new Set<string>();
+    for (const c of allTasks) {
+      if (c.job_id) usedJobIds.add(c.job_id);
+      if (Array.isArray(c.attempts)) {
+        for (const a of c.attempts) {
+          if (a.job_id) usedJobIds.add(a.job_id);
+        }
+      }
+    }
+
     const startingCardsToReconcile = allTasks.filter(
       (t) => t.status === 'queued' && t.starting && nowTs - Date.parse(t.starting.at) > 30000
     );
 
     for (const card of startingCardsToReconcile) {
-      const startingAtTs = Math.floor(Date.parse(card.starting!.at) / 1000);
-      let adoptedJobId: string | null = null;
-      let adoptedJobMeta: JobMeta | null = null;
-
-      try {
-        if (fs.existsSync(freshCtx.paths.jobsDir)) {
-          const jobFiles = fs
-            .readdirSync(freshCtx.paths.jobsDir)
-            .filter((f) => f.startsWith('job_') && f.endsWith('.json'));
-
-          for (const jf of jobFiles) {
-            const metaPath = path.win32.join(freshCtx.paths.jobsDir, jf);
-            try {
-              const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as JobMeta;
-              const metaStartedTs =
-                meta.started_ts ??
-                (meta.started_at ? Math.floor(Date.parse(meta.started_at) / 1000) : 0);
-              const projectMatches =
-                meta.project_path &&
-                path.resolve(meta.project_path).toLowerCase() ===
-                  path.resolve(card.project_path).toLowerCase();
-
-              if (projectMatches && metaStartedTs >= startingAtTs - 5) {
-                const metaSha = (meta as unknown as Record<string, unknown>).prompt_sha256;
-                if (metaSha && metaSha === card.starting!.prompt_sha) {
-                  adoptedJobId = meta.job_id;
-                  adoptedJobMeta = meta;
-                  break;
-                }
-                // Check prompt hash from prompt file
-                const promptFile = path.win32.join(
-                  freshCtx.paths.jobsDir,
-                  `${meta.job_id}.prompt.txt`
-                );
-                if (fs.existsSync(promptFile)) {
-                  let promptContent = fs.readFileSync(promptFile, 'utf8');
-                  if (promptContent.charCodeAt(0) === 0xfeff) {
-                    promptContent = promptContent.slice(1);
-                  }
-                  const sha = crypto.createHash('sha256').update(promptContent).digest('hex');
-                  if (sha === card.starting!.prompt_sha) {
-                    adoptedJobId = meta.job_id;
-                    adoptedJobMeta = meta;
-                    break;
-                  }
-                }
-              }
-            } catch {
-              // skip unreadable job meta
-            }
-          }
-        }
-      } catch {
-        // error scanning jobs
-      }
-
-      if (adoptedJobId && adoptedJobMeta) {
-        const kind =
-          card.pending_run?.kind || (card.attempts.length === 0 ? 'start' : 'retry');
-        const attempt: TaskAttempt = {
-          n: card.attempts.length + 1,
-          job_id: adoptedJobId,
-          agent: card.agent,
-          role: card.role,
-          mode: card.mode,
-          kind,
-          started_at: adoptedJobMeta.started_at || new Date().toISOString(),
-          status: adoptedJobMeta.status || 'RUNNING',
-          exit_code: adoptedJobMeta.exit_code ?? null,
-        };
-
-        await patchCard(freshCtx, card.id, (c) => {
-          c.status = 'running';
-          c.job_id = adoptedJobId;
-          c.status_reason = '';
-          c.starting = null;
-          c.pending_run = null;
-          c.started_at = c.started_at ?? attempt.started_at;
-          c.attempts.push(attempt);
-        });
-      } else {
-        await patchCard(freshCtx, card.id, (c) => {
-          c.status = 'failed';
-          c.starting = null;
-          c.status_reason =
-            'start interrupted (server stopped while starting); retry to run again';
-        });
-      }
+      await reconcileStartingCard(freshCtx, card, allTasks, usedJobIds);
     }
 
     // 1b. Reconcile running cards
@@ -802,6 +912,7 @@ export async function tick(ctx: MawFeatureContext): Promise<void> {
             }
             c.status = 'failed';
             c.status_reason = `invalid: ${err instanceof Error ? err.message : String(err)}`;
+            c.starting = null;
           });
         }
       }

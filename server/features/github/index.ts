@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import type { MawFeature } from '../../lib/feature.ts';
 import { resolveProjectPath } from '../../lib/paths.ts';
@@ -170,74 +171,118 @@ export const feature: MawFeature = {
 
         await ensureGhReady(projectPath, req.res);
 
-        const importLock = path.win32.join(ctx.paths.featureDataDir('github'), 'import.lock');
-        return await fileMutex.runExclusive(importLock, async () => {
-          // Check duplicate
-          const allCards = await getCards(ctx, { project_path: projectPath });
-          const existing = allCards.find(
-            (c) => c.source?.kind === 'github-issue' && Number(c.source?.number) === issueNumber
-          );
-          if (existing) {
-            throw conflict(
-              `Issue #${issueNumber} has already been imported as card ${existing.id}.`
-            );
-          }
+        const procLockFile = path.win32.join(
+          ctx.paths.featureDataDir('github'),
+          `import-${issueNumber}.lock`
+        );
+        fs.mkdirSync(path.dirname(procLockFile), { recursive: true });
 
-          const viewRes = await executeGh(
-            ['issue', 'view', String(issueNumber), '--json', 'number,title,body,labels,url'],
-            { cwd: projectPath }
-          );
-          if (viewRes.code !== 0) {
-            throw badRequest(`gh issue view failed: ${viewRes.stderr || viewRes.stdout}`);
-          }
-
-          let issueData: any;
+        const lockStart = Date.now();
+        let acquiredProcLock = false;
+        while (Date.now() - lockStart < 3000) {
           try {
-            issueData = JSON.parse(viewRes.stdout);
-          } catch {
-            throw badRequest('Failed to parse gh issue view JSON.');
+            const fd = fs.openSync(procLockFile, 'wx');
+            fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+            fs.closeSync(fd);
+            acquiredProcLock = true;
+            break;
+          } catch (err: unknown) {
+            const code = (err as { code?: string })?.code;
+            if (code === 'EEXIST') {
+              try {
+                const st = fs.statSync(procLockFile);
+                if (Date.now() - st.mtimeMs > 60000) {
+                  try {
+                    fs.unlinkSync(procLockFile);
+                  } catch {}
+                  continue;
+                }
+              } catch {
+                continue;
+              }
+            }
           }
+          await new Promise((r) => setTimeout(r, 60));
+        }
 
-          const title = String(issueData.title ?? '');
-          const body = String(issueData.body ?? '');
-          const url = String(issueData.url ?? '');
-          const labels: string[] = Array.isArray(issueData.labels)
-            ? issueData.labels.map((l: any) => String(l.name ?? l))
-            : [];
+        if (!acquiredProcLock) {
+          throw conflict(`Another import is already in progress for issue #${issueNumber}.`);
+        }
 
-          const cardTitle = `#${issueNumber} ${title}`.slice(0, 200);
-          let prompt = `Resolve GitHub issue #${issueNumber}: ${title}\n\n${body}`;
+        try {
+          const importLock = path.win32.join(ctx.paths.featureDataDir('github'), 'import.lock');
+          return await fileMutex.runExclusive(importLock, async () => {
+            // Check duplicate
+            const allCards = await getCards(ctx, { project_path: projectPath });
+            const existing = allCards.find(
+              (c) => c.source?.kind === 'github-issue' && Number(c.source?.number) === issueNumber
+            );
+            if (existing) {
+              throw conflict(
+                `Issue #${issueNumber} has already been imported as card ${existing.id}.`
+              );
+            }
 
-          const card = await createCard(ctx, {
-            title: cardTitle,
-            prompt,
-            project_path: projectPath,
-            mode: req.body.mode ? String(req.body.mode).trim() : 'task',
-            agent: req.body.agent ? String(req.body.agent).trim() : undefined,
-            role: req.body.role ? String(req.body.role).trim() : 'backend',
-            preset_id: req.body.preset_id ? String(req.body.preset_id).trim() : undefined,
-            template_id: req.body.template_id ? String(req.body.template_id).trim() : undefined,
-            vars: {
-              number: String(issueNumber),
-              title,
-              body,
-            },
-            status: req.body.status ? String(req.body.status).trim() : 'backlog',
-            labels,
-            created_by: 'github',
-            source: {
-              kind: 'github-issue',
-              number: issueNumber,
-              url,
-            },
+            const viewRes = await executeGh(
+              ['issue', 'view', String(issueNumber), '--json', 'number,title,body,labels,url'],
+              { cwd: projectPath }
+            );
+            if (viewRes.code !== 0) {
+              throw badRequest(`gh issue view failed: ${viewRes.stderr || viewRes.stdout}`);
+            }
+
+            let issueData: any;
+            try {
+              issueData = JSON.parse(viewRes.stdout);
+            } catch {
+              throw badRequest('Failed to parse gh issue view JSON.');
+            }
+
+            const title = String(issueData.title ?? '');
+            const body = String(issueData.body ?? '');
+            const url = String(issueData.url ?? '');
+            const labels: string[] = Array.isArray(issueData.labels)
+              ? issueData.labels.map((l: any) => String(l.name ?? l))
+              : [];
+
+            const cardTitle = `#${issueNumber} ${title}`.slice(0, 200);
+            let prompt = `Resolve GitHub issue #${issueNumber}: ${title}\n\n${body}`;
+
+            const card = await createCard(ctx, {
+              title: cardTitle,
+              prompt,
+              project_path: projectPath,
+              mode: req.body.mode ? String(req.body.mode).trim() : 'task',
+              agent: req.body.agent ? String(req.body.agent).trim() : undefined,
+              role: req.body.role ? String(req.body.role).trim() : 'backend',
+              preset_id: req.body.preset_id ? String(req.body.preset_id).trim() : undefined,
+              template_id: req.body.template_id ? String(req.body.template_id).trim() : undefined,
+              vars: {
+                number: String(issueNumber),
+                title,
+                body,
+              },
+              status: req.body.status ? String(req.body.status).trim() : 'backlog',
+              labels,
+              created_by: 'github',
+              source: {
+                kind: 'github-issue',
+                number: issueNumber,
+                url,
+              },
+            });
+
+            triggerImmediateTick(ctx);
+            return {
+              ok: true,
+              task: card,
+            };
           });
-
-          triggerImmediateTick(ctx);
-          return {
-            ok: true,
-            task: card,
-          };
-        });
+        } finally {
+          try {
+            fs.unlinkSync(procLockFile);
+          } catch {}
+        }
       },
     },
 

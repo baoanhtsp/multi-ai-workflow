@@ -810,3 +810,84 @@ test('github: concurrent duplicate issue imports serialize and throw 409 conflic
     cleanup();
   }
 });
+
+test('github: cross-process issue-import lock handles stale lock and protects concurrent imports', async () => {
+  const { ctx, projectDir, cleanup } = createGithubTestContext('proc_import_lock');
+  try {
+    clearGhStatusCache();
+
+    setGhRunner(async (args) => {
+      if (args[0] === '--version' || args[0] === 'version') {
+        return { code: 0, stdout: 'gh version 2.50.0', stderr: '' };
+      }
+      if (args[0] === 'auth' && args[1] === 'status') {
+        return { code: 0, stdout: 'Logged in as testuser', stderr: '' };
+      }
+      if (args[0] === 'issue' && args[1] === 'view') {
+        const num = args[2];
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            number: Number(num),
+            title: `Issue ${num}`,
+            body: `Body ${num}`,
+            labels: [],
+            url: `https://github.com/owner/repo/issues/${num}`,
+          }),
+          stderr: '',
+        };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+
+    const lockDir = ctx.paths.featureDataDir('github');
+    fs.mkdirSync(lockDir, { recursive: true });
+
+    // 1. Stale lock (> 60s old) should be automatically cleared and import succeeds
+    const staleLock = path.join(lockDir, 'import-20.lock');
+    fs.writeFileSync(staleLock, JSON.stringify({ pid: 999999, at: 'old' }), 'utf8');
+    const oldTime = new Date(Date.now() - 70000);
+    fs.utimesSync(staleLock, oldTime, oldTime);
+
+    const res = await feature.routes.github_issue_import.handler(ctx as any, {
+      body: {
+        project_path: projectDir,
+        number: 20,
+        agent: 'antigravity',
+        role: 'backend',
+      },
+    } as any);
+
+    assert.ok(res);
+    assert.equal(fs.existsSync(staleLock), false, 'Lock must be cleaned up in finally');
+
+    // 2. Active lock held by another process causes timeout and 409
+    const activeLock = path.join(lockDir, 'import-21.lock');
+    fs.writeFileSync(activeLock, JSON.stringify({ pid: process.pid + 5, at: 'fresh' }), 'utf8');
+
+    await assert.rejects(
+      async () => {
+        await feature.routes.github_issue_import.handler(ctx as any, {
+          body: {
+            project_path: projectDir,
+            number: 21,
+            agent: 'antigravity',
+            role: 'backend',
+          },
+        } as any);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 409);
+        assert.match(err.message, /already in progress for issue #21/i);
+        return true;
+      }
+    );
+
+    // Clean up activeLock
+    try {
+      fs.unlinkSync(activeLock);
+    } catch {}
+  } finally {
+    cleanup();
+  }
+});

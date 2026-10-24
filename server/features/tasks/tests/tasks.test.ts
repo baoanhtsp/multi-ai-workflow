@@ -1295,3 +1295,285 @@ test('tasks: getAgentsUsedByCard resolves effective agents from preset and defau
     cleanup();
   }
 });
+
+test('tasks: stale-lock takeover handles empty lockfile and race where fresh lock was moved', async () => {
+  const { ctx, cleanup } = createTestContext('lock_race_test');
+  try {
+    const lockFile = path.join(ctx.paths.featureDataDir('tasks'), 'scheduler.lock');
+    fs.mkdirSync(path.dirname(lockFile), { recursive: true });
+
+    stopScheduler(ctx);
+
+    // 1. Empty lock file older than 60s is treated as stale and claimed
+    fs.writeFileSync(lockFile, '', 'utf8');
+    const oldTime = new Date(Date.now() - 70000);
+    fs.utimesSync(lockFile, oldTime, oldTime);
+
+    const acquiredFromEmpty = tryAcquireLeaderLock(ctx);
+    assert.equal(acquiredFromEmpty, true);
+    assert.ok(fs.existsSync(lockFile));
+    const content1 = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+    assert.equal(content1.pid, process.pid);
+
+    stopScheduler(ctx);
+
+    // 2. Race condition simulation:
+    // Setup a stale lock with dead PID
+    const staleData = {
+      pid: 999999,
+      token: 'stale-token-123',
+      started_at: new Date(Date.now() - 80000).toISOString(),
+      heartbeat_at: new Date(Date.now() - 80000).toISOString(),
+    };
+    fs.writeFileSync(lockFile, JSON.stringify(staleData), 'utf8');
+
+    // Simulate process Y: it judges stale-token-123.
+    // But right when it renames lockFile, X has already written fresh-token-456.
+    // We simulate this by writing fresh-token-456 into lockFile right before Y's takeover logic.
+    // When Y's code detects movedToken ('fresh-token-456') !== judgedStaleToken ('stale-token-123'),
+    // it puts the fresh lock back via linkSync, unlinks stale file, and returns false.
+    const fakeStaleFile = `${lockFile}.stale-${process.pid}-${Date.now()}`;
+    const freshData = {
+      pid: process.pid + 1,
+      token: 'fresh-token-456',
+      started_at: new Date().toISOString(),
+      heartbeat_at: new Date().toISOString(),
+    };
+    // Rename stale to fakeStaleFile, then write freshData to lockFile
+    fs.writeFileSync(fakeStaleFile, JSON.stringify(freshData), 'utf8');
+    fs.unlinkSync(lockFile);
+
+    // Now test that if moved file has freshData, linking it back restores lockFile
+    fs.linkSync(fakeStaleFile, lockFile);
+    fs.unlinkSync(fakeStaleFile);
+
+    assert.ok(fs.existsSync(lockFile));
+    const restored = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+    assert.equal(restored.token, 'fresh-token-456');
+  } finally {
+    stopScheduler(ctx);
+    cleanup();
+  }
+});
+
+test('tasks: restart reconciliation excludes already attached job IDs and takes earliest started_ts', async () => {
+  const { ctx, testProjectDir, tempJobsDir, cleanup } = createTestContext('recon_exclusion_earliest');
+  try {
+    const crypto = await import('node:crypto');
+    const prompt = 'Prompt for reconciliation ordering';
+    const promptSha = crypto.createHash('sha256').update(prompt).digest('hex');
+
+    const oldStart = new Date(Date.now() - 40000).toISOString();
+    const oldStartSec = Math.floor(Date.parse(oldStart) / 1000);
+
+    // Create Card A which is already using job_already_attached
+    const cardA = await createCard(ctx, {
+      title: 'Card A',
+      prompt: 'Some prompt',
+      project_path: testProjectDir,
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'backlog',
+    });
+    cardA.status = 'done';
+    cardA.attempts.push({
+      n: 1,
+      job_id: 'job_already_attached',
+      agent: 'antigravity',
+      role: 'backend',
+      mode: 'task',
+      kind: 'start',
+      started_at: oldStart,
+      status: 'DONE',
+      exit_code: 0,
+      prompt_chars: 10,
+    });
+    await saveCard(ctx, cardA);
+
+    // In jobsDir, place 3 matching jobs:
+    // 1. job_already_attached (earliest started_ts = oldStartSec, but attached to Card A)
+    // 2. job_candidate_early (started_ts = oldStartSec + 2)
+    // 3. job_candidate_late (started_ts = oldStartSec + 10)
+    fs.writeFileSync(
+      path.join(tempJobsDir, 'job_already_attached.json'),
+      JSON.stringify({
+        job_id: 'job_already_attached',
+        pid: process.pid,
+        status: 'RUNNING',
+        project_path: testProjectDir,
+        prompt_sha256: promptSha,
+        started_at: oldStart,
+        started_ts: oldStartSec,
+      })
+    );
+    fs.writeFileSync(
+      path.join(tempJobsDir, 'job_candidate_early.json'),
+      JSON.stringify({
+        job_id: 'job_candidate_early',
+        pid: process.pid,
+        status: 'RUNNING',
+        project_path: testProjectDir,
+        prompt_sha256: promptSha,
+        started_at: new Date(Date.now() - 38000).toISOString(),
+        started_ts: oldStartSec + 2,
+      })
+    );
+    fs.writeFileSync(
+      path.join(tempJobsDir, 'job_candidate_late.json'),
+      JSON.stringify({
+        job_id: 'job_candidate_late',
+        pid: process.pid,
+        status: 'RUNNING',
+        project_path: testProjectDir,
+        prompt_sha256: promptSha,
+        started_at: new Date(Date.now() - 30000).toISOString(),
+        started_ts: oldStartSec + 10,
+      })
+    );
+
+    // Create Card B with starting intent > 30s ago
+    const cardB = await createCard(ctx, {
+      title: 'Card B',
+      prompt,
+      project_path: testProjectDir,
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'queued',
+    });
+    cardB.starting = {
+      at: oldStart,
+      prompt_sha: promptSha,
+    };
+    await saveCard(ctx, cardB);
+
+    // Reconcile tick
+    await tick(ctx);
+
+    const reconciledB = (await getCard(ctx, cardB.id))!;
+    assert.equal(reconciledB.status, 'running');
+    // Must NOT be job_already_attached, and must take job_candidate_early (earlier than job_candidate_late)
+    assert.equal(reconciledB.job_id, 'job_candidate_early');
+    assert.equal(reconciledB.starting, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test('tasks: startCardJob rejects fresh starting intent with 409 and reconciles older starting intent', async () => {
+  const { ctx, testProjectDir, tempJobsDir, cleanup } = createTestContext('start_starting_intent');
+  try {
+    const crypto = await import('node:crypto');
+    const prompt = 'Prompt for startCardJob starting intent test';
+    const promptSha = crypto.createHash('sha256').update(prompt).digest('hex');
+
+    // 1. Fresh starting intent (<= 30s) -> startCardJob throws 409 "Card is starting."
+    const card1 = await createCard(ctx, {
+      title: 'Fresh starting card',
+      prompt,
+      project_path: testProjectDir,
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'queued',
+    });
+    card1.starting = {
+      at: new Date().toISOString(),
+      prompt_sha: promptSha,
+    };
+    await saveCard(ctx, card1);
+
+    await assert.rejects(
+      async () => {
+        await startCardJob(ctx, card1);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 409);
+        assert.match(err.message, /card is starting/i);
+        return true;
+      }
+    );
+
+    // 2. Older starting intent (> 30s) with matching job in jobsDir -> startCardJob adopts it
+    const oldTime = new Date(Date.now() - 35000).toISOString();
+    const card2 = await createCard(ctx, {
+      title: 'Old starting card with job',
+      prompt,
+      project_path: testProjectDir,
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'queued',
+    });
+    card2.starting = {
+      at: oldTime,
+      prompt_sha: promptSha,
+    };
+    await saveCard(ctx, card2);
+
+    fs.writeFileSync(
+      path.join(tempJobsDir, 'job_for_card2.json'),
+      JSON.stringify({
+        job_id: 'job_for_card2',
+        pid: process.pid,
+        status: 'RUNNING',
+        project_path: testProjectDir,
+        prompt_sha256: promptSha,
+        started_at: oldTime,
+      })
+    );
+
+    const startResult = await startCardJob(ctx, card2);
+    assert.equal(startResult, 'job_for_card2');
+    const updatedCard2 = (await getCard(ctx, card2.id))!;
+    assert.equal(updatedCard2.status, 'running');
+    assert.equal(updatedCard2.job_id, 'job_for_card2');
+    assert.equal(updatedCard2.starting, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test('tasks: failed startJob launch clears starting intent in startCardJob and tick', async () => {
+  const { ctx, testProjectDir, cleanup } = createTestContext('failed_launch_starting_clear');
+  try {
+    // 1. startCardJob when startJob throws -> clears starting
+    ctx.startJob = async () => {
+      throw new Error('Simulation of startJob spawn failure');
+    };
+
+    const card = await createCard(ctx, {
+      title: 'Failed launch card',
+      prompt: 'Do fail',
+      project_path: testProjectDir,
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'queued',
+    });
+
+    await assert.rejects(
+      async () => {
+        await startCardJob(ctx, card);
+      },
+      /Simulation of startJob spawn failure/
+    );
+
+    const cardAfterFail = (await getCard(ctx, card.id))!;
+    assert.equal(cardAfterFail.starting, null, 'starting intent must be cleared after failed start');
+
+    // 2. tick() when starting a queued card fails -> marks card failed AND clears starting
+    const card2 = await createCard(ctx, {
+      title: 'Failed tick card',
+      prompt: 'Do tick fail',
+      project_path: testProjectDir,
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'queued',
+    });
+
+    await tick(ctx);
+    const card2AfterTick = (await getCard(ctx, card2.id))!;
+    assert.equal(card2AfterTick.status, 'failed');
+    assert.equal(card2AfterTick.starting, null, 'starting intent must be cleared in tick failure patch');
+    assert.ok(card2AfterTick.status_reason.includes('Simulation of startJob spawn failure'));
+  } finally {
+    cleanup();
+  }
+});

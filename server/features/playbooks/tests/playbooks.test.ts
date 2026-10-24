@@ -127,7 +127,7 @@ test('playbooks: tickBoxInFile rewrites only targeted line preserving CRLF and B
 
     // Tick first item
     const ticked = tickBoxInFile(filePath, 2, 'First item');
-    assert.equal(ticked, true);
+    assert.equal(ticked, 'ticked');
 
     const afterBuf = fs.readFileSync(filePath);
     // Verify BOM still present
@@ -404,6 +404,67 @@ test('playbooks: tickBoxInFile failure keeps item in running state and retries o
 
     const updatedContent = fs.readFileSync(playbookFile, 'utf8');
     assert.ok(updatedContent.includes('- [x] Critical Task'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('playbooks: already-checked playbook item advances run without stalling or emitting audit line', async () => {
+  const { ctx, projectDir, playbookFile, cleanup } = createPlaybookTestContext('already_checked_advance');
+  try {
+    fs.writeFileSync(
+      playbookFile,
+      '# Steps\n- [x] Pre-checked item\n- [ ] Fresh item\n',
+      'utf8'
+    );
+
+    const { tasks } = await startPlaybookRun(ctx, {
+      project_path: projectDir,
+      file: playbookFile,
+      include_checked: true,
+      mode: 'task',
+      agent: 'antigravity',
+      role: 'backend',
+    });
+
+    // Start item 0
+    await playbookTicker(ctx);
+    const runs1 = await getPlaybookRuns(ctx, projectDir);
+    assert.equal(runs1[0]!.items[0]!.state, 'running');
+
+    // Complete item 0
+    const card0 = (await getCard(ctx, tasks[0]!.id))!;
+    card0.status = 'done';
+    await saveCard(ctx, card0);
+
+    // Ticker runs: item 0 was already checked in file!
+    // Should NOT stall: advances to done, cursor advances to 1, but NO audit line emitted!
+    await playbookTicker(ctx);
+    const runs2 = await getPlaybookRuns(ctx, projectDir);
+    assert.equal(runs2[0]!.items[0]!.state, 'done');
+    assert.equal(runs2[0]!.cursor, 1);
+    assert.equal(runs2[0]!.items[1]!.state, 'running');
+
+    // Check audit file: must NOT contain audit for Pre-checked item
+    if (fs.existsSync(ctx.paths.auditFile)) {
+      const auditLog = fs.readFileSync(ctx.paths.auditFile, 'utf8');
+      assert.equal(auditLog.includes('Pre-checked item'), false);
+    }
+
+    // Now complete item 1 (which was unchecked in file)
+    const card1 = (await getCard(ctx, tasks[1]!.id))!;
+    card1.status = 'done';
+    await saveCard(ctx, card1);
+
+    // Ticker runs: item 1 was unchecked, so it ticks it and emits audit line
+    await playbookTicker(ctx);
+    const runs3 = await getPlaybookRuns(ctx, projectDir);
+    assert.equal(runs3[0]!.items[1]!.state, 'done');
+    assert.equal(runs3[0]!.cursor, 2);
+    assert.equal(runs3[0]!.status, 'done');
+
+    const auditLogFinal = fs.readFileSync(ctx.paths.auditFile, 'utf8');
+    assert.ok(auditLogFinal.includes('Fresh item'));
   } finally {
     cleanup();
   }

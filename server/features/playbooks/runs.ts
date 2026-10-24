@@ -236,15 +236,17 @@ export async function playbookTicker(ctx: MawFeatureContext): Promise<void> {
         if (item.state === 'failed') {
           const c = await getCard(ctx, item.card_id);
           if (c && c.status === 'done') {
-            const ticked = tickBoxInFile(run.file, item.line, item.text);
-            if (!ticked) {
+            const tickResult = tickBoxInFile(run.file, item.line, item.text);
+            if (tickResult === 'failed') {
               continue;
             }
-            appendAudit(ctx.paths.auditFile, 'playbook_tick', {
-              file: run.file,
-              line: item.line,
-              text: item.text,
-            });
+            if (tickResult === 'ticked') {
+              appendAudit(ctx.paths.auditFile, 'playbook_tick', {
+                file: run.file,
+                line: item.line,
+                text: item.text,
+              });
+            }
             item.state = 'done';
             modified = true;
           }
@@ -288,16 +290,18 @@ export async function playbookTicker(ctx: MawFeatureContext): Promise<void> {
           // Re-queue if card was moved back to backlog
           await moveCard(ctx, card.id, 'queued');
         } else if (card.status === 'done') {
-          const ticked = tickBoxInFile(run.file, runningItem.line, runningItem.text);
-          if (!ticked) {
+          const tickResult = tickBoxInFile(run.file, runningItem.line, runningItem.text);
+          if (tickResult === 'failed') {
             // tickBoxInFile failed (e.g. file locked/rename failure); keep item in 'running' state and retry on next tick
             continue;
           }
-          appendAudit(ctx.paths.auditFile, 'playbook_tick', {
-            file: run.file,
-            line: runningItem.line,
-            text: runningItem.text,
-          });
+          if (tickResult === 'ticked') {
+            appendAudit(ctx.paths.auditFile, 'playbook_tick', {
+              file: run.file,
+              line: runningItem.line,
+              text: runningItem.text,
+            });
+          }
           runningItem.state = 'done';
           run.cursor++;
           modified = true;
