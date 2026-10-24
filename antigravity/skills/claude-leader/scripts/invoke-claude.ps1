@@ -88,7 +88,6 @@ $sessionFlag = if ($ContinueSession) { "--continue" } else { "--no-session-persi
 
 switch ($Role) {
     "architect" {
-        # Opus: Pure architecture, API contract, task delegation & UI design system seed (No tool overhead)
         $model  = if ($ModelOverride) { $ModelOverride } else { "opus" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "high" }
         $roleFlags = @(
@@ -100,7 +99,6 @@ switch ($Role) {
         )
     }
     "frontend" {
-        # Sonnet: 100% Frontend implementation with restricted file tools only (no Bash/Grep wandering)
         $model  = if ($ModelOverride) { $ModelOverride } else { "sonnet" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "medium" }
         $roleFlags = @(
@@ -115,7 +113,6 @@ switch ($Role) {
         )
     }
     "reviewer" {
-        # Sonnet: Code review & scoring based on pre-collected git diff + test output (No tool overhead)
         $model  = if ($ModelOverride) { $ModelOverride } else { "sonnet" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "medium" }
         $roleFlags = @(
@@ -127,7 +124,6 @@ switch ($Role) {
         )
     }
     "ui-tweak" {
-        # Haiku: Fast, low-cost minor UI adjustments, CSS fixes, or API variable alignment checks
         $model  = if ($ModelOverride) { $ModelOverride } else { "haiku" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "low" }
         $roleFlags = @(
@@ -187,15 +183,27 @@ try {
         } else {
             ""
         }
+        $inTokens  = [Math]::Max(1, [int][Math]::Ceiling($Prompt.Length / 3.8))
+        $outTokens = [Math]::Max(1, [int][Math]::Ceiling($fullOut.Length / 3.8))
+        $rates = if ($model -match 'opus') { @{ in = 15.0; out = 75.0 } }
+                 elseif ($model -match 'haiku') { @{ in = 0.8; out = 4.0 } }
+                 elseif ($model -match 'fable') { @{ in = 6.0; out = 30.0 } }
+                 else { @{ in = 3.0; out = 15.0 } }
+        $costUsd = [Math]::Round(($inTokens * $rates.in + $outTokens * $rates.out) / 1000000.0, 5)
         [ordered]@{
-            Timestamp   = (Get-Date).ToString("o")
-            Tool        = "claude"
-            Role        = $Role
-            Model       = $model
-            WorkDir     = $WorkDir
-            PromptChars = $Prompt.Length
-            Score       = $score
-            Verdict     = $verdict
+            Timestamp    = (Get-Date).ToString("o")
+            Tool         = "claude"
+            Role         = $Role
+            Model        = $model
+            Effort       = $effort
+            WorkDir      = $WorkDir
+            PromptChars  = $Prompt.Length
+            OutputChars  = $fullOut.Length
+            InputTokens  = $inTokens
+            OutputTokens = $outTokens
+            CostUsd      = $costUsd
+            Score        = $score
+            Verdict      = $verdict
         } | ConvertTo-Json -Compress | Add-Content -Path $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue
     } catch {}
 } finally {

@@ -58,6 +58,9 @@ Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-cla
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-codex.ps1" "$geminiScriptsDir\invoke-codex.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-antigravity.ps1" "$geminiScriptsDir\invoke-antigravity.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-council-review.ps1" "$geminiScriptsDir\invoke-council-review.ps1"
+Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-spec-guard.ps1" "$geminiScriptsDir\invoke-spec-guard.ps1"
+Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-auto-gate.ps1" "$geminiScriptsDir\invoke-auto-gate.ps1"
+Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\send-notification.ps1" "$geminiScriptsDir\send-notification.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\save-agentapi-env.ps1" "$geminiScriptsDir\save-agentapi-env.ps1"
 
 if (Test-Path "$repoRoot\templates\SPEC.template.md") {

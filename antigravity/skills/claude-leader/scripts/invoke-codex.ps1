@@ -174,15 +174,24 @@ try {
         } else {
             ""
         }
+        $pLen      = $(if ($Prompt) { $Prompt.Length } else { 800 })
+        $inTokens  = [Math]::Max(1, [int][Math]::Ceiling($pLen / 3.8))
+        $outTokens = [Math]::Max(1, [int][Math]::Ceiling($fullOut.Length / 3.8))
+        $costUsd   = [Math]::Round(($inTokens * 2.5 + $outTokens * 10.0) / 1000000.0, 5)
         [ordered]@{
-            Timestamp   = (Get-Date).ToString("o")
-            Tool        = "codex"
-            Role        = $Role
-            Model       = $(if ($ModelOverride) { $ModelOverride } else { "default" })
-            WorkDir     = $WorkDir
-            PromptChars = $(if ($Prompt) { $Prompt.Length } else { 0 })
-            Score       = $score
-            Verdict     = $verdict
+            Timestamp    = (Get-Date).ToString("o")
+            Tool         = "codex"
+            Role         = $Role
+            Model        = $(if ($ModelOverride) { $ModelOverride } else { "gpt-6-sol" })
+            Effort       = $(if ($EffortOverride) { $EffortOverride } else { "high" })
+            WorkDir      = $WorkDir
+            PromptChars  = $(if ($Prompt) { $Prompt.Length } else { 0 })
+            OutputChars  = $fullOut.Length
+            InputTokens  = $inTokens
+            OutputTokens = $outTokens
+            CostUsd      = $costUsd
+            Score        = $score
+            Verdict      = $verdict
         } | ConvertTo-Json -Compress | Add-Content -Path $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue
     } catch {}
 } finally {

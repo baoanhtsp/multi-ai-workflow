@@ -164,7 +164,7 @@ tailwind.config = {
   </section>
 
   <!-- KPI -->
-  <section class="grid grid-cols-2 xl:grid-cols-4 gap-4" id="kpiRow"></section>
+  <section class="grid grid-cols-2 lg:grid-cols-5 gap-4" id="kpiRow"></section>
 
   <!-- DISPATCHER -->
   <section class="glass p-5 sm:p-6">
@@ -194,7 +194,7 @@ tailwind.config = {
         </div>
         <div>
           <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="lblMode"></label>
-          <div class="grid grid-cols-4 gap-2 mt-1.5" id="modeBtns"></div>
+          <div class="grid grid-cols-2 sm:grid-cols-5 gap-2 mt-1.5" id="modeBtns"></div>
         </div>
         <div class="grid sm:grid-cols-3 gap-3">
           <div>
@@ -235,8 +235,22 @@ tailwind.config = {
             <i data-lucide="send" class="w-4 h-4"></i> <span data-i18n="sendBtn"></span>
           </button>
         </div>
+        <div class="flex flex-wrap gap-2">
+          <button id="runWebBtn" class="btn disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-emerald-500 to-cx text-black hover:brightness-110 ring-1 ring-emerald-300/40" data-i18n="runWebBtn"></button>
+          <button id="specGuardBtn" class="btn disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-violet-500/15 text-violet-200 border border-violet-400/40 hover:bg-violet-500/25" data-i18n="specGuardBtn"></button>
+        </div>
         <p class="text-[11px] text-slate-500" data-i18n-html="sendNote"></p>
         <pre id="dispOut" class="hidden max-h-32 overflow-auto scroll p-3 rounded-lg bg-slate-900/80 border border-slate-700/60 text-[11px] font-mono text-slate-300 whitespace-pre-wrap"></pre>
+        <div id="specGuardOut" class="hidden rounded-xl p-3.5 bg-slate-900/70 border border-slate-700/60 text-[11px]"></div>
+        <div id="liveJobBox" class="hidden rounded-xl bg-black/60 border border-slate-700/60 overflow-hidden">
+          <div class="flex flex-wrap items-center gap-2 px-3 py-2 bg-slate-800/70 border-b border-slate-700/60">
+            <i data-lucide="terminal" class="w-4 h-4 text-emerald-300"></i>
+            <span class="text-[11px] font-bold uppercase tracking-wider text-slate-300" data-i18n="liveJobTitle"></span>
+            <span id="liveJobHead" class="flex flex-wrap items-center gap-2 text-[11px] font-mono text-slate-400"></span>
+            <button id="cancelJobBtn" class="btn hidden ml-auto px-2.5 py-1 rounded-md text-[11px] font-bold bg-red-500/15 text-red-300 border border-red-400/40 hover:bg-red-500/25 disabled:opacity-50" data-i18n="cancelJob"></button>
+          </div>
+          <pre id="liveJobLog" class="max-h-72 min-h-[120px] overflow-auto scroll p-3 text-[11px] font-mono text-emerald-200 whitespace-pre-wrap break-all"></pre>
+        </div>
       </div>
     </div>
   </section>
@@ -268,7 +282,53 @@ tailwind.config = {
           <tbody id="auditBody" class="divide-y divide-slate-700/40"></tbody>
         </table>
       </div>
-      <div id="breakdown" class="grid sm:grid-cols-2 gap-4 mt-4"></div>
+      <div id="breakdown" class="grid sm:grid-cols-3 gap-4 mt-4"></div>
+    </div>
+  </section>
+
+  <!-- GIT EXPLORER + NOTIFICATION CENTER -->
+  <section class="grid lg:grid-cols-2 gap-6">
+    <div id="gitPanel" class="glass p-5">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="git-branch" class="w-5 h-5 text-cx"></i>
+        <h2 class="font-bold text-base" data-i18n="gitTitle"></h2>
+      </div>
+      <div id="gitBody" class="space-y-4"></div>
+    </div>
+    <div id="notifyPanel" class="glass p-5">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="bell-ring" class="w-5 h-5 text-cla"></i>
+        <h2 class="font-bold text-base" data-i18n="notifyTitle"></h2>
+      </div>
+      <div class="space-y-3.5">
+        <label class="flex items-center justify-between gap-3 rounded-lg px-3 py-2.5 bg-slate-800/50 border border-slate-700/50 cursor-pointer select-none">
+          <span class="text-xs font-semibold text-slate-200" data-i18n="cfgToastLbl"></span>
+          <span class="relative inline-block w-10 h-5 shrink-0">
+            <input type="checkbox" id="cfgDesktopToast" class="peer sr-only" checked>
+            <span class="absolute inset-0 rounded-full bg-slate-700 peer-checked:bg-ag transition"></span>
+            <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition peer-checked:translate-x-5"></span>
+          </span>
+        </label>
+        <div>
+          <label for="cfgWebhookUrl" class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="cfgWebhookLbl"></label>
+          <input id="cfgWebhookUrl" type="url" autocomplete="off" spellcheck="false" placeholder="https://discord.com/api/webhooks/…" class="w-full px-3 py-2 text-sm mt-1.5 font-mono">
+        </div>
+        <div class="grid sm:grid-cols-2 gap-3">
+          <div>
+            <label for="cfgTgToken" class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="cfgTgTokenLbl"></label>
+            <input id="cfgTgToken" type="password" autocomplete="off" spellcheck="false" placeholder="123456:ABC-DEF…" class="w-full px-3 py-2 text-sm mt-1.5 font-mono">
+          </div>
+          <div>
+            <label for="cfgTgChatId" class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="cfgTgChatLbl"></label>
+            <input id="cfgTgChatId" type="text" autocomplete="off" spellcheck="false" placeholder="-1001234567890" class="w-full px-3 py-2 text-sm mt-1.5 font-mono">
+          </div>
+        </div>
+        <div class="flex flex-wrap gap-2 pt-1">
+          <button id="saveNotifyBtn" class="btn disabled:opacity-50 px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-ag to-agb text-white hover:brightness-110" data-i18n="saveCfg"></button>
+          <button id="testNotifyBtn" class="btn disabled:opacity-50 px-4 py-2 rounded-lg text-xs font-bold bg-amber-500/15 text-amber-300 border border-amber-400/40 hover:bg-amber-500/25" data-i18n="testCfg"></button>
+        </div>
+        <p class="text-[11px] text-slate-500" data-i18n="notifyNote"></p>
+      </div>
     </div>
   </section>
 
@@ -328,7 +388,7 @@ const I18N = {
     autoEffort: 'Tự động (mặc định)',
     sessTitle: 'Phiên Antigravity',
     auditTitle: 'Nhật ký Audit',
-    thTime: 'Thời gian', thTool: 'Công cụ', thRole: 'Role', thModel: 'Model', thChars: 'Ký tự', thScore: 'Điểm', thVerdict: 'Kết luận',
+    thTime: 'Thời gian', thTool: 'Công cụ', thRole: 'Role', thModel: 'Model', thChars: 'Token / Chi phí', thScore: 'Điểm', thVerdict: 'Kết luận',
     sessCount: '{n} phiên',
     noPreview: '(không có bản xem trước)',
     steps: '{n} bước',
@@ -337,12 +397,59 @@ const I18N = {
     noAudit: 'Chưa có bản ghi audit.',
     byRole: 'Lượt gọi theo Role',
     byTool: 'Lượt gọi theo Công cụ',
+    byModelCost: 'Chi phí theo Model ($ USD)',
     updated: 'Cập nhật: ',
     demoSuffix: ' (demo)',
     kTotal: 'Tổng lượt gọi AI',
-    kTotalSub: '{n} ký tự prompt',
-    kSaved: 'Token Claude tiết kiệm',
-    kSavedSub: 'Nhờ ủy quyền cho Antigravity / Codex',
+    kTotalSub: '{i} token vào · {o} token ra',
+    kSpend: 'Chi phí thực tế ($ USD)',
+    kSpendSub: 'Claude {c} · Codex {x}',
+    kSaveUsd: 'Tiết kiệm ước tính ($ USD)',
+    kSaveUsdSub: '{n} token tiết kiệm',
+    tokUnit: 'tok',
+    charsUnit: 'ký tự',
+    runWebBtn: '▶ Chạy Trực Tiếp Trên Web',
+    specGuardBtn: '🛡️ Kiểm tra SPEC Guard',
+    liveJobTitle: 'Terminal Job Trực Tiếp',
+    cancelJob: '⏹ Dừng Job',
+    jobRunning: 'ĐANG CHẠY',
+    jobStarted: 'Đã khởi chạy job {id}',
+    jobBusy: 'Đang có một job chạy. Hãy chờ hoặc dừng job đó trước.',
+    jobEnded: 'Job kết thúc: {status}',
+    jobCancelled: 'Đã gửi yêu cầu dừng job.',
+    jobLost: 'Mất kết nối khi theo dõi job — đã dừng theo dõi.',
+    guardRunning: 'Đang kiểm tra SPEC Guard…',
+    guardTitle: 'Báo cáo SPEC Guard',
+    guardFE: 'Frontend',
+    guardBE: 'Backend',
+    guardEndpoints: 'SPEC Endpoints',
+    guardNone: '(không có)',
+    guardFiles: 'File đang sửa',
+    guardNoFiles: 'Không có file nào đang sửa.',
+    guardViol: 'Cảnh báo',
+    guardDemo: '[Demo] Báo cáo giả lập — hãy chạy qua Laragon để kiểm tra thật.',
+    gitTitle: 'Git Branch & Worktree Explorer',
+    gitLoading: 'Đang tải thông tin Git…',
+    gitNone: 'Dự án này chưa có Git.',
+    gitBranch: 'Nhánh hiện tại',
+    gitModified: 'File chưa commit',
+    gitBranches: 'Nhánh (branches)',
+    gitWorktrees: 'Worktrees',
+    gitCommits: '5 commit gần nhất',
+    gitCurrent: 'hiện tại',
+    gitReview: '⚡ Review bằng AI Council',
+    gitOutside: 'Worktree nằm ngoài C:\\laragon\\www — không thể chạy từ Dashboard.',
+    notifyTitle: 'Trung tâm Thông báo & Webhook',
+    cfgToastLbl: 'Windows 10/11 Desktop Toast',
+    cfgWebhookLbl: 'Discord / Slack Webhook URL',
+    cfgTgTokenLbl: 'Telegram Bot Token',
+    cfgTgChatLbl: 'Telegram Chat ID',
+    saveCfg: '💾 Lưu Cấu Hình',
+    testCfg: '🔔 Gửi Thử Thông Báo',
+    notifyNote: 'Gửi thử sẽ bắn thông báo thật lên màn hình Windows và tới Webhook / Telegram đã cấu hình (tự lưu cấu hình trước khi gửi).',
+    notifySaved: 'Đã lưu cấu hình thông báo.',
+    notifyTested: 'Đã gửi thông báo thử.',
+    notifyDemo: '[Demo] Không có backend — cấu hình chưa được lưu.',
     kRate: 'Tỷ lệ duyệt (Approved)',
     kActive: 'Phiên đang mở',
     kActiveSub: '{n} hội thoại gần đây',
@@ -377,7 +484,9 @@ const I18N = {
       'codex:review-diff': 'OpenAI Codex: Kiểm tra độc lập git diff, bắt lỗi bảo mật, race-condition và logic.',
       'codex:critic': 'OpenAI Codex: Phản biện thiết kế kiến trúc và tìm lỗ hổng tiềm ẩn.',
       'codex:coder': 'OpenAI Codex: Viết thuật toán phức tạp hoặc Unit/Integration Test trên nhánh riêng.',
-      'council:parallel-review': 'Hội đồng AI Song Song: Chạy đồng thời cả Claude Sonnet + OpenAI Codex để chấm điểm git diff nhanh gấp đôi.'
+      'council:parallel-review': 'Hội đồng AI Song Song: Chạy đồng thời cả Claude Sonnet + OpenAI Codex để chấm điểm git diff nhanh gấp đôi.',
+      'auto-gate:auto-loop': 'Auto-Gate: Antigravity code → SPEC Guard → Hội đồng chấm → tự sửa, lặp tối đa 2 vòng cho đến khi APPROVED.',
+      'auto-gate:review-only': 'Auto-Gate: Bỏ qua bước code ban đầu, chỉ chạy SPEC Guard + Hội đồng chấm trên git diff hiện tại.'
     }
   },
   en: {
@@ -421,7 +530,7 @@ const I18N = {
     autoEffort: 'Auto (Default)',
     sessTitle: 'Antigravity Sessions',
     auditTitle: 'Audit Log',
-    thTime: 'Timestamp', thTool: 'Tool', thRole: 'Role', thModel: 'Model', thChars: 'Chars', thScore: 'Score', thVerdict: 'Verdict',
+    thTime: 'Timestamp', thTool: 'Tool', thRole: 'Role', thModel: 'Model', thChars: 'Tokens / Cost', thScore: 'Score', thVerdict: 'Verdict',
     sessCount: '{n} sessions',
     noPreview: '(no preview)',
     steps: '{n} steps',
@@ -430,12 +539,59 @@ const I18N = {
     noAudit: 'No audit records yet.',
     byRole: 'Calls by Role',
     byTool: 'Calls by Tool',
+    byModelCost: 'Cost by Model ($ USD)',
     updated: 'Updated: ',
     demoSuffix: ' (demo)',
     kTotal: 'Total AI Calls',
-    kTotalSub: '{n} prompt chars',
-    kSaved: 'Est. Claude Tokens Saved',
-    kSavedSub: 'By delegating to Antigravity / Codex',
+    kTotalSub: '{i} in · {o} out tokens',
+    kSpend: 'Actual Spend ($ USD)',
+    kSpendSub: 'Claude {c} · Codex {x}',
+    kSaveUsd: 'Est. Savings ($ USD)',
+    kSaveUsdSub: '{n} tokens saved',
+    tokUnit: 'tok',
+    charsUnit: 'chars',
+    runWebBtn: '▶ Run Live on Web',
+    specGuardBtn: '🛡️ Run SPEC Guard',
+    liveJobTitle: 'Live Job Terminal',
+    cancelJob: '⏹ Cancel Job',
+    jobRunning: 'RUNNING',
+    jobStarted: 'Job {id} started',
+    jobBusy: 'A job is already running. Wait for it or cancel it first.',
+    jobEnded: 'Job finished: {status}',
+    jobCancelled: 'Cancel request sent.',
+    jobLost: 'Lost connection while tracking the job — stopped polling.',
+    guardRunning: 'Running SPEC Guard…',
+    guardTitle: 'SPEC Guard Report',
+    guardFE: 'Frontend',
+    guardBE: 'Backend',
+    guardEndpoints: 'SPEC Endpoints',
+    guardNone: '(none)',
+    guardFiles: 'Modified Files',
+    guardNoFiles: 'No modified files.',
+    guardViol: 'Warnings',
+    guardDemo: '[Demo] Simulated report — run through Laragon for a real check.',
+    gitTitle: 'Git Branch & Worktree Explorer',
+    gitLoading: 'Loading Git info…',
+    gitNone: 'This project has no Git repository.',
+    gitBranch: 'Current Branch',
+    gitModified: 'Uncommitted Files',
+    gitBranches: 'Branches',
+    gitWorktrees: 'Worktrees',
+    gitCommits: 'Last 5 Commits',
+    gitCurrent: 'current',
+    gitReview: '⚡ Review with AI Council',
+    gitOutside: 'Worktree is outside C:\\laragon\\www — cannot run from the Dashboard.',
+    notifyTitle: 'Notification & Webhook Center',
+    cfgToastLbl: 'Windows 10/11 Desktop Toast',
+    cfgWebhookLbl: 'Discord / Slack Webhook URL',
+    cfgTgTokenLbl: 'Telegram Bot Token',
+    cfgTgChatLbl: 'Telegram Chat ID',
+    saveCfg: '💾 Save Settings',
+    testCfg: '🔔 Test Notification',
+    notifyNote: 'Test fires a real notification to the Windows desktop and your configured Webhook / Telegram (settings are saved first).',
+    notifySaved: 'Notification settings saved.',
+    notifyTested: 'Test notification sent.',
+    notifyDemo: '[Demo] No backend — settings were not saved.',
     kRate: 'Approval Rate',
     kActive: 'Active Sessions',
     kActiveSub: '{n} recent conversations',
@@ -470,7 +626,9 @@ const I18N = {
       'codex:review-diff': 'OpenAI Codex: Independently audit git diff for security bugs, race conditions, and logic.',
       'codex:critic': 'OpenAI Codex: Critique system architecture and uncover edge-case vulnerabilities.',
       'codex:coder': 'OpenAI Codex: Write complex algorithms or Unit/Integration tests in an isolated worktree.',
-      'council:parallel-review': 'Parallel AI Council: Run both Claude Sonnet + OpenAI Codex simultaneously to review git diff 2x faster.'
+      'council:parallel-review': 'Parallel AI Council: Run both Claude Sonnet + OpenAI Codex simultaneously to review git diff 2x faster.',
+      'auto-gate:auto-loop': 'Auto-Gate: Antigravity codes → SPEC Guard → Council review → auto-fix, up to 2 rounds until APPROVED.',
+      'auto-gate:review-only': 'Auto-Gate: Skip the initial implementation; run only SPEC Guard + Council review on the current git diff.'
     }
   }
 };
@@ -507,19 +665,23 @@ function setLang(lang) {
   populateOverrides();
   if (!state.lastCmd) $('cmdOut').textContent = t('cmdPlaceholder');
   if (state.data) render();
+  renderJobHead();
+  renderGuard();
 }
 
 const ROLES = {
   antigravity: ['send-latest', 'new', 'status', 'wait'],
   claude: ['architect', 'frontend', 'reviewer', 'ui-tweak'],
   codex: ['review-diff', 'critic', 'coder'],
-  council: ['parallel-review']
+  council: ['parallel-review'],
+  'auto-gate': ['auto-loop', 'review-only']
 };
 const MODES = {
   antigravity: { label: 'Antigravity', sub: { vi: 'Backend & Core', en: 'Backend & Core' }, icon: 'rocket', c: 'text-ag border-ag/50 bg-ag/10' },
   claude: { label: 'Claude', sub: { vi: 'Kiến trúc & UI', en: 'Arch & UI' }, icon: 'brain-circuit', c: 'text-cl border-cl/50 bg-cl/10' },
   codex: { label: 'Codex', sub: { vi: 'Bảo mật & Test', en: 'Security & Test' }, icon: 'code-2', c: 'text-cx border-cx/50 bg-cx/10' },
-  council: { label: 'AI Council', sub: { vi: 'Chấm chéo 2 AI', en: 'Dual Review' }, icon: 'users', c: 'text-violet-300 border-violet-400/50 bg-violet-400/10' }
+  council: { label: 'AI Council', sub: { vi: 'Chấm chéo 2 AI', en: 'Dual Review' }, icon: 'users', c: 'text-violet-300 border-violet-400/50 bg-violet-400/10' },
+  'auto-gate': { label: 'Auto-Gate', sub: { vi: 'Code -> Chấm -> Sửa', en: 'Code -> Review -> Fix' }, icon: 'repeat', c: 'border-amber-500/50 bg-amber-500/15 text-amber-300' }
 };
 const ROLE_LABELS = {
   antigravity: {
@@ -541,11 +703,37 @@ const ROLE_LABELS = {
   },
   council: {
     'parallel-review': { vi: 'Hội đồng Chấm chéo Song song (parallel-review)', en: 'Parallel Dual-AI Review (parallel-review)' }
+  },
+  'auto-gate': {
+    'auto-loop': { vi: 'Tự động Code -> Chấm -> Sửa 2 vòng (auto-loop)', en: 'Auto Code -> Review -> Fix, 2 rounds (auto-loop)' },
+    'review-only': { vi: 'Chỉ chạy SPEC Guard + Hội đồng Chấm (review-only)', en: 'Run SPEC Guard + Council Review only (review-only)' }
   }
 };
 function roleLabel(mode, r) { return ROLE_LABELS[mode]?.[r]?.[LANG] || r; }
 
-let state = { data: null, mode: 'antigravity', timer: null, demo: false, lastCmd: '' };
+let state = { data: null, mode: 'antigravity', timer: null, demo: false, lastCmd: '', job: null, guard: null, git: null, gitCache: {}, gitBusy: false, notifyDirty: false, adopted: false };
+
+function demoGit(path) {
+  const name = String(path || '').split(/[\\/]/).filter(Boolean).pop() || 'project';
+  return {
+    has_git: true, current_branch: 'master', modified_count: 5, ahead: 1, behind: 0,
+    branches: [
+      { name: 'master', sha: '6b9cddb', is_current: true, updated: '2 hours ago' },
+      { name: 'feature/auto-gate', sha: 'd333172', is_current: false, updated: '1 day ago' }
+    ],
+    worktrees: [
+      { path: String(path || '').replace(/\\/g, '/'), head: 'HEAD 6b9cddb', branch: 'master' },
+      { path: 'C:/laragon/www/' + name + '-wt-tests', head: 'HEAD d333172', branch: 'feature/auto-gate' }
+    ],
+    recent_commits: [
+      { sha: '6b9cddb', subject: 'fix(dashboard): resolve Opus 5.5 review findings', time: '2 hours ago', author: 'Task AI Bot' },
+      { sha: 'd333172', subject: 'feat(naming): unify Multi-AI commands', time: '5 hours ago', author: 'Task AI Bot' },
+      { sha: '2b9a465', subject: 'feat(i18n): add bilingual VI/EN switcher', time: '1 day ago', author: 'Task AI Bot' },
+      { sha: 'e5cefee', subject: 'fix(dashboard-ui): move SVG model pills', time: '1 day ago', author: 'Task AI Bot' },
+      { sha: 'e24fa28', subject: 'feat(models): add Claude 5.5 / Codex 6.1 / Gemini 4', time: '2 days ago', author: 'Task AI Bot' }
+    ]
+  };
+}
 
 function demoData() {
   const now = new Date();
@@ -584,16 +772,22 @@ function demoData() {
     ],
     audit: {
       total_calls: 4, total_prompt_chars: 9850, estimated_tokens_saved: 60000,
+      total_input_tokens: 2593, total_output_tokens: 5000, total_cost_usd: 0.2697, estimated_cost_saved_usd: 0.18,
+      cost_by_tool: { claude: 0.2595, codex: 0.0102, antigravity: 0 },
+      cost_by_model: { opus: 0.2396, sonnet: 0.0199, 'gpt-6-sol': 0.0102 },
       by_tool: { claude: 3, codex: 1 },
       by_role: { architect: 1, frontend: 1, reviewer: 1, 'ui-tweak': 0, 'review-diff': 1 },
       verdicts: { APPROVED: 1, CHANGES_REQUESTED: 0, COMPLETED: 3 },
       recent_logs: [
-        { Timestamp: '2026-10-24T16:05:00+07:00', Tool: 'claude', Role: 'frontend', Model: 'sonnet', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 2450, Score: '', Verdict: 'COMPLETED' },
-        { Timestamp: '2026-10-24T15:40:12+07:00', Tool: 'codex', Role: 'review-diff', Model: 'gpt-6-sol', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 1800, Score: '9/10', Verdict: 'APPROVED' },
-        { Timestamp: '2026-10-24T15:10:03+07:00', Tool: 'claude', Role: 'reviewer', Model: 'opus', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 3100, Score: '7/10', Verdict: 'CHANGES_REQUESTED' },
-        { Timestamp: '2026-10-24T14:02:44+07:00', Tool: 'claude', Role: 'architect', Model: 'opus', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 2500, Score: '', Verdict: 'COMPLETED' }
+        { Timestamp: '2026-10-24T16:05:00+07:00', Tool: 'claude', Role: 'frontend', Model: 'sonnet', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 2450, InputTokens: 645, OutputTokens: 1200, CostUsd: 0.0199, Score: '', Verdict: 'COMPLETED' },
+        { Timestamp: '2026-10-24T15:40:12+07:00', Tool: 'codex', Role: 'review-diff', Model: 'gpt-6-sol', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 1800, InputTokens: 474, OutputTokens: 900, CostUsd: 0.0102, Score: '9/10', Verdict: 'APPROVED' },
+        { Timestamp: '2026-10-24T15:10:03+07:00', Tool: 'claude', Role: 'reviewer', Model: 'opus', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 3100, InputTokens: 816, OutputTokens: 1500, CostUsd: 0.1247, Score: '7/10', Verdict: 'CHANGES_REQUESTED' },
+        { Timestamp: '2026-10-24T14:02:44+07:00', Tool: 'claude', Role: 'architect', Model: 'opus', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 2500, InputTokens: 658, OutputTokens: 1400, CostUsd: 0.1149, Score: '', Verdict: 'COMPLETED' }
       ]
-    }
+    },
+    git_info: demoGit('C:\\laragon\\www\\multi-ai-workflow'),
+    notify_config: { desktop_toast: true, webhook_url: '', telegram_bot_token: '', telegram_chat_id: '' },
+    jobs: []
   };
 }
 
@@ -723,12 +917,15 @@ function render() {
       <div class="absolute -right-4 -top-4 w-20 h-20 rounded-full opacity-20 blur-2xl" style="background:${col}"></div>
       <div class="flex items-center justify-between"><span class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">${label}</span>
         <i data-lucide="${icon}" class="w-4 h-4" style="color:${col}"></i></div>
-      <div class="text-3xl font-extrabold mt-2 tracking-tight">${val}</div>
+      <div class="text-2xl xl:text-3xl font-extrabold mt-2 tracking-tight">${val}</div>
       <div class="text-[11px] text-slate-500 mt-1">${sub}</div>
     </div>`;
+  const usd = (n, dp) => '$' + Number(n || 0).toFixed(dp);
+  const cbt = a.cost_by_tool || {};
   $('kpiRow').innerHTML =
-    kpi(t('kTotal'), fmt(a.total_calls), t('kTotalSub', { n: fmt(a.total_prompt_chars) }), 'phone-call', '#F59E0B') +
-    kpi(t('kSaved'), fmt(a.estimated_tokens_saved), t('kSavedSub'), 'piggy-bank', '#10B981') +
+    kpi(t('kTotal'), fmt(a.total_calls), esc(t('kTotalSub', { i: fmt(a.total_input_tokens), o: fmt(a.total_output_tokens) })), 'phone-call', '#F59E0B') +
+    kpi(t('kSpend'), usd(a.total_cost_usd, 4), esc(t('kSpendSub', { c: usd(cbt.claude, 4), x: usd(cbt.codex, 4) })), 'wallet', '#D97757') +
+    kpi(t('kSaveUsd'), usd(a.estimated_cost_saved_usd, 2), esc(t('kSaveUsdSub', { n: fmt(a.estimated_tokens_saved) })), 'piggy-bank', '#10B981') +
     kpi(t('kRate'), rate + '%', `${v.APPROVED || 0} APPROVED · ${v.CHANGES_REQUESTED || 0} CHANGES_REQUESTED`, 'badge-check', '#06B6D4') +
     kpi(t('kActive'), activeSess, t('kActiveSub', { n: (d.conversations || []).length }), 'radio-tower', '#3B82F6');
 
@@ -757,26 +954,39 @@ function render() {
   $('auditCount').textContent = t('auditCount', { n: logs.length });
   $('auditBody').innerHTML = logs.length ? logs.map(l => {
     const sc = l.Score ? `<span class="font-bold ${parseInt(l.Score) >= 8 ? 'text-emerald-300' : parseInt(l.Score) >= 6 ? 'text-amber-300' : 'text-red-300'}">${esc(l.Score)}</span>` : '<span class="text-slate-600">—</span>';
+    const hasTel = l.InputTokens != null || l.OutputTokens != null || l.CostUsd != null;
+    const tokCell = hasTel
+      ? `${fmt((l.InputTokens || 0) + (l.OutputTokens || 0))} ${t('tokUnit')} · $${Number(l.CostUsd || 0).toFixed(4)}`
+      : `${fmt(l.PromptChars)} ${t('charsUnit')}`;
     return `<tr class="hover:bg-slate-800/40">
       <td class="p-2.5 font-mono text-slate-400 whitespace-nowrap" title="${esc(l.WorkDir)}">${esc(String(l.Timestamp).replace('T', ' ').slice(0, 19))}</td>
       <td class="p-2.5">${toolBadge(l.Tool)}</td>
       <td class="p-2.5 text-slate-300">${esc(l.Role)}</td>
       <td class="p-2.5 font-mono text-slate-400">${esc(l.Model)}</td>
-      <td class="p-2.5 text-right font-mono">${fmt(l.PromptChars)}</td>
+      <td class="p-2.5 text-right font-mono whitespace-nowrap">${tokCell}</td>
       <td class="p-2.5 text-center">${sc}</td>
       <td class="p-2.5">${verdictBadge(l.Verdict)}</td></tr>`;
   }).join('') : `<tr><td colspan="7" class="p-8 text-center text-slate-500">${t('noAudit')}</td></tr>`;
 
   // breakdown bars
-  const bars = (title, obj, col) => {
+  const bars = (title, obj, col, f = n => n) => {
     const entries = Object.entries(obj || {});
-    const max = Math.max(1, ...entries.map(e => e[1]));
+    const max = Math.max(1e-9, ...entries.map(e => e[1]));
     return `<div><h3 class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold mb-2">${title}</h3>` +
       (entries.map(([k, n]) => `<div class="flex items-center gap-2 mb-1.5 text-[11px]"><span class="w-28 truncate text-slate-300">${esc(k)}</span>
         <div class="flex-1 h-2 rounded-full bg-slate-800 overflow-hidden"><div class="h-full rounded-full" style="width:${n / max * 100}%;background:${col}"></div></div>
-        <span class="w-6 text-right font-mono text-slate-400">${n}</span></div>`).join('') || '<p class="text-xs text-slate-600">—</p>') + '</div>';
+        <span class="min-w-[2.5rem] text-right font-mono text-slate-400">${esc(f(n))}</span></div>`).join('') || '<p class="text-xs text-slate-600">—</p>') + '</div>';
   };
-  $('breakdown').innerHTML = bars(t('byRole'), a.by_role, 'linear-gradient(90deg,#D97757,#F59E0B)') + bars(t('byTool'), a.by_tool, 'linear-gradient(90deg,#06B6D4,#10B981)');
+  $('breakdown').innerHTML = bars(t('byRole'), a.by_role, 'linear-gradient(90deg,#D97757,#F59E0B)') + bars(t('byTool'), a.by_tool, 'linear-gradient(90deg,#06B6D4,#10B981)')
+    + bars(t('byModelCost'), a.cost_by_model, 'linear-gradient(90deg,#8B5CF6,#EC4899)', n => '$' + Number(n || 0).toFixed(4));
+
+  fillNotify();
+  ensureGit();
+  if (!state.job && !state.adopted) {
+    state.adopted = true;
+    const rj = (d.jobs || []).find(j => j.status === 'RUNNING');
+    if (rj) startJob({ job_id: rj.job_id, pid: rj.pid });
+  }
 
   $('lastUpdate').textContent = t('updated') + new Date().toLocaleTimeString(LANG === 'vi' ? 'vi-VN' : 'en-US') + (state.demo ? t('demoSuffix') : '');
   lucide.createIcons();
@@ -822,13 +1032,15 @@ const MODELS = {
   claude: ['opus', 'sonnet', 'haiku', 'fable', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
   codex: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-reserve', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'codex-auto-review'],
   antigravity: ['pro', 'flash', 'flash_lite'],
-  council: []
+  council: [],
+  'auto-gate': []
 };
 const EFFORTS = {
   claude: ['low', 'medium', 'high', 'xhigh', 'max'],
   codex: ['low', 'medium', 'high', 'xhigh'],
   antigravity: [],
-  council: []
+  council: [],
+  'auto-gate': []
 };
 function populateOverrides() {
   const fill = (id, first, list) => {
@@ -876,17 +1088,23 @@ function localCommand(p) {
     return `${ps} ${q(s + '\\invoke-codex.ps1')} -Role ${p.role} -WorkDir ${q(p.project_path)}${ov}${p.prompt ? ` -Prompt ${q(p.prompt)}` : ''}`;
   if (p.mode === 'claude')
     return `${ps} ${q(s + '\\invoke-claude.ps1')} -Role ${p.role} -WorkDir ${q(p.project_path)}${ov}${p.role === 'reviewer' ? ' -IncludeGitDiff' : ''} -Prompt ${q(p.prompt)}`;
+  if (p.mode === 'auto-gate')
+    return `${ps} ${q(s + '\\invoke-auto-gate.ps1')} -WorkDir ${q(p.project_path)} -MaxRounds 2${p.role === 'review-only' ? ' -SkipInitialImplement' : ''}${p.prompt ? ` -Prompt ${q(p.prompt)}` : ''}`;
   const cp = p.prompt || 'Review uncommitted changes against SPEC.md and score X/10.';
   return `${ps} ${q(s + '\\invoke-council-review.ps1')} -WorkDir ${q(p.project_path)} -Prompt ${q(cp)}`;
+}
+
+function needsPrompt(p) {
+  return p.mode === 'claude'
+    || (p.mode === 'codex' && ['critic', 'coder'].includes(p.role))
+    || (p.mode === 'antigravity' && ['send-latest', 'new'].includes(p.role))
+    || (p.mode === 'auto-gate' && p.role === 'auto-loop');
 }
 
 async function generate(exec) {
   const p = payload(exec);
   if (!p.project_path) { toast(t('pickProj'), 'warn'); return null; }
-  const needsPrompt = exec === true || p.mode === 'claude'
-    || (p.mode === 'codex' && ['critic', 'coder'].includes(p.role))
-    || (p.mode === 'antigravity' && ['send-latest', 'new'].includes(p.role));
-  if (needsPrompt && !p.prompt) { toast(t('emptyPrompt'), 'warn'); return null; }
+  if ((exec === true || needsPrompt(p)) && !p.prompt) { toast(t('emptyPrompt'), 'warn'); return null; }
   setBusy(true);
   try {
     const r = await api('dispatch', p);
@@ -951,7 +1169,7 @@ $('initSpecBtn').onclick = async () => {
     const p = state.data.projects.find(x => x.path === sel.value); if (p) { p.has_spec = true; projMeta(); }
   }
 };
-$('projectSel').onchange = () => { projMeta(); resetCmd(); };
+$('projectSel').onchange = () => { projMeta(); resetCmd(); ensureGit(true); };
 $('roleSel').onchange = () => { updateHint(); populateOverrides(); resetCmd(); };
 $('promptTxt').oninput = () => { updateChars(); resetCmd(); };
 $('guideBtn').onclick = () => {
@@ -966,6 +1184,297 @@ function setAuto() {
   clearInterval(state.timer);
   if ($('autoToggle').checked) state.timer = setInterval(() => load(), 10000);
 }
+
+// ---------- Live Web Job Runner ----------
+const JOB_END = ['DONE', 'FAILED', 'CANCELLED'];
+function setRunBusy(busy) { $('runWebBtn').disabled = busy; }
+
+function renderJobHead() {
+  const j = state.job;
+  const head = $('liveJobHead'), cancel = $('cancelJobBtn');
+  if (!j) { head.innerHTML = ''; cancel.classList.add('hidden'); return; }
+  const running = j.status === 'RUNNING';
+  const st = running
+    ? `<span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold border text-amber-300 bg-amber-500/10 border-amber-500/40"><span class="w-2.5 h-2.5 rounded-full border-2 border-amber-300 border-t-transparent spin"></span>${esc(t('jobRunning'))} · ${fmt(j.elapsed)}s</span>`
+    : statusBadge(j.status) + `<span>${fmt(j.elapsed)}s</span>`;
+  head.innerHTML = `${st}<span>PID ${esc(j.pid || '—')}</span><span class="truncate max-w-[16rem]" title="${esc(j.id)}">${esc(j.id)}</span>`;
+  cancel.classList.toggle('hidden', !running);
+}
+
+function stopJobPoll() {
+  if (state.job?.timer) { clearInterval(state.job.timer); state.job.timer = null; }
+}
+
+function startJob(r) {
+  stopJobPoll();
+  state.job = { id: r.job_id, pid: r.pid || 0, status: 'RUNNING', offset: 0, elapsed: 0, timer: null, busy: false, fails: 0 };
+  $('liveJobBox').classList.remove('hidden');
+  $('liveJobLog').textContent = '';
+  $('cancelJobBtn').disabled = false;
+  setRunBusy(true);
+  renderJobHead();
+  pollJob();
+  state.job.timer = setInterval(pollJob, 1500);
+}
+
+async function pollJob() {
+  const j = state.job;
+  if (!j || j.busy || j.status !== 'RUNNING') return;
+  j.busy = true;
+  try {
+    const r = await api('job_status&job_id=' + encodeURIComponent(j.id) + '&offset=' + j.offset);
+    if (state.job !== j) return;
+    j.fails = 0;
+    j.pid = r.pid || j.pid;
+    j.elapsed = r.elapsed_sec || 0;
+    j.status = String(r.status || 'RUNNING').toUpperCase();
+    j.offset = r.next_offset ?? j.offset;
+    if (r.log_chunk) {
+      const pre = $('liveJobLog');
+      pre.textContent += r.log_chunk;
+      if (pre.textContent.length > 300000) pre.textContent = pre.textContent.slice(-200000);
+      pre.scrollTop = pre.scrollHeight;
+    }
+    renderJobHead();
+    if (JOB_END.includes(j.status)) finishJob(j);
+  } catch (e) {
+    if (state.job !== j) return;
+    j.fails++;
+    if (e.status === 404 || j.fails >= 8) {
+      stopJobPoll();
+      j.status = 'FAILED';
+      renderJobHead();
+      setRunBusy(false);
+      toast(t('jobLost'), 'err');
+    }
+  } finally {
+    j.busy = false;
+  }
+}
+
+function finishJob(j) {
+  stopJobPoll();
+  setRunBusy(false);
+  toast(t('jobEnded', { status: j.status }), j.status === 'DONE' ? 'ok' : j.status === 'CANCELLED' ? 'warn' : 'err');
+  load();
+}
+
+async function runJob() {
+  if (state.job?.status === 'RUNNING') { toast(t('jobBusy'), 'warn'); return; }
+  const p = payload(false);
+  if (!p.project_path) { toast(t('pickProj'), 'warn'); return; }
+  if (needsPrompt(p) && !p.prompt) { toast(t('emptyPrompt'), 'warn'); return; }
+  setRunBusy(true);
+  try {
+    const r = await api('run_job', p);
+    toast(t('jobStarted', { id: r.job_id }), 'ok');
+    startJob(r);
+  } catch (e) {
+    setRunBusy(false);
+    toast(e.offline ? t('noDirect') : e.message, 'err');
+  }
+}
+
+async function cancelJob() {
+  const j = state.job;
+  if (!j || j.status !== 'RUNNING') return;
+  $('cancelJobBtn').disabled = true;
+  try {
+    await api('cancel_job', { job_id: j.id });
+    toast(t('jobCancelled'), 'warn');
+    pollJob();
+  } catch (e) {
+    $('cancelJobBtn').disabled = false;
+    toast(e.message, 'err');
+  }
+}
+
+// ---------- SPEC Guard ----------
+function renderGuard() {
+  const box = $('specGuardOut');
+  const g = state.guard;
+  if (!g) { box.classList.add('hidden'); box.innerHTML = ''; return; }
+  box.classList.remove('hidden');
+  if (g.loading) { box.innerHTML = `<span class="text-slate-400">${esc(t('guardRunning'))}</span>`; return; }
+  const pass = g.verdict === 'PASS';
+  const files = g.modified_files || [];
+  const list = (arr, empty) => arr.length ? arr.map(x => `<span class="px-1.5 py-0.5 rounded text-[10px] font-mono border border-slate-600/50 bg-slate-800/70 text-slate-300">${esc(x)}</span>`).join(' ') : `<span class="text-slate-500">${esc(empty)}</span>`;
+  const fileRow = f => `<div class="flex items-center gap-2 py-0.5"><span class="px-1 rounded font-mono text-[10px] ${f.category === 'frontend' ? 'bg-cl/15 text-cl' : 'bg-ag/15 text-ag'}">${esc(f.category === 'frontend' ? t('guardFE') : t('guardBE'))}</span><span class="font-mono text-slate-300 truncate" title="${esc(f.path)}">${esc(f.path)}</span><span class="ml-auto text-slate-500 whitespace-nowrap">${esc(f.owner)}</span></div>`;
+  box.innerHTML = `
+    <div class="flex flex-wrap items-center gap-2 mb-2">
+      <span class="font-bold text-slate-200 uppercase tracking-wider text-[11px]">${esc(t('guardTitle'))}</span>
+      ${badge(g.verdict || '—', pass ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40' : 'text-amber-300 bg-amber-500/10 border-amber-500/40')}
+      ${badge('SPEC.md', g.has_spec ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40' : 'text-red-300 bg-red-500/10 border-red-500/40')}
+      ${badge(t('guardFE') + ': ' + (g.frontend_count || 0), 'text-cl bg-cl/10 border-cl/40')}
+      ${badge(t('guardBE') + ': ' + (g.backend_count || 0), 'text-ag bg-ag/10 border-ag/40')}
+    </div>
+    <div class="mb-2"><div class="text-slate-400 mb-1">${esc(t('guardEndpoints'))}</div><div class="flex flex-wrap gap-1">${list(g.spec_endpoints || [], t('guardNone'))}</div></div>
+    ${(g.violations || []).length ? `<div class="mb-2"><div class="text-amber-300 mb-1">${esc(t('guardViol'))}</div>${g.violations.map(v => `<div class="text-amber-200/90">⚠ ${esc(v)}</div>`).join('')}</div>` : ''}
+    <div><div class="text-slate-400 mb-1">${esc(t('guardFiles'))} (${files.length})</div>
+      <div class="max-h-40 overflow-auto scroll">${files.length ? files.slice(0, 60).map(fileRow).join('') : `<span class="text-slate-500">${esc(t('guardNoFiles'))}</span>`}</div></div>
+    ${g.demo ? `<div class="text-slate-500 mt-2">${esc(t('guardDemo'))}</div>` : ''}`;
+}
+
+async function runSpecGuard() {
+  const path = $('projectSel').value;
+  if (!path) { toast(t('pickProj'), 'warn'); return; }
+  $('specGuardBtn').disabled = true;
+  state.guard = { loading: true };
+  renderGuard();
+  try {
+    state.guard = await api('spec_guard', { project_path: path });
+  } catch (e) {
+    if (e.offline) {
+      state.guard = {
+        demo: true, verdict: 'PASS', has_spec: true, frontend_count: 1, backend_count: 2,
+        spec_endpoints: ['GET ?action=status', 'POST ?action=run_job'], violations: [],
+        modified_files: [
+          { path: 'dashboard/index.html', category: 'frontend', owner: 'Claude Code (Frontend)' },
+          { path: 'dashboard/api.php', category: 'backend', owner: 'Antigravity (Backend/Core)' },
+          { path: 'SPEC.md', category: 'backend', owner: 'Antigravity (Backend/Core)' }
+        ]
+      };
+    } else {
+      state.guard = null;
+      toast(e.message, 'err');
+    }
+  } finally {
+    $('specGuardBtn').disabled = false;
+  }
+  renderGuard();
+}
+
+// ---------- Git Branch / Worktree Explorer ----------
+const normPath = p => String(p || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+
+function renderGit() {
+  const box = $('gitBody');
+  const g = state.git;
+  const msg = k => `<p class="text-xs text-slate-500 text-center py-8">${esc(t(k))}</p>`;
+  if (!g) { box.innerHTML = msg('gitLoading'); return; }
+  if (!g.has_git) { box.innerHTML = msg('gitNone'); return; }
+  const stat = (label, val, cls = '') => `<div class="rounded-lg p-2.5 bg-slate-800/50 border border-slate-700/50 min-w-0"><div class="text-[10px] uppercase tracking-wider text-slate-400">${esc(label)}</div><div class="text-sm font-bold font-mono mt-1 truncate ${cls}">${val}</div></div>`;
+  const reviewBtn = path => `<button type="button" data-review="${esc(path)}" class="btn ml-auto whitespace-nowrap px-2 py-1 rounded-md text-[10px] font-bold bg-violet-500/15 text-violet-200 border border-violet-400/40 hover:bg-violet-500/25">${esc(t('gitReview'))}</button>`;
+  const h = k => `<h3 class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold mb-2">${esc(t(k))}</h3>`;
+  const branches = g.branches || [], wts = g.worktrees || [], commits = g.recent_commits || [];
+  box.innerHTML = `
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+      ${stat(t('gitBranch'), esc(g.current_branch || '—'), 'text-cx')}
+      ${stat(t('gitModified'), fmt(g.modified_count), g.modified_count ? 'text-amber-300' : 'text-slate-300')}
+      ${stat('Ahead', '↑ ' + fmt(g.ahead), g.ahead ? 'text-emerald-300' : 'text-slate-300')}
+      ${stat('Behind', '↓ ' + fmt(g.behind), g.behind ? 'text-red-300' : 'text-slate-300')}
+    </div>
+    <div>${h('gitBranches')}<div class="space-y-1 max-h-36 overflow-auto scroll">${branches.map(b => `
+      <div class="flex items-center gap-2 text-[11px] rounded-md px-2 py-1.5 ${b.is_current ? 'bg-cx/10 border border-cx/30' : 'bg-slate-800/40'}">
+        <i data-lucide="git-branch" class="w-3 h-3 ${b.is_current ? 'text-cx' : 'text-slate-500'}"></i>
+        <span class="font-mono font-semibold text-slate-200 truncate">${esc(b.name)}</span>
+        ${b.is_current ? badge(t('gitCurrent'), 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40') : ''}
+        <span class="font-mono text-slate-500">${esc(b.sha)}</span><span class="text-slate-500 truncate">${esc(b.updated)}</span>
+        ${b.is_current ? reviewBtn('') : ''}
+      </div>`).join('') || '<p class="text-xs text-slate-600">—</p>'}</div></div>
+    <div>${h('gitWorktrees')}<div class="space-y-1 max-h-32 overflow-auto scroll">${wts.map(w => `
+      <div class="flex items-center gap-2 text-[11px] rounded-md px-2 py-1.5 bg-slate-800/40">
+        <i data-lucide="folder-git-2" class="w-3 h-3 text-slate-500"></i>
+        <span class="font-mono text-slate-300 truncate" title="${esc(w.path)}">${esc(w.path)}</span>
+        <span class="font-mono text-cx whitespace-nowrap">${esc(w.branch || '')}</span>
+        ${reviewBtn(w.path)}
+      </div>`).join('') || '<p class="text-xs text-slate-600">—</p>'}</div></div>
+    <div>${h('gitCommits')}<div class="space-y-1">${commits.map(c => `
+      <div class="flex items-baseline gap-2 text-[11px]">
+        <span class="font-mono text-cla">${esc(c.sha)}</span>
+        <span class="text-slate-300 truncate flex-1" title="${esc(c.subject)}">${esc(c.subject)}</span>
+        <span class="text-slate-500 whitespace-nowrap">${esc(c.author)} · ${esc(c.time)}</span>
+      </div>`).join('') || '<p class="text-xs text-slate-600">—</p>'}</div></div>`;
+  lucide.createIcons();
+}
+
+function ensureGit(force) {
+  const d = state.data;
+  if (!d) return;
+  const path = $('projectSel').value;
+  const def = d.projects?.[0]?.path;
+  if (!path || path === def) { state.git = d.git_info || null; renderGit(); return; }
+  if (state.demo) { state.git = demoGit(path); renderGit(); return; }
+  const c = state.gitCache[path];
+  state.git = c?.info || null;
+  renderGit();
+  if (c && !force && Date.now() - c.at < 8000) return;
+  if (state.gitBusy) return;
+  state.gitBusy = true;
+  api('git_info&project_path=' + encodeURIComponent(path))
+    .then(r => {
+      state.gitCache[path] = { info: r.git_info, at: Date.now() };
+      if ($('projectSel').value === path) { state.git = r.git_info; renderGit(); }
+    })
+    .catch(() => {})
+    .finally(() => { state.gitBusy = false; });
+}
+
+function reviewWithCouncil(path) {
+  const sel = $('projectSel');
+  if (path) {
+    const opt = [...sel.options].find(o => normPath(o.value) === normPath(path));
+    if (!opt) { toast(t('gitOutside'), 'warn'); return; }
+    sel.value = opt.value;
+    projMeta();
+  }
+  pickMode('council');
+  runJob();
+}
+$('gitBody').onclick = e => {
+  const b = e.target.closest('[data-review]');
+  if (b) reviewWithCouncil(b.dataset.review);
+};
+
+// ---------- Notification & Webhook Center ----------
+function fillNotify() {
+  if (state.notifyDirty) return;
+  const c = state.data?.notify_config;
+  if (!c) return;
+  $('cfgDesktopToast').checked = c.desktop_toast !== false;
+  $('cfgWebhookUrl').value = c.webhook_url || '';
+  $('cfgTgToken').value = c.telegram_bot_token || '';
+  $('cfgTgChatId').value = c.telegram_chat_id || '';
+}
+function notifyBody() {
+  return {
+    desktop_toast: $('cfgDesktopToast').checked,
+    webhook_url: $('cfgWebhookUrl').value.trim(),
+    telegram_bot_token: $('cfgTgToken').value.trim(),
+    telegram_chat_id: $('cfgTgChatId').value.trim()
+  };
+}
+async function saveNotify() {
+  const body = notifyBody();
+  const r = await api('save_notify', body);
+  if (state.data) state.data.notify_config = r.notify_config || body;
+  state.notifyDirty = false;
+  return r;
+}
+['cfgDesktopToast', 'cfgWebhookUrl', 'cfgTgToken', 'cfgTgChatId'].forEach(id => {
+  $(id).addEventListener('input', () => { state.notifyDirty = true; });
+  $(id).addEventListener('change', () => { state.notifyDirty = true; });
+});
+$('saveNotifyBtn').onclick = async () => {
+  $('saveNotifyBtn').disabled = true;
+  try { await saveNotify(); toast(t('notifySaved'), 'ok'); }
+  catch (e) { toast(e.offline ? t('notifyDemo') : e.message, e.offline ? 'warn' : 'err'); }
+  finally { $('saveNotifyBtn').disabled = false; }
+};
+$('testNotifyBtn').onclick = async () => {
+  $('testNotifyBtn').disabled = true;
+  try {
+    if (state.notifyDirty) await saveNotify();
+    const r = await api('test_notify', {});
+    const err = r.result?.error;
+    toast(err ? String(err) : t('notifyTested'), err ? 'warn' : 'ok');
+  } catch (e) { toast(e.offline ? t('notifyDemo') : e.message, e.offline ? 'warn' : 'err'); }
+  finally { $('testNotifyBtn').disabled = false; }
+};
+
+$('runWebBtn').onclick = runJob;
+$('specGuardBtn').onclick = runSpecGuard;
+$('cancelJobBtn').onclick = cancelJob;
 
 setLang(LANG);
 setAuto();

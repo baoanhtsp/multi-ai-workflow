@@ -19,7 +19,7 @@ if (Test-Path $agentApi) {
     Write-Host "  [WARN] agentapi.bat NOT found at $agentApi" -ForegroundColor Red
 }
 
-$lsProc = Get-CimInstance Win32_Process -Filter "Name = 'language_server.exe'" -ErrorAction SilentlyContinue |
+$lsProc = Get-CimInstance Win32_Process -Filter "Name LIKE 'language_server%.exe'" -ErrorAction SilentlyContinue |
     Sort-Object CreationDate -Descending |
     Select-Object -First 1
 
@@ -28,9 +28,9 @@ if ($lsProc) {
         Select-Object -ExpandProperty LocalPort |
         Sort-Object -Descending -Unique)
     $hasCsrf = [bool]($lsProc.CommandLine -match '--csrf_token\s+([^\s"]+)')
-    Write-Host "  [OK] language_server.exe running (PID: $($lsProc.ProcessId), Ports: $($ports -join ', '), CSRF Extracted: $hasCsrf)" -ForegroundColor Green
+    Write-Host "  [OK] $($lsProc.Name) running (PID: $($lsProc.ProcessId), Ports: $($ports -join ', '), CSRF Extracted: $hasCsrf)" -ForegroundColor Green
 } else {
-    Write-Host "  [WARN] language_server.exe process is not currently running" -ForegroundColor DarkYellow
+    Write-Host "  [WARN] language_server*.exe process is not currently running" -ForegroundColor DarkYellow
 }
 
 $bridgeFile = Join-Path $env:USERPROFILE ".gemini\antigravity\agentapi-bridge.json"
@@ -112,17 +112,22 @@ if ($ghCmd) {
 Write-Host "`n[5/6] Global Workflow Files Sync Check" -ForegroundColor Yellow
 $expectedFiles = @(
     (Join-Path $env:USERPROFILE ".gemini\config\rules\claude-leader-workflow.md"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\multi-ai\SKILL.md"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\SKILL.md"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-claude.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-codex.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-council-review.ps1"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-spec-guard.ps1"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-auto-gate.ps1"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\send-notification.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\save-agentapi-env.ps1"),
     (Join-Path $env:USERPROFILE ".claude\CLAUDE.md"),
+    (Join-Path $env:USERPROFILE ".claude\commands\multi-ai.md"),
     (Join-Path $env:USERPROFILE ".claude\commands\antigravity.md"),
     (Join-Path $env:USERPROFILE ".codex\AGENTS.md"),
-    (Join-Path $env:USERPROFILE ".codex\skills\multi-ai-leader\SKILL.md"),
-    (Join-Path $env:USERPROFILE ".codex\skills\multi-ai-leader\agents\openai.yaml")
+    (Join-Path $env:USERPROFILE ".codex\skills\multi-ai\SKILL.md"),
+    (Join-Path $env:USERPROFILE ".codex\skills\multi-ai-leader\SKILL.md")
 )
 
 foreach ($f in $expectedFiles) {
@@ -148,33 +153,28 @@ if (Test-Path $auditFile) {
 
     if ($entries.Count -gt 0) {
         $totalChars = ($entries | Measure-Object -Property PromptChars -Sum).Sum
-        $approvedCount = @($entries | Where-Object { $_.Verdict -eq "APPROVED" }).Count
-        $changesCount  = @($entries | Where-Object { $_.Verdict -eq "CHANGES_REQUESTED" }).Count
+        $estTokensSaved = $entries.Count * 15000
+        Write-Host "  Total AI Invocations Logged : $($entries.Count)" -ForegroundColor White
+        Write-Host "  Total Prompt Characters Sent: $totalChars chars" -ForegroundColor White
+        Write-Host "  Est. Overhead Tokens Saved  : ~$estTokensSaved tokens (via --tools '' & pre-filtered context)" -ForegroundColor Green
 
-        Write-Host "  Total Invocations : $($entries.Count)" -ForegroundColor White
-        Write-Host "  Total PromptChars : $totalChars chars" -ForegroundColor White
-        Write-Host "  Review Verdicts   : $approvedCount APPROVED | $changesCount CHANGES_REQUESTED" -ForegroundColor White
-
-        Write-Host "`n  Breakdown by Tool & Role:" -ForegroundColor Cyan
-        $entries | Group-Object -Property Tool, Role | ForEach-Object {
-            $groupChars = ($_.Group | Measure-Object -Property PromptChars -Sum).Sum
-            Write-Host ("    - {0,-22} : {1,4} calls ({2} chars)" -f $_.Name, $_.Count, $groupChars) -ForegroundColor Gray
+        $byRole = $entries | Group-Object -Property Role | Select-Object Name, Count
+        Write-Host "`n  Invocations by Role:" -ForegroundColor Cyan
+        foreach ($g in $byRole) {
+            Write-Host ("    - {0,-15}: {1}" -f $g.Name, $g.Count)
         }
 
-        if ($ShowRecentLogs -or $entries.Count -gt 0) {
-            Write-Host "`n  Last $([math]::Min(5, $entries.Count)) Audit Entries:" -ForegroundColor Cyan
-            $entries | Select-Object -Last 5 | ForEach-Object {
-                $scoreStr = if ($_.Score) { " [Score: $($_.Score)]" } else { "" }
-                Write-Host "    [$($_.Timestamp)] $($_.Tool)/$($_.Role) ($($_.Model)) -> $($_.Verdict)$scoreStr ($($_.PromptChars) chars)" -ForegroundColor Gray
-            }
+        if ($ShowRecentLogs) {
+            Write-Host "`n  Last 5 Invocations:" -ForegroundColor Cyan
+            $entries | Select-Object -Last 5 | Format-Table Timestamp, Tool, Role, Model, PromptChars, Score, Verdict -AutoSize
         }
     } else {
         Write-Host "  [INFO] Audit log file exists but has no entries yet." -ForegroundColor Gray
     }
 } else {
-    Write-Host "  [INFO] No audit log file yet at $auditFile (will be created on first Claude/Codex call)." -ForegroundColor Gray
+    Write-Host "  [INFO] No audit log entries yet ($auditFile will be created on first invocation)." -ForegroundColor Gray
 }
 
 Write-Host "`n================================================================" -ForegroundColor Cyan
-Write-Host "  Health Check Complete!" -ForegroundColor Cyan
+Write-Host "  Doctor check completed!" -ForegroundColor Cyan
 Write-Host "================================================================" -ForegroundColor Cyan
