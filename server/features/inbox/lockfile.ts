@@ -11,6 +11,96 @@ export interface FileLockHandle {
   release: () => void;
 }
 
+export interface RecoverMutexHandle {
+  recoverPath: string;
+  pid: number;
+  ts: number;
+  release: () => void;
+}
+
+/**
+ * Acquire the .recover mutex (Codex Review #7 Item 4).
+ * Mutex writes { pid, ts } and may be taken over ONLY when that pid is dead
+ * (or the file is corrupt and > 5 s old). Released only if content is still ours.
+ */
+export function acquireRecoverMutex(
+  recoverPath: string,
+  timeoutMs = 10_000
+): RecoverMutexHandle | null {
+  const myPid = process.pid;
+  const myTs = Date.now();
+  const start = Date.now();
+  const sab = new SharedArrayBuffer(4);
+  const int32 = new Int32Array(sab);
+
+  while (true) {
+    let recFd: number | null = null;
+    try {
+      recFd = fs.openSync(recoverPath, 'wx');
+      const recData = JSON.stringify({ pid: myPid, ts: myTs }) + '\n';
+      fs.writeFileSync(recFd, recData, 'utf8');
+      fs.closeSync(recFd);
+      recFd = null;
+      return {
+        recoverPath,
+        pid: myPid,
+        ts: myTs,
+        release: () => {
+          try {
+            const curRaw = fs.readFileSync(recoverPath, 'utf8');
+            const cur = JSON.parse(curRaw);
+            if (Number(cur?.pid) === myPid && Number(cur?.ts) === myTs) {
+              fs.unlinkSync(recoverPath);
+            }
+          } catch {}
+        },
+      };
+    } catch (recErr: any) {
+      if (recFd !== null) {
+        try { fs.closeSync(recFd); } catch {}
+        recFd = null;
+      }
+      if (recErr?.code === 'EEXIST') {
+        let recStale = false;
+        try {
+          const recContent = fs.readFileSync(recoverPath, 'utf8');
+          const recParsed = JSON.parse(recContent);
+          const recOwnerPid = Number(recParsed?.pid);
+          if (recOwnerPid > 0) {
+            if (!isProcessRunning(recOwnerPid)) {
+              recStale = true;
+            }
+          } else {
+            const recStat = fs.statSync(recoverPath);
+            if (Date.now() - recStat.mtimeMs > 5_000) {
+              recStale = true;
+            }
+          }
+        } catch {
+          try {
+            const recStat = fs.statSync(recoverPath);
+            if (Date.now() - recStat.mtimeMs > 5_000) {
+              recStale = true;
+            }
+          } catch {}
+        }
+
+        if (recStale) {
+          try { fs.unlinkSync(recoverPath); } catch {}
+          continue;
+        }
+
+        if (Date.now() - start >= timeoutMs) {
+          return null;
+        }
+        Atomics.wait(int32, 0, 0, 25);
+        continue;
+      }
+      throw recErr;
+    }
+  }
+}
+
 export interface AcquireLockOptions {
   timeoutMs?: number; // 0 for immediate/claims; >0 for items.lock (e.g. 2000ms)
   stepMs?: number; // default 25ms
@@ -101,63 +191,32 @@ export function acquireFileLock(
         }
 
         if (isStale) {
-          // Recovery with mutex: lockPath + '.recover'
           const recoverPath = lockPath + '.recover';
-          const recStart = Date.now();
-          let acquiredMutex = false;
-
-          while (true) {
-            let recFd: number | null = null;
+          const mutex = acquireRecoverMutex(recoverPath, 10_000);
+          if (mutex) {
             try {
-              recFd = fs.openSync(recoverPath, 'wx');
-              const recData = JSON.stringify({ pid: myPid, ts: Date.now() }) + '\n';
-              fs.writeFileSync(recFd, recData, 'utf8');
-              fs.closeSync(recFd);
-              recFd = null;
-              acquiredMutex = true;
-              break;
-            } catch (recErr: any) {
-              if (recFd !== null) {
-                try { fs.closeSync(recFd); } catch {}
-                recFd = null;
-              }
-              if (recErr?.code === 'EEXIST') {
-                // If mutex EEXISTs and is older than 5 s, unlink once and retry
-                let recStale = false;
-                try {
-                  const recStat = fs.statSync(recoverPath);
-                  if (Date.now() - recStat.mtimeMs > 5_000) {
-                    recStale = true;
-                  }
-                } catch {
-                  // ignore
-                }
-                if (recStale) {
-                  try { fs.unlinkSync(recoverPath); } catch {}
-                  continue;
-                }
-                // Else busy-wait on mutex
-                if (Date.now() - recStart > 10_000) {
-                  break;
-                }
-                Atomics.wait(int32, 0, 0, 25);
-                continue;
-              }
-              throw recErr;
-            }
-          }
-
-          if (acquiredMutex) {
-            try {
-              // Holding mutex: RE-READ lockPath
+              // Holding mutex: RE-READ lockPath and re-decide
               let isSameDeadContent = false;
+              let currentDeadData: any = null;
               try {
                 const currentContent = fs.readFileSync(lockPath, 'utf8');
                 if (deadContent) {
                   isSameDeadContent = currentContent === deadContent;
+                  if (isSameDeadContent) {
+                    try { currentDeadData = JSON.parse(currentContent); } catch {}
+                    const curDeadPid = Number(currentDeadData?.pid);
+                    if (curDeadPid > 0 && isProcessRunning(curDeadPid)) {
+                      isSameDeadContent = false;
+                    }
+                  }
                 } else {
-                  const stat = fs.statSync(lockPath);
-                  isSameDeadContent = Date.now() - stat.mtimeMs > 600_000;
+                  // Lock was corrupt
+                  try {
+                    JSON.parse(currentContent);
+                    isSameDeadContent = false;
+                  } catch {
+                    isSameDeadContent = true;
+                  }
                 }
               } catch {
                 isSameDeadContent = false;
@@ -165,7 +224,7 @@ export function acquireFileLock(
 
               if (isSameDeadContent) {
                 if (options?.onRecoverDeadOwner) {
-                  options.onRecoverDeadOwner(deadContent, deadParsed);
+                  options.onRecoverDeadOwner(deadContent, currentDeadData ?? deadParsed);
                 }
 
                 try {
@@ -185,15 +244,10 @@ export function acquireFileLock(
                 return createHandle(lockPath, myPid, myTs);
               }
             } finally {
-              // Release mutex in finally
-              try {
-                fs.unlinkSync(recoverPath);
-              } catch {
-                // ignore
-              }
+              mutex.release();
             }
           }
-          // If not same dead content, loop back and re-evaluate
+          // If not same dead content or mutex timed out, loop back and re-evaluate
           continue;
         }
 

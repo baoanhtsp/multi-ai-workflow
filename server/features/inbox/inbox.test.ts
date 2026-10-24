@@ -16,7 +16,7 @@ import {
   reconcilePendingClaim,
   reconcilePendingClaims,
 } from './actions.ts';
-import { acquireFileLock } from './lockfile.ts';
+import { acquireFileLock, acquireRecoverMutex } from './lockfile.ts';
 import { buildMeaningfulDetail, runJobScanner } from './scanner.ts';
 import {
   addInboxItem,
@@ -832,7 +832,8 @@ test('Codex Review #4 Item 2: live claims are never stolen, dead pid or corrupt 
     assert.equal(resDead.ok, true);
     assert.equal(getInboxItem(paths, item.id)?.status, 'dismissed');
 
-    // 3. Corrupt claim file older than 10 minutes: should be recovered
+    // 3. Corrupt claim file: under Codex Review #7 Item 2 must NEVER allow new dispatch
+    // and must be treated like interrupted (marked done with note), rejecting new action with 409
     const { item: item2 } = addInboxItem(paths, {
       kind: 'needs_login',
       title: 'Corrupt claim test',
@@ -843,9 +844,12 @@ test('Codex Review #4 Item 2: live claims are never stolen, dead pid or corrupt 
     const oldTime = (Date.now() - 700_000) / 1000;
     fs.utimesSync(claimFile2, oldTime, oldTime);
 
-    const resCorrupt = await performInboxAction(ctx, item2.id, 'dismiss', undefined, 'ui');
-    assert.equal(resCorrupt.ok, true);
-    assert.equal(getInboxItem(paths, item2.id)?.status, 'dismissed');
+    await assert.rejects(
+      async () => await performInboxAction(ctx, item2.id, 'dismiss', undefined, 'ui'),
+      (err: any) => err.statusCode === 409 && err.message.includes('already resolved (done)')
+    );
+    assert.equal(getInboxItem(paths, item2.id)?.status, 'done');
+    assert.equal(getInboxItem(paths, item2.id)?.resolution?.note, 'interrupted \u2014 check the job list');
   } finally {
     cleanup();
   }
@@ -1412,6 +1416,266 @@ test('Codex Review #5 Item 3: scanner deletes tracker only after store write suc
     const resolvedData = JSON.parse(fs.readFileSync(path.join(dataDir, 'items.json'), 'utf8'));
     const doneItem = resolvedData.items.find((it: any) => it.id === item.id);
     assert.equal(doneItem?.status, 'done', 'Item must be resolved to done after lock released');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #7 Item 1: dead-owner decision is re-decided under the mutex', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    const { item } = addInboxItem(paths, {
+      kind: 'failed',
+      title: 'Dead owner re-decide test',
+      actions: ['retry', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Retry prompt',
+      },
+    });
+
+    const claimsDir = path.join(paths.featureDataDir('inbox'), 'claims');
+    fs.mkdirSync(claimsDir, { recursive: true });
+    const claimFile = path.join(claimsDir, `${item.id}.lock`);
+
+    // Write initial dead PID lock
+    fs.writeFileSync(claimFile, JSON.stringify({ pid: 999999, ts: 1000 }) + '\n', 'utf8');
+
+    // Simulate that while waiting for .recover, another process replaced the file with a live PID
+    const origReadFileSync = fs.readFileSync;
+    let swappedToLive = false;
+    (fs as any).readFileSync = (p: any, enc: any) => {
+      if (String(p).endsWith(`${item.id}.lock`) && !swappedToLive && fs.existsSync(claimFile + '.recover')) {
+        swappedToLive = true;
+        // Swap file to live process PID under mutex
+        fs.writeFileSync(claimFile, JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n', 'utf8');
+      }
+      return origReadFileSync(p, enc);
+    };
+
+    try {
+      // reconcilePendingClaim should re-read under mutex, see owner is now alive, and return false
+      const res = reconcilePendingClaim(paths, item.id);
+      assert.equal(res, false, 'reconcile must return false when owner PID is no longer dead');
+
+      // The live lock on disk must remain intact!
+      assert.equal(fs.existsSync(claimFile), true);
+      const remaining = JSON.parse(fs.readFileSync(claimFile, 'utf8'));
+      assert.equal(remaining.pid, process.pid, 'Live lock must NOT be unlinked');
+    } finally {
+      fs.readFileSync = origReadFileSync;
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #7 Item 2: atomic journal writes & corrupt claim never allows new dispatch', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+
+  let startJobCalls = 0;
+  ctx.startJob = async () => {
+    startJobCalls++;
+    return { ok: true, job_id: 'job_review7_2' };
+  };
+
+  try {
+    // --- Part A: Corrupt claim is treated as interrupted, never re-opens, never allows new dispatch ---
+    const { item } = addInboxItem(paths, {
+      kind: 'failed',
+      title: 'Corrupt claim test',
+      actions: ['retry', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Fix server',
+      },
+    });
+
+    const claimsDir = path.join(paths.featureDataDir('inbox'), 'claims');
+    fs.mkdirSync(claimsDir, { recursive: true });
+    const claimFile = path.join(claimsDir, `${item.id}.lock`);
+
+    // Write corrupt JSON (e.g. simulated mid-write crash)
+    fs.writeFileSync(claimFile, '{"pid":999999,"ts":1000,"state":"star...CORRUPT_JSON_DATA', 'utf8');
+
+    let resolveEvent: any = null;
+    const unsub = onInboxResolved((it) => {
+      resolveEvent = it;
+    });
+
+    try {
+      const reconciled = reconcilePendingClaim(paths, item.id);
+      assert.equal(reconciled, true, 'reconcile must handle corrupt claim');
+      assert.equal(startJobCalls, 0, 'Must NEVER re-dispatch on corrupt claim');
+      assert.equal(fs.existsSync(claimFile), false, 'Corrupt claim file must be unlinked');
+
+      const saved = getInboxItem(paths, item.id);
+      assert.equal(saved?.status, 'done', 'Item must be marked done, never re-opened');
+      assert.equal(saved?.resolution?.note, 'interrupted \u2014 check the job list');
+      assert.ok(resolveEvent);
+      assert.equal(resolveEvent.id, item.id);
+
+      // Attempting to perform retry on this item must throw 409 already resolved!
+      await assert.rejects(
+        async () => await performInboxAction(ctx, item.id, 'retry', undefined, 'ui'),
+        (err: any) => err.statusCode === 409 && err.message.includes('already resolved')
+      );
+      assert.equal(startJobCalls, 0, 'startJob must NEVER be called');
+    } finally {
+      unsub();
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #7 Item 3: reply state order & recovering "replying" claim', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+
+  let startJobCalls = 0;
+  ctx.startJob = async (body: any) => {
+    startJobCalls++;
+    return { ok: true, job_id: 'job_followup_r7_' + startJobCalls };
+  };
+
+  try {
+    // --- Part A: Order verification: journal { state: "replying" } before fire listeners ---
+    const { item: itemA } = addInboxItem(paths, {
+      kind: 'needs_input',
+      title: 'Reply order test',
+      actions: ['reply', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Prompt A',
+      },
+    });
+
+    const claimsDir = path.join(paths.featureDataDir('inbox'), 'claims');
+    const claimFileA = path.join(claimsDir, `${itemA.id}.lock`);
+
+    let sawStateDuringListener = '';
+    const unsubA = onInboxResolved((it) => {
+      if (it.id === itemA.id && fs.existsSync(claimFileA)) {
+        try {
+          const claimData = JSON.parse(fs.readFileSync(claimFileA, 'utf8'));
+          sawStateDuringListener = claimData?.state;
+        } catch {}
+      }
+      return false; // not handled, proceed to follow-up
+    });
+
+    try {
+      const resA = await performInboxAction(ctx, itemA.id, 'reply', 'User reply A', 'ui');
+      assert.equal(resA.ok, true);
+      assert.equal(sawStateDuringListener, 'replying', 'Claim state must be "replying" during listener execution');
+      assert.equal(startJobCalls, 1);
+    } finally {
+      unsubA();
+    }
+
+    // --- Part B: Recovered "replying" claim resolves to done with stored reply and note ---
+    resetInboxResolvedTracker();
+    const { item: itemB } = addInboxItem(paths, {
+      kind: 'needs_input',
+      title: 'Interrupted replying claim test',
+      actions: ['reply', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Prompt B',
+      },
+    });
+
+    const claimFileB = path.join(claimsDir, `${itemB.id}.lock`);
+    fs.writeFileSync(
+      claimFileB,
+      JSON.stringify({
+        pid: 999999,
+        ts: 1000,
+        state: 'replying',
+        action: 'reply',
+        by: 'ui',
+        at: new Date().toISOString(),
+        text: 'Reply captured before crash',
+      }) + '\n',
+      'utf8'
+    );
+
+    let notifiedItemB: any = null;
+    const unsubB = onInboxResolved((it) => {
+      notifiedItemB = it;
+    });
+
+    try {
+      const rec = reconcilePendingClaim(paths, itemB.id);
+      assert.equal(rec, true);
+      assert.equal(startJobCalls, 1, 'Recovery must NEVER re-dispatch follow-up job');
+      assert.equal(fs.existsSync(claimFileB), false, 'Claim file must be unlinked');
+
+      const savedB = getInboxItem(paths, itemB.id);
+      assert.equal(savedB?.status, 'done');
+      assert.equal(savedB?.resolution?.action, 'reply');
+      assert.equal(savedB?.resolution?.text, 'Reply captured before crash');
+      assert.equal(savedB?.resolution?.note, 'interrupted before follow-up');
+      assert.ok(notifiedItemB);
+      assert.equal(notifiedItemB.id, itemB.id);
+    } finally {
+      unsubB();
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #7 Item 4: .recover mutex written with { pid, ts }, stolen only if dead or corrupt > 5s, release only if ours', () => {
+  const { paths, cleanup } = createTempTestPaths();
+  const dataDir = paths.featureDataDir('inbox');
+  fs.mkdirSync(dataDir, { recursive: true });
+  const recoverFile = path.join(dataDir, 'test.lock.recover');
+
+  try {
+    // 1. Initial: acquire mutex normally -> writes { pid, ts }
+    const m1 = acquireRecoverMutex(recoverFile, 100);
+    assert.ok(m1);
+    assert.equal(fs.existsSync(recoverFile), true);
+    const m1Content = JSON.parse(fs.readFileSync(recoverFile, 'utf8'));
+    assert.equal(m1Content.pid, process.pid);
+
+    // 2. Second attempt while m1 is live -> fails with timeout (never steals live mutex)
+    const m2 = acquireRecoverMutex(recoverFile, 50);
+    assert.equal(m2, null, 'Must NOT steal live mutex');
+
+    // 3. Stolen only when owner PID is dead:
+    // Write dead PID to mutex
+    fs.writeFileSync(recoverFile, JSON.stringify({ pid: 999999, ts: 1000 }) + '\n', 'utf8');
+
+    // acquireRecoverMutex should take it over because PID 999999 is dead!
+    const m3 = acquireRecoverMutex(recoverFile, 100);
+    assert.ok(m3, 'Must take over mutex when owner PID is dead');
+    const m3Content = JSON.parse(fs.readFileSync(recoverFile, 'utf8'));
+    assert.equal(m3Content.pid, process.pid);
+
+    // 4. Release ONLY if content is still ours:
+    // Simulate another process swapped the mutex file content to another PID
+    fs.writeFileSync(recoverFile, JSON.stringify({ pid: 888888, ts: Date.now() + 5000 }) + '\n', 'utf8');
+
+    // m3 calls release: because PID/ts don't match, it must NOT unlink someone else's mutex!
+    m3.release();
+    assert.equal(fs.existsSync(recoverFile), true, 'release must never unlink someone elses mutex');
+    const remaining = JSON.parse(fs.readFileSync(recoverFile, 'utf8'));
+    assert.equal(remaining.pid, 888888);
+
+    // Clean up
+    fs.unlinkSync(recoverFile);
   } finally {
     cleanup();
   }

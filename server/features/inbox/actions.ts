@@ -5,7 +5,7 @@ import type { ServerPaths } from '../../lib/paths.ts';
 import { isDirectorySafe, isFileSafe } from '../../lib/paths.ts';
 import { isProcessRunning } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
-import { acquireFileLock } from './lockfile.ts';
+import { acquireFileLock, acquireRecoverMutex } from './lockfile.ts';
 import { getJobFlags, runJobScanner } from './scanner.ts';
 import {
   addInboxItem,
@@ -66,6 +66,12 @@ function logInboxAudit(
   } catch {
     // Ignore audit log error
   }
+}
+
+function atomicWriteJournal(claimFile: string, data: Record<string, unknown>): void {
+  const tmpFile = `${claimFile}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmpFile, JSON.stringify(data) + '\n', 'utf8');
+  fs.renameSync(tmpFile, claimFile);
 }
 
 export async function handleInboxList(
@@ -243,92 +249,92 @@ export function reconcilePendingClaim(paths: ServerPaths, id: string): boolean {
 
   let raw = '';
   let data: any = null;
+  let isCorrupt = false;
   try {
     raw = fs.readFileSync(claimFile, 'utf8');
     data = JSON.parse(raw);
   } catch {
-    try {
-      const stat = fs.statSync(claimFile);
-      if (Date.now() - stat.mtimeMs > 600_000) {
-        try { fs.unlinkSync(claimFile); } catch {}
-        return true;
-      }
-    } catch {}
-    return false;
+    isCorrupt = true;
   }
 
-  const pid = Number(data?.pid);
-  const isDead = pid > 0 ? !isProcessRunning(pid) : false;
-  const hasResolution = Boolean(data?.resolution?.job_id || data?.resolution);
+  if (!isCorrupt) {
+    const pid = Number(data?.pid);
+    const isDead = pid > 0 ? !isProcessRunning(pid) : false;
+    const hasResolution = Boolean(data?.resolution?.job_id || data?.resolution);
 
-  // If owner is alive and does not have a pending completed resolution, leave it alone
-  if (!isDead && !hasResolution) {
-    return false;
-  }
-
-  const recoverPath = claimFile + '.recover';
-  const recStart = Date.now();
-  const sab = new SharedArrayBuffer(4);
-  const int32 = new Int32Array(sab);
-
-  while (true) {
-    let recFd: number | null = null;
-    try {
-      recFd = fs.openSync(recoverPath, 'wx');
-      fs.writeFileSync(recFd, JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n', 'utf8');
-      fs.closeSync(recFd);
-      recFd = null;
-      break;
-    } catch (recErr: any) {
-      if (recFd !== null) {
-        try { fs.closeSync(recFd); } catch {}
-        recFd = null;
-      }
-      if (recErr?.code === 'EEXIST') {
-        try {
-          const recStat = fs.statSync(recoverPath);
-          if (Date.now() - recStat.mtimeMs > 5_000) {
-            try { fs.unlinkSync(recoverPath); } catch {}
-            continue;
-          }
-        } catch {}
-        if (Date.now() - recStart > 10_000) {
-          return false;
-        }
-        Atomics.wait(int32, 0, 0, 25);
-        continue;
-      }
+    // If owner is alive and does not have a pending completed resolution, leave it alone
+    if (!isDead && !hasResolution) {
       return false;
     }
   }
 
+  const recoverPath = claimFile + '.recover';
+  const mutex = acquireRecoverMutex(recoverPath, 10_000);
+  if (!mutex) {
+    return false;
+  }
+
   try {
+    // Under .recover mutex: RE-READ claimFile and re-decide (Codex Review #7 Item 1)
     let currentRaw = '';
     let currentData: any = null;
+    let currentCorrupt = false;
     try {
       currentRaw = fs.readFileSync(claimFile, 'utf8');
       currentData = JSON.parse(currentRaw);
     } catch {
-      return false;
+      currentCorrupt = true;
     }
 
     let finalResolution: any = null;
-    if (currentData?.resolution) {
-      finalResolution = currentData.resolution;
-    } else if (isDead && (currentData?.state === 'starting' || currentData?.state === 'started')) {
+
+    if (currentCorrupt) {
+      // Codex Review #7 Item 2: treat corrupt claim like an interrupted one
       finalResolution = {
-        action: currentData.action || 'retry',
-        by: currentData.by || 'ui',
-        at: currentData.at || new Date().toISOString(),
-        ...(currentData.job_id ? { job_id: currentData.job_id } : {}),
+        action: 'retry',
+        by: 'ui',
+        at: new Date().toISOString(),
         note: 'interrupted \u2014 check the job list',
       };
-    } else if (isDead) {
-      // Dead owner before dispatch, no state or resolution. Just unlink stale claim file
-      try { fs.unlinkSync(claimFile); } catch {}
-      return true;
     } else {
-      return false;
+      const currentPid = Number(currentData?.pid);
+      const currentDead = currentPid > 0 ? !isProcessRunning(currentPid) : false;
+      const currentHasResolution = Boolean(currentData?.resolution);
+
+      if (!currentHasResolution) {
+        // Re-decide: must be same content AND owner PID still dead
+        if (currentRaw !== raw || !currentDead) {
+          // Release mutex and go back to normal acquire path
+          return false;
+        }
+      }
+
+      if (currentHasResolution) {
+        finalResolution = currentData.resolution;
+      } else if (currentData?.state === 'replying') {
+        // Codex Review #7 Item 3: recovered "replying" claim resolves to done with stored reply and note
+        finalResolution = {
+          action: 'reply',
+          text: currentData.text || '',
+          by: currentData.by || 'ui',
+          at: currentData.at || new Date().toISOString(),
+          note: 'interrupted before follow-up',
+        };
+      } else if (currentData?.state === 'starting' || currentData?.state === 'started') {
+        finalResolution = {
+          action: currentData.action || 'retry',
+          by: currentData.by || 'ui',
+          at: currentData.at || new Date().toISOString(),
+          ...(currentData.job_id ? { job_id: currentData.job_id } : {}),
+          note: 'interrupted \u2014 check the job list',
+        };
+      } else if (currentDead) {
+        // Dead owner before dispatch, no state or resolution. Just unlink stale claim file
+        try { fs.unlinkSync(claimFile); } catch {}
+        return true;
+      } else {
+        return false;
+      }
     }
 
     try {
@@ -342,7 +348,7 @@ export function reconcilePendingClaim(paths: ServerPaths, id: string): boolean {
       return false;
     }
   } finally {
-    try { fs.unlinkSync(recoverPath); } catch {}
+    mutex.release();
   }
 }
 
@@ -391,14 +397,35 @@ function tryAcquireInboxClaim(paths: ServerPaths, id: string): InboxClaim {
   const handle = acquireFileLock(claimFile, {
     timeoutMs: 0,
     onRecoverDeadOwner: (deadContent, deadParsed) => {
-      if (deadParsed?.state === 'starting' || deadParsed?.state === 'started' || deadParsed?.resolution) {
-        const res = deadParsed.resolution ?? {
+      let res: any = null;
+      if (!deadParsed) {
+        res = {
+          action: 'retry',
+          by: 'ui',
+          at: new Date().toISOString(),
+          note: 'interrupted \u2014 check the job list',
+        };
+      } else if (deadParsed.resolution) {
+        res = deadParsed.resolution;
+      } else if (deadParsed.state === 'replying') {
+        res = {
+          action: 'reply',
+          text: deadParsed.text || '',
+          by: deadParsed.by || 'ui',
+          at: deadParsed.at || new Date().toISOString(),
+          note: 'interrupted before follow-up',
+        };
+      } else if (deadParsed.state === 'starting' || deadParsed.state === 'started') {
+        res = {
           action: deadParsed.action || 'retry',
           by: deadParsed.by || 'ui',
           at: deadParsed.at || new Date().toISOString(),
           ...(deadParsed.job_id ? { job_id: deadParsed.job_id } : {}),
           note: 'interrupted \u2014 check the job list',
         };
+      }
+
+      if (res) {
         const updated = updateInboxItemStatus(paths, normId, 'done', res);
         if (updated) {
           void fireInboxResolved(updated);
@@ -509,17 +536,16 @@ export async function performInboxAction(
         throw new ApiValidationError(`Inbox item '${normId}' has no retry configuration.`, 400);
       }
 
-      // 1. Journal BEFORE dispatch (Codex Review #6 Item 2)
+      // 1. Journal BEFORE dispatch atomically (Codex Review #6 Item 2 & Review #7 Item 2)
       try {
-        const startingJournal = JSON.stringify({
+        atomicWriteJournal(claim.claimFile, {
           pid: claim.pid,
           ts: claim.ts,
           state: 'starting',
           action: 'retry',
           by: resolvedBy,
           at: now,
-        }) + '\n';
-        fs.writeFileSync(claim.claimFile, startingJournal, 'utf8');
+        });
       } catch {
         throw new ApiValidationError("Failed to journal action before job start.", 503);
       }
@@ -535,9 +561,9 @@ export async function performInboxAction(
         job_id: newJobId,
       };
 
-      // 3. Journal AFTER dispatch
+      // 3. Journal AFTER dispatch atomically
       try {
-        const startedJournal = JSON.stringify({
+        atomicWriteJournal(claim.claimFile, {
           pid: claim.pid,
           ts: claim.ts,
           state: 'started',
@@ -546,8 +572,7 @@ export async function performInboxAction(
           at: now,
           job_id: newJobId,
           resolution,
-        }) + '\n';
-        fs.writeFileSync(claim.claimFile, startedJournal, 'utf8');
+        });
       } catch {
         // ignore
       }
@@ -590,6 +615,21 @@ export async function performInboxAction(
         throw new ApiValidationError("Reply text must be between 1 and 4000 characters.", 400);
       }
 
+      // Step 1: Journal { state: "replying", text } atomically BEFORE anything else (Codex Review #7 Item 3)
+      try {
+        atomicWriteJournal(claim.claimFile, {
+          pid: claim.pid,
+          ts: claim.ts,
+          state: 'replying',
+          action: 'reply',
+          by: resolvedBy,
+          at: now,
+          text: rawText,
+        });
+      } catch {
+        throw new ApiValidationError("Failed to journal reply before action.", 503);
+      }
+
       const resolution = {
         action: 'reply',
         text: rawText,
@@ -598,113 +638,116 @@ export async function performInboxAction(
         job_id: undefined as string | undefined,
       };
 
-      // 1. Store reply FIRST (Codex Review #6 Item 3 & design §3.3)
-      let updated: InboxItem | null = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          updated = updateInboxItemStatus(ctx.paths, normId, 'done', resolution);
-          break;
-        } catch {
-          if (attempt === 2) break;
-          await new Promise((r) => setTimeout(r, 50));
-        }
-      }
-      if (!updated) {
-        throw new ApiValidationError("Inbox is busy, try again.", 503);
-      }
+      // Step 2: Fire listeners
+      const tempItem: InboxItem = {
+        ...item,
+        status: 'done',
+        resolution,
+      };
+      const handled = await fireInboxResolved(tempItem);
 
-      // 2. Fire onInboxResolved FIRST
-      const handled = await fireInboxResolved(updated);
-
-      // 3. Start follow-up job ONLY if no listener returned true and item has retry
-      if (!handled && item.retry) {
-        // Journal BEFORE dispatch
-        try {
-          const startingJournal = JSON.stringify({
-            pid: claim.pid,
-            ts: claim.ts,
-            state: 'starting',
-            action: 'reply',
-            by: resolvedBy,
-            at: now,
-            text: rawText,
-          }) + '\n';
-          fs.writeFileSync(claim.claimFile, startingJournal, 'utf8');
-        } catch {
-          throw new ApiValidationError("Failed to journal action before job start.", 503);
-        }
-
-        const originalPrompt = item.retry.prompt ?? '';
-        const followUpPrompt = `${originalPrompt}\n\n## Follow-up from the user\n${rawText}`.trim();
-        const followUpBody = {
-          ...item.retry,
-          prompt: followUpPrompt,
-        };
-        let followUpJobId = '';
-        try {
-          const jobRes = await ctx.startJob(followUpBody as unknown as Record<string, unknown>);
-          followUpJobId = (jobRes?.job_id as string) ?? '';
-        } catch (startErr) {
-          // If follow-up job failed to start, roll back status to 'open' so user can retry reply
-          unmarkInboxResolved(normId);
-          try {
-            updateInboxItemStatus(ctx.paths, normId, 'open', null as any);
-          } catch {}
-          throw startErr;
-        }
-
-        resolution.job_id = followUpJobId;
-
-        // Journal AFTER dispatch
-        try {
-          const startedJournal = JSON.stringify({
-            pid: claim.pid,
-            ts: claim.ts,
-            state: 'started',
-            action: 'reply',
-            by: resolvedBy,
-            at: now,
-            job_id: followUpJobId,
-            resolution,
-          }) + '\n';
-          fs.writeFileSync(claim.claimFile, startedJournal, 'utf8');
-        } catch {
-          // ignore
-        }
-
-        // Store update with job_id
-        let jobUpdated: InboxItem | null = null;
+      // Step 3: If handled (or item has no retry): save done now
+      if (handled || !item.retry) {
+        let updated: InboxItem | null = null;
         for (let attempt = 0; attempt < 3; attempt++) {
           try {
-            jobUpdated = updateInboxItemStatus(ctx.paths, normId, 'done', resolution);
+            updated = updateInboxItemStatus(ctx.paths, normId, 'done', resolution);
             break;
           } catch {
             if (attempt === 2) break;
             await new Promise((r) => setTimeout(r, 50));
           }
         }
-
-        if (jobUpdated) {
-          return {
-            ok: true,
-            item: jobUpdated,
-            job_id: followUpJobId,
-          };
+        if (!updated) {
+          throw new ApiValidationError("Inbox is busy, try again.", 503);
         }
-
-        // Store update failed, follow-up job started: keep claim file
-        claim.keep();
         return {
           ok: true,
-          job_id: followUpJobId,
-          pending_store_update: true,
+          item: updated,
         };
       }
 
-      // No follow-up job started (handled by listener or no retry)
+      // Else: not handled AND item has retry:
+      // a. Journal "starting" atomically
+      try {
+        atomicWriteJournal(claim.claimFile, {
+          pid: claim.pid,
+          ts: claim.ts,
+          state: 'starting',
+          action: 'reply',
+          by: resolvedBy,
+          at: now,
+          text: rawText,
+        });
+      } catch {
+        throw new ApiValidationError("Failed to journal action before job start.", 503);
+      }
+
+      // b. startJob
+      const originalPrompt = item.retry.prompt ?? '';
+      const followUpPrompt = `${originalPrompt}\n\n## Follow-up from the user\n${rawText}`.trim();
+      const followUpBody = {
+        ...item.retry,
+        prompt: followUpPrompt,
+      };
+      let followUpJobId = '';
+      try {
+        const jobRes = await ctx.startJob(followUpBody as unknown as Record<string, unknown>);
+        followUpJobId = (jobRes?.job_id as string) ?? '';
+      } catch (startErr) {
+        // If follow-up job failed to start, roll back status to 'open' and re-throw
+        unmarkInboxResolved(normId);
+        try {
+          updateInboxItemStatus(ctx.paths, normId, 'open', null as any);
+        } catch {}
+        throw startErr;
+      }
+
+      resolution.job_id = followUpJobId;
+
+      // c. Journal "started" + job_id atomically
+      try {
+        atomicWriteJournal(claim.claimFile, {
+          pid: claim.pid,
+          ts: claim.ts,
+          state: 'started',
+          action: 'reply',
+          by: resolvedBy,
+          at: now,
+          job_id: followUpJobId,
+          text: rawText,
+          resolution,
+        });
+      } catch {
+        // ignore
+      }
+
+      // d. Save done with job_id
+      let jobUpdated: InboxItem | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          jobUpdated = updateInboxItemStatus(ctx.paths, normId, 'done', resolution);
+          break;
+        } catch {
+          if (attempt === 2) break;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+
+      if (jobUpdated) {
+        return {
+          ok: true,
+          item: jobUpdated,
+          job_id: followUpJobId,
+        };
+      }
+
+      // Store update failed, follow-up job started: keep claim file
+      claim.keep();
       return {
         ok: true,
-        item: updated,
+        job_id: followUpJobId,
+        pending_store_update: true,
       };
     }
 
