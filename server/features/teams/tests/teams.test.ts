@@ -345,3 +345,65 @@ test('teams: [Item 1] import with evil key or foreign workdir throws 400 and wri
   assert.equal(fs.existsSync(path.join(freshProj, '.maw')), false, 'Nothing should be written on foreign workdir rejection');
 });
 
+test('teams: [Item 4] apply Full Team in two projects -> two team ids, two groups, no shared agents', async () => {
+  const { makeReq, testProj, paths } = setupTestContext();
+
+  const proj1 = testProj;
+  const proj2 = path.join(path.dirname(testProj), 'second-mission-app');
+  fs.mkdirSync(proj2, { recursive: true });
+
+  // 1. Save and apply Full Team in proj1
+  const saveReq1 = makeReq({
+    project_path: proj1,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  const saveRes1 = (await feature.routes['team_save']!.handler(saveReq1, saveReq1)) as any;
+  assert.ok(saveRes1.team.id);
+  assert.notEqual(saveRes1.team.id, 'tm_builtin_full', 'Must generate a project-specific team ID');
+
+  const applyReq1 = makeReq({ project_path: proj1 });
+  const applyRes1 = (await feature.routes['team_apply']!.handler(applyReq1, applyReq1)) as any;
+  assert.equal(applyRes1.ok, true);
+  assert.equal(applyRes1.agents.length, 6);
+
+  // 2. Save and apply Full Team in proj2
+  const saveReq2 = makeReq({
+    project_path: proj2,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  const saveRes2 = (await feature.routes['team_save']!.handler(saveReq2, saveReq2)) as any;
+  assert.ok(saveRes2.team.id);
+  assert.notEqual(saveRes2.team.id, 'tm_builtin_full');
+  assert.notEqual(saveRes2.team.id, saveRes1.team.id, 'Must generate distinct team IDs for different projects');
+
+  const applyReq2 = makeReq({ project_path: proj2 });
+  const applyRes2 = (await feature.routes['team_apply']!.handler(applyReq2, applyReq2)) as any;
+  assert.equal(applyRes2.ok, true);
+  assert.equal(applyRes2.agents.length, 6);
+
+  // 3. Verify groups.json: two distinct groups
+  const groupsFile = path.win32.join(paths.featureDataDir('teams'), '..', 'agents-ws', 'groups.json');
+  const groupsData = JSON.parse(fs.readFileSync(groupsFile, 'utf8'));
+  const team1Group = groupsData.groups.find((g: any) => g.team_id === saveRes1.team.id);
+  const team2Group = groupsData.groups.find((g: any) => g.team_id === saveRes2.team.id);
+  assert.ok(team1Group, 'Group for project 1 team must exist');
+  assert.ok(team2Group, 'Group for project 2 team must exist');
+  assert.notEqual(team1Group.id, team2Group.id, 'Groups must have distinct IDs');
+
+  // 4. Verify agents.json: 12 live agents (6 in proj1, 6 in proj2) and no shared agents
+  const agentsFile = path.win32.join(paths.featureDataDir('teams'), '..', 'agents-ws', 'agents.json');
+  const agentsData = JSON.parse(fs.readFileSync(agentsFile, 'utf8'));
+  const proj1Agents = agentsData.agents.filter((a: any) => a.deleted_at === null && a.workdir.toLowerCase() === proj1.toLowerCase());
+  const proj2Agents = agentsData.agents.filter((a: any) => a.deleted_at === null && a.workdir.toLowerCase() === proj2.toLowerCase());
+  assert.equal(proj1Agents.length, 6, 'Project 1 must have 6 live agents');
+  assert.equal(proj2Agents.length, 6, 'Project 2 must have 6 live agents');
+
+  const proj1AgentIds = new Set(proj1Agents.map((a: any) => a.id));
+  const proj2AgentIds = new Set(proj2Agents.map((a: any) => a.id));
+  for (const id of proj1AgentIds) {
+    assert.equal(proj2AgentIds.has(id), false, `Agent ${id} must not be shared across projects`);
+  }
+});
+

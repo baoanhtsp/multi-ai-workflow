@@ -4,7 +4,13 @@ import { handleCancelJob, refreshJobMetaStatus, type JobMeta } from '../../actio
 import { handleSpecGuard } from '../../actions/specGuard.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
 import { isFileSafe } from '../../lib/paths.ts';
-import { getBaseCommit, getWorktreeChangedFiles } from '../agents-ws/lib/git.ts';
+import {
+  getBaseCommit,
+  getDirtyFilesWithHashes,
+  getNonIsolatedChangedFiles,
+  getWorktreeChangedFiles,
+  type WorktreeChangedFilesResult,
+} from '../agents-ws/lib/git.ts';
 import { matchesAnyScope } from '../agents-ws/lib/glob.ts';
 import {
   parseHandoffDispatchBlock,
@@ -16,8 +22,8 @@ import {
   generateMessageId,
 } from '../agents-ws/lib/ids.ts';
 import { parseJobLog } from '../agents-ws/lib/logparse.ts';
-import { parseRoleMarkdown } from '../agents-ws/lib/markdown-roles.ts';
-import { withS6State } from '../agents-ws/lib/mutex.ts';
+import { parseRoleMarkdown, type RoleSections } from '../agents-ws/lib/markdown-roles.ts';
+import { s6StateStorage, withS6State } from '../agents-ws/lib/mutex.ts';
 import { buildPrompt, type PromptMemberInfo } from '../agents-ws/lib/prompt.ts';
 import { readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent } from '../agents-ws/types.ts';
@@ -343,15 +349,24 @@ let isTicking = false;
 let tickTimer: NodeJS.Timeout | null = null;
 let lastKnownCtx: MawFeatureContext | null = null;
 
+export function resetTickTimerForTest(): void {
+  if (tickTimer) {
+    clearInterval(tickTimer);
+    tickTimer = null;
+  }
+}
+
 export function ensureTickStarted(ctx: MawFeatureContext): void {
   lastKnownCtx = ctx;
   if (!tickTimer) {
-    tickTimer = setInterval(() => {
-      if (lastKnownCtx) {
-        tick(lastKnownCtx).catch(() => {});
-      }
-    }, 2000);
-    tickTimer.unref();
+    s6StateStorage.exit(() => {
+      tickTimer = setInterval(() => {
+        if (lastKnownCtx) {
+          tick(lastKnownCtx).catch(() => {});
+        }
+      }, 2000);
+      tickTimer.unref();
+    });
   }
 }
 
@@ -793,17 +808,26 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       } else {
         h.result = parsedRes.result;
 
-        // Write scope check when isolated in worktree
+        // Write scope check: isolated worktree OR non-isolated shared directory
         let finalStatus: HandoffStatus = h.result.status;
-        if (h.worktree) {
-          const changedRes = await getWorktreeChangedFiles(h.worktree, h.base_commit);
+        const targetAgent = agentsData.agents.find((a) => a.id === h.to);
+        const checkDir = h.worktree || targetAgent?.workdir || '';
+        if (checkDir) {
+          let changedRes: WorktreeChangedFilesResult;
+          if (h.isolated && h.worktree) {
+            changedRes = await getWorktreeChangedFiles(h.worktree, h.base_commit);
+          } else if (h.base_commit || h.dirty_baseline) {
+            changedRes = await getNonIsolatedChangedFiles(checkDir, h.base_commit, h.dirty_baseline);
+          } else {
+            changedRes = { ok: true, files: [] };
+          }
+
           if (!changedRes.ok) {
             h.parse_error = 'could not list changed files';
             finalStatus = 'needs_review';
           } else {
             const unionFiles = new Set([...changedRes.files, ...h.result.files_changed]);
 
-            const targetAgent = agentsData.agents.find((a) => a.id === h.to);
             let writeScope: string[] = ['**'];
             if (targetAgent?.workdir) {
               const teamFile = path.win32.join(targetAgent.workdir, '.maw', 'team.json');
@@ -825,7 +849,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
 
             try {
               const guardRes = await handleSpecGuard(
-                { project_path: h.worktree, owner: h.platform },
+                { project_path: checkDir, owner: h.platform },
                 ctx.paths
               );
               if (guardRes && guardRes.verdict === 'FAIL') {
@@ -888,11 +912,20 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       }
     }
 
+    // Item 3: When not isolated, run that team's handoffs one at a time (effective max_parallel = 1)
+    if (!isolate) {
+      maxParallel = 1;
+    }
+
     let runningCount = handoffsList.filter((h) => h.status === 'running').length;
+    const runningNonIsolated = handoffsList.filter((h) => h.status === 'running' && !h.isolated).length;
     const startedList = handoffsList.filter((h) => h.status === 'started');
 
     for (const h of startedList) {
       if (runningCount >= maxParallel) {
+        break;
+      }
+      if (!isolate && runningNonIsolated >= 1) {
         break;
       }
 
@@ -1044,10 +1077,17 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       // Item 4: new_session true for new_session-capable platform (antigravity)
       const newSession = newSessionFor(ctx, memberAgent.platform);
 
-      // Record base_commit (git rev-parse HEAD of the member's workdir)
+      // Record base_commit and dirty_baseline (for non-isolated attributing)
       let baseCommit: string | null = null;
+      let dirtyBaseline: Record<string, string> | undefined;
       if (memberAgent.workdir) {
         baseCommit = await getBaseCommit(memberAgent.workdir);
+        if (!isolate) {
+          const dirtyRes = await getDirtyFilesWithHashes(memberAgent.workdir);
+          if (dirtyRes.ok) {
+            dirtyBaseline = dirtyRes.files;
+          }
+        }
       }
 
       try {
@@ -1068,6 +1108,9 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         h.started_at = new Date().toISOString();
         if (baseCommit) {
           h.base_commit = baseCommit;
+        }
+        if (dirtyBaseline) {
+          h.dirty_baseline = dirtyBaseline;
         }
         runningCount++;
         handoffsDirty = true;
@@ -1248,9 +1291,10 @@ export async function startTurnJob(
     memContext = memRes.text;
   } catch {}
 
-  // Item 9: may_delegate from team role + teamMembers list
+  // Item 5: may_delegate from team role + teamMembers list + agent's own role profile
   let mayDelegate = false;
   let teamMembers: PromptMemberInfo[] = [];
+  let agentRoleSections: RoleSections | undefined;
 
   if (agent.team_id && agent.workdir) {
     const teamFile = path.win32.join(agent.workdir, '.maw', 'team.json');
@@ -1259,6 +1303,16 @@ export async function startTurnJob(
         const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
         const myRole = team.roles.find((r) => r.key === agent.team_role || r.agent_id === agent.id);
         mayDelegate = Boolean(myRole?.may_delegate);
+
+        const myRoleKey = myRole?.key || agent.team_role;
+        if (myRoleKey) {
+          const myRoleFile = path.win32.join(agent.workdir, '.maw', 'roles', `${myRoleKey}.md`);
+          if (isFileSafe(myRoleFile)) {
+            try {
+              agentRoleSections = parseRoleMarkdown(fs.readFileSync(myRoleFile, 'utf8')).sections;
+            } catch {}
+          }
+        }
 
         if (mayDelegate) {
           for (const r of team.roles) {
@@ -1288,6 +1342,7 @@ export async function startTurnJob(
       name: agent.name,
       persona: agent.persona,
       team_role: agent.team_role,
+      role_sections: agentRoleSections,
       hooks: agent.hooks,
       may_delegate: mayDelegate,
     },

@@ -123,7 +123,7 @@ Files: `chat/conversations.json` `{ version: 1, conversations: Conversation[] }`
 {
   "seq": 3, "id": "m_1a2b3c4d",
   "role": "user" | "assistant" | "system" | "handoff",
-  "text": "…",                    // user ≤ 20000 chars; assistant stored ≤ 60000 chars
+  "text": "…",                    // user ≤ 15000 chars; assistant stored ≤ 60000 chars
   "ts": "ISO",
   "platform", "model", "effort",  // what was requested
   "actual_model": "",             // B3: what the CLI reported
@@ -181,7 +181,7 @@ Input: the job log text. Output `{ reply, actual_model, cost_usd, tokens_in, tok
 - `POST chat_create { agent_id, title? }` → `{ ok, conversation }`.
 - `POST chat_rename { conversation_id, title }` → `{ ok, conversation }`.
 - `POST chat_delete { conversation_id }` → `{ ok }` (soft; 409 while busy).
-- `POST chat_send { conversation_id, text, platform?, model?, effort?, attachments? }` → see lifecycle. Text 1–20 000 chars. Model / effort validated against the platform.
+- `POST chat_send { conversation_id, text, platform?, model?, effort?, attachments? }` → see lifecycle. Text 1–15 000 chars (the prompt must fit the runner's 20 000 limit). Model / effort validated against the platform.
 - `POST chat_queue_remove { conversation_id, queue_id }` → `{ ok, queue }`.
 - `POST chat_stop { conversation_id }` → cancels the active job through `handleCancelJob({ job_id }, paths)`; the running message becomes `cancelled`; the queue is kept. `{ ok, cancelled: job_id }`.
 - `POST chat_compact { conversation_id }` → `{ ok, job_id }`.

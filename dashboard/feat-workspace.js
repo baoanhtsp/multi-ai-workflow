@@ -295,7 +295,7 @@
           <div class="ws-composer" id="wsComposer">
             <div class="ws-queue hidden" id="wsQueue"></div>
             <div class="ws-att" id="wsAtt"></div>
-            <textarea id="wsInput" rows="3" maxlength="20000"></textarea>
+            <textarea id="wsInput" rows="3" maxlength="15000"></textarea>
             <div class="ws-comp-row">
               <select id="wsPlat" aria-label="Platform"></select>
               <select id="wsModel" aria-label="Model"></select>

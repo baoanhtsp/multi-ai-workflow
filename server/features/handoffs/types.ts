@@ -38,5 +38,6 @@ export interface Handoff {
   scope_violations: string[];
   attempts: number;
   base_commit?: string;
+  dirty_baseline?: Record<string, string>;
   lead_notified_at?: string;
 }

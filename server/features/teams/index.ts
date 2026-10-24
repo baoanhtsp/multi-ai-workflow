@@ -45,7 +45,7 @@ export function getSafeRoleFilePath(rolesDir: string, roleKey: string): string {
 export function validateTeam(
   raw: unknown,
   ctx: MawFeatureContext,
-  options?: { isTemplate?: boolean; rolesMd?: Record<string, unknown> }
+  options?: { isTemplate?: boolean; rolesMd?: Record<string, unknown>; forceTeamId?: string }
 ): { team: Team; rolesMd?: Record<string, RoleSections> } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     throw new ApiValidationError('Invalid team object.', 400);
@@ -57,7 +57,7 @@ export function validateTeam(
     throw new ApiValidationError('Team name must be between 1 and 60 characters.', 400);
   }
 
-  const teamId = String(t.id ?? '').trim() || generateTeamId();
+  const teamId = options?.forceTeamId || String(t.id ?? '').trim() || generateTeamId();
   const template = String(t.template ?? 'full').trim();
 
   const rawShared = t.shared ?? ({} as Partial<Team['shared']>);
@@ -346,13 +346,52 @@ export const feature: MawFeature = {
             throw new ApiValidationError('Invalid or missing project_path.', 400);
           }
 
+          const teamFile = getTeamFilePath(validPath);
+          let existingProjectTeamId = '';
+          if (isFileSafe(teamFile)) {
+            try {
+              const existingTeam = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
+              existingProjectTeamId = existingTeam.id || '';
+            } catch {}
+          }
+
+          const rawId = String((body.team as Record<string, unknown> | undefined)?.id ?? '').trim();
+          const isTemplateOrBuiltin =
+            !rawId ||
+            rawId === 'full' ||
+            rawId === 'empty' ||
+            rawId === 'tm_builtin_full' ||
+            rawId === 'tm_builtin_empty' ||
+            rawId.startsWith('tt_');
+
+          let teamId = rawId;
+          if (isTemplateOrBuiltin) {
+            teamId = existingProjectTeamId || generateTeamId();
+          } else {
+            // Check if already used by another project
+            const agentsDir = ctx.paths.featureDataDir('agents-ws');
+            const agentsFile = path.win32.join(agentsDir, 'agents.json');
+            const agentsData = await readJsonStore<{ version: number; agents: Agent[] }>(agentsFile, {
+              version: 1,
+              agents: [],
+            });
+            const usedElsewhere = agentsData.agents.some(
+              (a) =>
+                a.team_id === rawId &&
+                a.deleted_at === null &&
+                a.workdir.toLowerCase() !== validPath.toLowerCase()
+            );
+            if (usedElsewhere && rawId !== existingProjectTeamId) {
+              teamId = generateTeamId();
+            }
+          }
+
           const validated = validateTeam(body.team, ctx, {
+            forceTeamId: teamId,
             rolesMd: body.roles_md as Record<string, unknown> | undefined,
           });
           const team = validated.team;
           const rawRolesMd = validated.rolesMd ?? {};
-
-          const teamFile = getTeamFilePath(validPath);
           const rolesDir = getRolesDir(validPath);
           if (!fs.existsSync(rolesDir)) {
             fs.mkdirSync(rolesDir, { recursive: true });
@@ -423,9 +462,7 @@ export const feature: MawFeature = {
             agents: [],
           });
 
-          let group = groupsData.groups.find(
-            (g) => (g.team_id && g.team_id === team.id) || g.name.toLowerCase() === team.name.toLowerCase()
-          );
+          let group = groupsData.groups.find((g) => g.team_id && g.team_id === team.id);
           if (!group) {
             group = {
               id: generateGroupId(),
@@ -450,17 +487,24 @@ export const feature: MawFeature = {
 
             let agent: Agent | undefined;
 
-            // 1. Try finding by role.agent_id
+            // 1. Try finding by role.agent_id ONLY when workdir equals project path and team_id matches or empty
             if (role.agent_id) {
-              agent = agentsData.agents.find((a) => a.id === role.agent_id && a.deleted_at === null);
+              const candidate = agentsData.agents.find((a) => a.id === role.agent_id && a.deleted_at === null);
+              if (
+                candidate &&
+                candidate.workdir.toLowerCase() === validPath.toLowerCase() &&
+                (!candidate.team_id || candidate.team_id === team.id)
+              ) {
+                agent = candidate;
+              }
             }
 
-            // 2. If not found (fresh save, import), reuse a live agent with same workdir + team_role (prefer same team_id)
+            // 2. If not found (fresh save, import overwrite), reuse a live agent in THIS project with same workdir + team_role
             if (!agent) {
               const matching = agentsData.agents.filter(
                 (a) =>
                   a.deleted_at === null &&
-                  a.workdir.toLowerCase() === workdir.toLowerCase() &&
+                  a.workdir.toLowerCase() === validPath.toLowerCase() &&
                   a.team_role === role.key
               );
               if (matching.length > 0) {

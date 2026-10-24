@@ -44,12 +44,12 @@ function setupHandoffTestContext() {
     const jobId = 'job_' + crypto.randomBytes(4).toString('hex');
     const meta: Record<string, unknown> = {
       job_id: jobId,
-      pid: 99999,
+      pid: process.pid,
       mode: body.mode || 'task',
       agent: body.agent || 'codex',
       role: body.role || 'backend',
       status: nextJobStatus,
-      exit_code: nextJobStatus === 'DONE' ? 0 : 1,
+      exit_code: nextJobStatus === 'RUNNING' ? null : (nextJobStatus === 'DONE' ? 0 : 1),
       started_at: new Date().toISOString(),
       started_ts: Date.now(),
       project_path: body.project_path || testProj,
@@ -60,7 +60,10 @@ function setupHandoffTestContext() {
     }
     fs.writeFileSync(path.win32.join(paths.jobsDir, `${jobId}.json`), JSON.stringify(meta), 'utf8');
 
-    const log = `
+    const log =
+      nextJobStatus === 'RUNNING'
+        ? `[Connected] Model: test-model\r\nJob is still actively running...\r\n`
+        : `
 --------------------------------------------------
 [Connected] Model: test-model
 ${nextReply}
@@ -605,4 +608,139 @@ test('handoffs: [Item 4] terminal handoffs 409 guards and idempotent Lead notifi
   const matchingLeadMsgs = getLeadRes.messages.filter((m: any) => m.handoff_id === handoffId);
   assert.equal(matchingLeadMsgs.length, 1, 'Exactly one Lead message per terminal handoff');
 });
+
+test('handoffs: [Item 2] handoff_cancel preserves running tracking on cancel failure', async () => {
+  const { makeReq, testProj, baseCtx, setNextJobStatus, paths } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  setNextJobStatus('RUNNING');
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Will be cancelled with error',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  const handoffId = dispRes.handoff.id;
+
+  // Tick starts the member job -> reaches status running
+  await tick(baseCtx);
+
+  const listRes = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const hRunning = listRes.handoffs.find((h: any) => h.id === handoffId);
+  assert.equal(hRunning.status, 'running');
+  assert.ok(hRunning.job_id);
+
+  // Delete the job meta file to make handleCancelJob throw 404
+  const metaFile = path.win32.join(paths.jobsDir, `${hRunning.job_id}.json`);
+  fs.unlinkSync(metaFile);
+
+  // handoff_cancel should throw 404 and NOT finalize as cancelled!
+  await assert.rejects(
+    async () => {
+      await feature.routes['handoff_cancel']!.handler(makeReq({ id: handoffId }), makeReq());
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 404
+  );
+
+  const listResAfter = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const hAfter = listResAfter.handoffs.find((h: any) => h.id === handoffId);
+  assert.equal(hAfter.status, 'running', 'Handoff must remain in running status when cancel fails');
+});
+
+test('handoffs: [Item 3] non-isolated handoff in git repo triggers write-scope violation for read-only role', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply } = setupHandoffTestContext();
+
+  // 1. Initialize git repo in testProj
+  await runCommand('git.exe', ['-C', testProj, 'init'], { timeoutMs: 5000 });
+  await runCommand('git.exe', ['-C', testProj, 'config', 'user.name', 'Tester'], { timeoutMs: 5000 });
+  await runCommand('git.exe', ['-C', testProj, 'config', 'user.email', 'test@example.com'], { timeoutMs: 5000 });
+
+  fs.writeFileSync(path.join(testProj, 'README.md'), '# Mission\n', 'utf8');
+  await runCommand('git.exe', ['-C', testProj, 'add', 'README.md'], { timeoutMs: 5000 });
+  await runCommand('git.exe', ['-C', testProj, 'commit', '-m', 'Initial commit'], { timeoutMs: 5000 });
+
+  // 2. Save team where 'worker' role has write_scope: [] (read-only role, no write allowed)
+  // and shared.isolate is false (non-isolated)
+  const readOnlyTeam = {
+    ...BUILTIN_FULL_TEMPLATE.team,
+    shared: {
+      ...BUILTIN_FULL_TEMPLATE.team.shared,
+      isolate: false,
+    },
+    roles: BUILTIN_FULL_TEMPLATE.team.roles.map((r) =>
+      r.key === 'worker' ? { ...r, override: { write_scope: [] } } : r
+    ),
+  };
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: readOnlyTeam,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  setNextReply(`
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Created unauthorized file in non-isolated mode",
+  "files_changed": ["unauthorized_new_file.txt"],
+  "evidence": "echo done > unauthorized_new_file.txt",
+  "blockers": [],
+  "cost": 0.002,
+  "decisions": []
+}
+\`\`\`
+`);
+
+  // Write that file into testProj so git also detects it
+  fs.writeFileSync(path.join(testProj, 'unauthorized_new_file.txt'), 'illegal content\n', 'utf8');
+
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Do non-isolated work',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  const handoffId = dispRes.handoff.id;
+
+  // Tick 1: starts job, records base_commit + dirty_baseline
+  await tick(baseCtx);
+
+  // Tick 2: completes job, evaluates write scope against non-isolated changes
+  await tick(baseCtx);
+
+  const listRes = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const h = listRes.handoffs.find((item: any) => item.id === handoffId);
+  assert.ok(h);
+  assert.equal(h.isolated, false, 'Must record isolated: false');
+  assert.equal(h.status, 'needs_review', 'Read-only role creating a file must be marked needs_review');
+  assert.ok(
+    h.scope_violations.includes('unauthorized_new_file.txt'),
+    'Violation list must include the created file'
+  );
+});
+
 

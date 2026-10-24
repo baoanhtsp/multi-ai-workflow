@@ -42,27 +42,39 @@ export interface BuildPromptOptions {
   maxChars?: number; // default 17000
 }
 
+export function getMaxMessageCharsForAgent(agent: PromptAgentInfo, maxBudget = 17000): number {
+  const minimalAgentHeader = `# Agent\nName: ${agent.name}` + (agent.team_role ? `\nTeam role: ${agent.team_role}` : '');
+  const minimalMessageHeader = '# Message\n\n';
+  const fixedMinLen = minimalAgentHeader.length + 2 + minimalMessageHeader.length;
+  return Math.max(0, maxBudget - fixedMinLen);
+}
+
 export function buildPrompt(opts: BuildPromptOptions): string {
   const maxBudget = opts.maxChars ?? 17000;
 
   // 1. # Agent section
-  const agentLines: string[] = ['# Agent'];
-  agentLines.push(`Name: ${opts.agent.name}`);
-  if (opts.agent.team_role) {
-    agentLines.push(`Team role: ${opts.agent.team_role}`);
-  }
-  if (opts.agent.persona && opts.agent.persona.trim()) {
-    agentLines.push(`Persona: ${opts.agent.persona.trim()}`);
-  }
-  if (opts.agent.role_sections) {
-    const s = opts.agent.role_sections;
-    if (s.responsibility) agentLines.push(`Responsibility: ${s.responsibility.trim()}`);
-    if (s.delegation) agentLines.push(`Delegation & reporting: ${s.delegation.trim()}`);
-    if (s.output) agentLines.push(`Output: ${s.output.trim()}`);
-    if (s.permissions) agentLines.push(`Permissions: ${s.permissions.trim()}`);
-    if (s.extra) agentLines.push(s.extra.trim());
-  }
-  const agentSection = agentLines.join('\n');
+  let persona = opts.agent.persona ? opts.agent.persona.trim() : '';
+  let roleSec = opts.agent.role_sections ? { ...opts.agent.role_sections } : undefined;
+
+  const renderAgentSection = (p: string, rs?: typeof roleSec): string => {
+    const aLines: string[] = ['# Agent', `Name: ${opts.agent.name}`];
+    if (opts.agent.team_role) {
+      aLines.push(`Team role: ${opts.agent.team_role}`);
+    }
+    if (p) {
+      aLines.push(`Persona: ${p}`);
+    }
+    if (rs) {
+      if (rs.responsibility) aLines.push(`Responsibility: ${rs.responsibility.trim()}`);
+      if (rs.delegation) aLines.push(`Delegation & reporting: ${rs.delegation.trim()}`);
+      if (rs.output) aLines.push(`Output: ${rs.output.trim()}`);
+      if (rs.permissions) aLines.push(`Permissions: ${rs.permissions.trim()}`);
+      if (rs.extra) aLines.push(rs.extra.trim());
+    }
+    return aLines.join('\n');
+  };
+
+  let agentSection = renderAgentSection(persona, roleSec);
 
   // 5. # Message section (never trimmed)
   const messageParts: string[] = ['# Message'];
@@ -117,7 +129,6 @@ export function buildPrompt(opts: BuildPromptOptions): string {
   }
 
   // 4. # Recent messages
-  // newest-first selection rendered oldest-first, each <= 2500 chars
   const renderedMessages: string[] = [];
   if (opts.recentMessages && opts.recentMessages.length > 0) {
     for (const msg of opts.recentMessages) {
@@ -141,47 +152,93 @@ export function buildPrompt(opts: BuildPromptOptions): string {
   const assemble = (
     msgs: string[],
     mem: string,
-    sum: string
+    sum: string,
+    agSec: string,
+    dispSec: string
   ): string => {
-    const sections: string[] = [agentSection];
+    const sections: string[] = [agSec];
     if (mem) sections.push(mem);
     if (sum) sections.push(sum);
     if (msgs.length > 0) {
       sections.push('# Recent messages\n\n' + msgs.join('\n\n'));
     }
     sections.push(messageSection);
-    if (dispatchSection) sections.push(dispatchSection);
+    if (dispSec) sections.push(dispSec);
     return sections.join('\n\n');
   };
 
   let currentMsgs = [...renderedMessages];
   let currentMem = memorySection;
   let currentSum = summarySection;
-
-  let currentFull = assemble(currentMsgs, currentMem, currentSum);
+  let currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
 
   // Trimming order:
   // 1. Drop older messages from history
   while (currentFull.length > maxBudget && currentMsgs.length > 0) {
     currentMsgs.shift(); // drop oldest
-    currentFull = assemble(currentMsgs, currentMem, currentSum);
+    currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
   }
 
   // 2. Trim project memory
   if (currentFull.length > maxBudget && currentMem) {
     currentMem = '';
-    currentFull = assemble(currentMsgs, currentMem, currentSum);
+    currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
   }
 
   // 3. Trim conversation summary
   if (currentFull.length > maxBudget && currentSum) {
-    const allowed = maxBudget - assemble(currentMsgs, currentMem, '').length;
+    const allowed = maxBudget - assemble(currentMsgs, currentMem, '', agentSection, dispatchSection).length;
     if (allowed > 100) {
       currentSum = currentSum.slice(0, allowed);
     } else {
       currentSum = '';
     }
-    currentFull = assemble(currentMsgs, currentMem, currentSum);
+    currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
+  }
+
+  // 4. Trim team member list in dispatch tool instructions
+  if (currentFull.length > maxBudget && dispatchSection) {
+    dispatchSection =
+      '# Dispatch Tool\nTo delegate tasks to members, end your reply with exactly one fenced handoff block:\n```handoff\n{ "handoffs": [ { "to": "<role_key>", "task": "<task description>", "acceptance": "<criteria>", "thread": "" } ] }\n```\nDo not do members\' work yourself. Results come back as [Handoff <id>] messages.';
+    currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
+  }
+
+  // 5. Trim agent section (extra, permissions, output, delegation, responsibility, persona)
+  if (currentFull.length > maxBudget) {
+    if (roleSec?.extra) {
+      delete roleSec.extra;
+      agentSection = renderAgentSection(persona, roleSec);
+      currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
+    }
+    if (currentFull.length > maxBudget && roleSec?.permissions) {
+      delete roleSec.permissions;
+      agentSection = renderAgentSection(persona, roleSec);
+      currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
+    }
+    if (currentFull.length > maxBudget && roleSec?.output) {
+      delete roleSec.output;
+      agentSection = renderAgentSection(persona, roleSec);
+      currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
+    }
+    if (currentFull.length > maxBudget && roleSec?.delegation) {
+      delete roleSec.delegation;
+      agentSection = renderAgentSection(persona, roleSec);
+      currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
+    }
+    if (currentFull.length > maxBudget && roleSec?.responsibility) {
+      delete roleSec.responsibility;
+      agentSection = renderAgentSection(persona, roleSec);
+      currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
+    }
+    if (currentFull.length > maxBudget && persona) {
+      persona = '';
+      agentSection = renderAgentSection(persona, roleSec);
+      currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
+    }
+    if (currentFull.length > maxBudget && dispatchSection) {
+      dispatchSection = '';
+      currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
+    }
   }
 
   return currentFull;

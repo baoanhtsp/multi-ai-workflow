@@ -7,6 +7,7 @@ import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { CONVERSATION_ID_REGEX, generateConversationId, generateMessageId, generateQueueId } from '../agents-ws/lib/ids.ts';
 import { withS6State } from '../agents-ws/lib/mutex.ts';
+import { getMaxMessageCharsForAgent } from '../agents-ws/lib/prompt.ts';
 import { appendAuditLog, readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent } from '../agents-ws/types.ts';
 import {
@@ -285,8 +286,8 @@ export const feature: MawFeature = {
           }
 
           const text = String(body.text ?? '').trim();
-          if (!text || text.length > 20000) {
-            throw new ApiValidationError('Text is required and must be 1-20000 characters.', 400);
+          if (!text || text.length > 15000) {
+            throw new ApiValidationError('Text is required and must not exceed 15,000 characters.', 400);
           }
 
           const chatDir = ctx.paths.featureDataDir('chat');
@@ -311,6 +312,14 @@ export const feature: MawFeature = {
           const agent = agentsData.agents.find((a) => a.id === conv.agent_id);
           if (!agent) {
             throw new ApiValidationError(`Agent '${conv.agent_id}' not found.`, 404);
+          }
+
+          const maxAllowedChars = getMaxMessageCharsForAgent({
+            name: agent.name,
+            team_role: agent.team_role,
+          });
+          if (text.length > maxAllowedChars) {
+            throw new ApiValidationError(`Message too long for this agent (max ${maxAllowedChars} chars)`, 400);
           }
 
           const targetPlatform = String(body.platform ?? conv.platform ?? agent.platform).trim().toLowerCase();

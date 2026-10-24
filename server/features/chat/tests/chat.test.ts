@@ -8,8 +8,10 @@ import { createFeatureContext, type MawFeatureRequest } from '../../../lib/featu
 import { resolveServerPaths } from '../../../lib/paths.ts';
 import { ApiValidationError } from '../../../lib/validate.ts';
 import { feature as agentsFeature } from '../../agents-ws/index.ts';
+import { isS6StateLocked, s6StateStorage, withS6State } from '../../agents-ws/lib/mutex.ts';
+import { buildPrompt } from '../../agents-ws/lib/prompt.ts';
 import { feature } from '../index.ts';
-import { tick } from '../tick.ts';
+import { ensureTickStarted, resetTickTimerForTest, tick } from '../tick.ts';
 
 function setupChatTestContext() {
   const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), 'maw space chat test '));
@@ -582,4 +584,251 @@ test('chat: [Item 5] failed first send persists seq and subsequent send has stri
     assert.ok(getRes2.messages[2].seq > getRes2.messages[1].seq, 'Assistant seq is strictly increasing');
   }
 });
+
+test('chat: [Item 1] ensureTickStarted escapes AsyncLocalStorage context so background ticks serialize with withS6State', async () => {
+  const { baseCtx } = setupChatTestContext();
+  try {
+    // 1. Call ensureTickStarted inside withS6State
+    await withS6State(async () => {
+      ensureTickStarted(baseCtx);
+    });
+
+    // 2. Now acquire withS6State lock and verify background/isolated tick waits for lock
+    let tickFinished = false;
+    let lockObserved = false;
+
+    await withS6State(async () => {
+      assert.equal(isS6StateLocked(), true);
+
+      // Launch tick outside this ALS context (just as the setInterval timer does)
+      const tickPromise = s6StateStorage.exit(async () => {
+        await tick(baseCtx);
+        tickFinished = true;
+      });
+
+      // Tick must NOT finish while withS6State is held
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      assert.equal(tickFinished, false, 'Tick must wait while withS6State is held');
+      lockObserved = isS6StateLocked();
+    });
+
+    // Once withS6State exits, tick finishes
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(lockObserved, true);
+    assert.equal(isS6StateLocked(), false);
+  } finally {
+    resetTickTimerForTest();
+  }
+});
+
+test('chat: [Item 5] startTurnJob loads .maw/roles/<role>.md sections and passes may_delegate into prompt', async () => {
+  const { makeReq, testProj, baseCtx } = setupChatTestContext();
+
+  // Create .maw and .maw/roles in project
+  const dotMawDir = path.win32.join(testProj, '.maw');
+  const rolesDir = path.win32.join(dotMawDir, 'roles');
+  fs.mkdirSync(rolesDir, { recursive: true });
+
+  // Write .maw/team.json
+  const teamData = {
+    id: 'team_alpha',
+    name: 'Alpha Team',
+    version: 1,
+    shared: { platform: 'claude' },
+    roles: [
+      {
+        key: 'lead',
+        name: 'Lead Architect',
+        enabled: true,
+        may_delegate: true,
+      },
+      {
+        key: 'backend',
+        name: 'Backend Dev',
+        enabled: true,
+        may_delegate: false,
+      },
+    ],
+  };
+  fs.writeFileSync(path.win32.join(dotMawDir, 'team.json'), JSON.stringify(teamData, null, 2), 'utf8');
+
+  // Write role files
+  const leadMd = `# Role: Lead Architect
+
+## Responsibility
+Oversee system architecture and coordinate deliverables.
+
+## Delegation
+Delegate core implementation to backend and UI to frontend.
+
+## Permissions
+Read/write access to specs and architecture diagrams.
+
+## Output
+Produce clean SPEC.md and architectural decisions.
+`;
+  fs.writeFileSync(path.win32.join(rolesDir, 'lead.md'), leadMd, 'utf8');
+
+  const backendMd = `# Role: Backend Dev
+
+## Responsibility
+Implement server actions and database logic.
+`;
+  fs.writeFileSync(path.win32.join(rolesDir, 'backend.md'), backendMd, 'utf8');
+
+  // Create agent associated with team and role
+  const agReq = makeReq({
+    agent: {
+      name: 'AlphaLead',
+      platform: 'claude',
+      workdir: testProj,
+      team_id: 'team_alpha',
+      team_role: 'lead',
+    },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const agentId = agRes.agent.id;
+
+  // Intercept startJob to capture the constructed prompt
+  let capturedPrompt = '';
+  const origStartJob = baseCtx.startJob;
+  baseCtx.startJob = async (body: Record<string, unknown>) => {
+    capturedPrompt = String(body.prompt ?? '');
+    return origStartJob(body);
+  };
+
+  // Create conversation and send turn
+  const convReq = makeReq({ agent_id: agentId });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  const sendReq = makeReq({
+    conversation_id: convId,
+    text: 'Please organize the sprint tasks.',
+  });
+  await feature.routes['chat_send']!.handler(sendReq, sendReq);
+
+  // Verify captured prompt contents
+  assert.ok(
+    capturedPrompt.includes('Oversee system architecture and coordinate deliverables.'),
+    'Prompt contains responsibility from role markdown'
+  );
+  assert.ok(
+    capturedPrompt.includes('Delegate core implementation to backend and UI to frontend.'),
+    'Prompt contains delegation from role markdown'
+  );
+  assert.ok(
+    capturedPrompt.includes('Read/write access to specs and architecture diagrams.'),
+    'Prompt contains permissions from role markdown'
+  );
+  assert.ok(
+    capturedPrompt.includes('Produce clean SPEC.md and architectural decisions.'),
+    'Prompt contains output from role markdown'
+  );
+  assert.ok(
+    capturedPrompt.includes('# Dispatch Tool'),
+    'Prompt includes Dispatch Tool section for role with may_delegate: true'
+  );
+  assert.ok(
+    capturedPrompt.includes('- backend (Backend Dev'),
+    'Prompt includes backend in available team members'
+  );
+  assert.ok(
+    capturedPrompt.includes('Implement server actions and database logic.'),
+    'Prompt includes backend responsibility in available team members'
+  );
+});
+
+test('chat: [Item 6] text limit 15,000 chars validation and buildPrompt progressive trimming', async () => {
+  const { makeReq, testProj } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: { name: 'BudgetBot', platform: 'claude', workdir: testProj },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const convReq = makeReq({ agent_id: agRes.agent.id });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // 1. Sending text with 15,001 chars triggers 400 validation error
+  const oversizedText = 'a'.repeat(15001);
+  await assert.rejects(
+    async () => {
+      await feature.routes['chat_send']!.handler(
+        makeReq({ conversation_id: convId, text: oversizedText }),
+        makeReq()
+      );
+    },
+    (err: any) =>
+      err instanceof ApiValidationError &&
+      err.statusCode === 400 &&
+      err.message.includes('15,000 characters')
+  );
+
+  // 2. buildPrompt progressive trimming under constrained budget
+  const roleSections = {
+    responsibility: 'Responsible for complete backend core and reliability testing.',
+    delegation: 'Delegate frontend tasks to UI engineer.',
+    output: 'Deliver structured JSON API responses and test reports.',
+    permissions: 'File access restricted to server/ directory.',
+    extra: 'Custom notes and background guidelines.',
+  };
+
+  const fullPrompt = buildPrompt({
+    agent: {
+      name: 'LeadBot',
+      persona: 'Experienced software architect and tech lead.',
+      team_role: 'lead',
+      role_sections: { ...roleSections },
+      may_delegate: true,
+    },
+    newMessageText: 'Task overview',
+    teamMembers: [
+      {
+        key: 'tester',
+        name: 'QA Engineer',
+        platform: 'claude',
+        responsibility: 'Execute smoke and integration tests',
+      },
+    ],
+    maxChars: 17000,
+  });
+
+  // At full budget, all sections are preserved
+  assert.ok(fullPrompt.includes('Custom notes and background guidelines.'));
+  assert.ok(fullPrompt.includes('File access restricted to server/ directory.'));
+  assert.ok(fullPrompt.includes('Deliver structured JSON API responses'));
+  assert.ok(fullPrompt.includes('Delegate frontend tasks to UI engineer.'));
+  assert.ok(fullPrompt.includes('Responsible for complete backend core'));
+  assert.ok(fullPrompt.includes('Experienced software architect and tech lead.'));
+  assert.ok(fullPrompt.includes('QA Engineer'));
+
+  // Under small budget (e.g. 500 chars), trimming occurs in strict order
+  const trimmedPrompt = buildPrompt({
+    agent: {
+      name: 'LeadBot',
+      persona: 'Experienced software architect and tech lead.',
+      team_role: 'lead',
+      role_sections: { ...roleSections },
+      may_delegate: true,
+    },
+    newMessageText: 'Task overview',
+    teamMembers: [
+      {
+        key: 'tester',
+        name: 'QA Engineer',
+        platform: 'claude',
+        responsibility: 'Execute smoke and integration tests',
+      },
+    ],
+    maxChars: 400,
+  });
+
+  assert.ok(trimmedPrompt.length <= 400, `Trimmed prompt length ${trimmedPrompt.length} must be <= 400`);
+  // Extra, permissions, output should be trimmed away first
+  assert.equal(trimmedPrompt.includes('Custom notes and background guidelines.'), false);
+  assert.equal(trimmedPrompt.includes('File access restricted to server/ directory.'), false);
+  assert.equal(trimmedPrompt.includes('Deliver structured JSON API responses'), false);
+});
+
 

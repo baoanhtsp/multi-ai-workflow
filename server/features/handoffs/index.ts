@@ -273,21 +273,36 @@ export const feature: MawFeature = {
             );
           }
 
+          let cancelSucceeded = false;
           if (handoff.status === 'running' && handoff.job_id) {
             try {
               await handleCancelJob({ job_id: handoff.job_id }, ctx.paths);
-            } catch {
-              // Best-effort cancel
+              cancelSucceeded = true;
+            } catch (err: unknown) {
+              // Item 2: Only finalize as cancelled when cancel succeeded or job is no longer RUNNING
+              if (
+                err instanceof ApiValidationError &&
+                err.statusCode === 409 &&
+                typeof (err as unknown as Record<string, unknown>).status === 'string'
+              ) {
+                cancelSucceeded = true;
+              } else {
+                throw err;
+              }
             }
+          } else {
+            cancelSucceeded = true;
           }
 
-          await finalizeHandoff(ctx, handoff, 'cancelled');
+          if (cancelSucceeded) {
+            await finalizeHandoff(ctx, handoff, 'cancelled');
 
-          await appendAuditLog(handoffsDir, {
-            action: 'handoff_cancel',
-            target: id,
-            detail: { job_id: handoff.job_id },
-          });
+            await appendAuditLog(handoffsDir, {
+              action: 'handoff_cancel',
+              target: id,
+              detail: { job_id: handoff.job_id },
+            });
+          }
 
           return {
             ok: true,
