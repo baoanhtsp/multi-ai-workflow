@@ -7,7 +7,7 @@
 .tm-head .row { gap: 6px; }
 .tm fieldset { margin: 0; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: 8px; }
 .tm legend { padding: 0 6px; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
-.tm-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.tm-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; align-items: start; }
 .tm-redit .tm-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .tm-span2 { grid-column: span 2; }
 .tm-redit .tm-span2 { grid-column: 1 / -1; }

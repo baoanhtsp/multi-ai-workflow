@@ -1,5 +1,5 @@
 /* S6 workspace (feat-workspace.js). Uses only the theme variables of index.html. */
-.ws-root { display: flex; flex-direction: column; height: calc(100vh - 57px); min-height: 520px; background: var(--bg); }
+.ws-root { display: flex; flex-direction: column; height: calc(100vh - var(--ws-top, 57px)); min-height: 520px; background: var(--bg); }
 .ws-grow { flex: 1; min-width: 0; }
 .ws-pad { padding: 10px 12px; }
 .ws-root .faint, .ws-dlg .faint { color: var(--faint); }
@@ -188,9 +188,11 @@
 [data-skin="neon"] .ws-meter-bar i { background: var(--neon-grad); }
 [data-skin="neon"] .ws-menu, [data-skin="neon"] .ws-dlg { background: rgba(12, 15, 36, .96); }
 
+@media (max-width: 1200px) { .ws-cols { grid-template-columns: 220px minmax(0, 1fr) 300px; } }
+
 /* mobile: the three columns become tabs */
 @media (max-width: 899px) {
-  .ws-root { height: auto; min-height: calc(100vh - 57px); }
+  .ws-root { height: auto; min-height: calc(100vh - var(--ws-top, 57px)); }
   .ws-mtabs { display: flex; margin: 8px 12px 0; align-self: flex-start; }
   .ws-cols { grid-template-columns: minmax(0, 1fr); }
   .ws-left, .ws-right { border: 0; }
@@ -204,3 +206,11 @@
   .ws-f2 { grid-template-columns: minmax(0, 1fr); }
   .ws-more { opacity: 1; }
 }
+
+/* project memory panel */
+.ws-mem-h { display: flex; gap: 6px; padding: 10px 12px 0; }
+.ws-mem-h .input { flex: 1; min-width: 0; }
+.ws-mem { margin: 0 10px 8px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-size: 12.5px; }
+.ws-mem .ws-more { opacity: 1; }
+.ws-mem .row { gap: 6px; }
+.ws-tomem { font-size: 11.5px; margin-top: 4px; opacity: .7; } .ws-tomem:hover { opacity: 1; }

@@ -56,7 +56,10 @@
       'ws.ed.refresh': 'Kiểm tra lại', 'ws.ed.argsNote': 'Tham số CLI và biến môi trường được lưu; chúng được áp dụng khi bộ chạy hỗ trợ (yêu cầu R2).',
       'ws.ed.advanced': 'Nâng cao', 'ws.saved': 'Đã lưu.', 'ws.git.out': 'Kết quả {a}',
       'ws.convRename': 'Đổi tên cuộc trò chuyện', 'ws.convDel': 'Xoá cuộc trò chuyện',
-      'ws.retryN': 'Thử lại', 'ws.loginBtn': 'Đăng nhập lại',
+      'ws.retryN': 'Thử lại', 'ws.autoCont': 'Tự tiếp tục (kết quả handoff)', 'ws.loginBtn': 'Đăng nhập lại',
+      'ws.tab.memory': 'Bộ nhớ', 'ws.mem.search': 'Tìm quyết định…', 'ws.mem.add': '+ Quyết định', 'ws.mem.file': 'Lưu trong',
+      'ws.mem.empty': 'Chưa có quyết định nào. Kết quả handoff có "decisions" được thêm tự động.', 'ws.mem.pin': 'Ghim (luôn đưa vào brief)', 'ws.mem.unpin': 'Bỏ ghim',
+      'ws.mem.edit': 'Sửa', 'ws.mem.save': 'Lưu vào bộ nhớ dự án', 'ws.mem.title': 'Tiêu đề', 'ws.mem.body': 'Nội dung', 'ws.mem.tags': 'Thẻ (cách nhau bởi dấu phẩy)', 'ws.mem.cDel': 'Xoá {id} "{title}" khỏi bộ nhớ dự án?',
       'ws.noBackend': 'Máy chủ chưa có tính năng S6 ({e}).', 'ws.palette.agent': 'Agent', 'ws.palette.conv': 'Cuộc trò chuyện',
     },
     en: {
@@ -107,7 +110,10 @@
       'ws.ed.refresh': 'Check again', 'ws.ed.argsNote': 'CLI arguments and environment are stored; they apply once the runner supports them (request R2).',
       'ws.ed.advanced': 'Advanced', 'ws.saved': 'Saved.', 'ws.git.out': '{a} output',
       'ws.convRename': 'Rename conversation', 'ws.convDel': 'Delete conversation',
-      'ws.retryN': 'Retry', 'ws.loginBtn': 'Log in again',
+      'ws.retryN': 'Retry', 'ws.autoCont': 'Auto-continue (handoff results)', 'ws.loginBtn': 'Log in again',
+      'ws.tab.memory': 'Memory', 'ws.mem.search': 'Search decisions…', 'ws.mem.add': '+ Decision', 'ws.mem.file': 'Stored in',
+      'ws.mem.empty': 'No decisions yet. Handoff results with "decisions" are added automatically.', 'ws.mem.pin': 'Pin (always in briefs)', 'ws.mem.unpin': 'Unpin',
+      'ws.mem.edit': 'Edit', 'ws.mem.save': 'Save to project memory', 'ws.mem.title': 'Title', 'ws.mem.body': 'Body', 'ws.mem.tags': 'Tags (comma separated)', 'ws.mem.cDel': 'Delete {id} "{title}" from the project memory?',
       'ws.noBackend': 'The server has no S6 features ({e}).', 'ws.palette.agent': 'Agent', 'ws.palette.conv': 'Conversation',
     },
   };
@@ -258,8 +264,12 @@
     id: 'workspace',
     title: () => t('ws.view'),
     render(el) { S.el = el; buildSkeleton(el); },
-    onShow() { refreshState(); refreshConv(); schedule(0); },
+    onShow() { fitHeight(); refreshState(); refreshConv(); schedule(0); },
   });
+
+  // The page header wraps to two or three rows on narrow screens; the view fills what is left.
+  function fitHeight() { const top = document.querySelector('.topbar'); if (S.el && top) S.el.style.setProperty('--ws-top', top.offsetHeight + 'px'); }
+  window.addEventListener('resize', () => { if (visible()) fitHeight(); });
 
   function buildSkeleton(el) {
     el.classList.add('ws-root');
@@ -870,7 +880,7 @@
     const parts = String(text ?? '').split(/^```/m);
     let out = '';
     parts.forEach((p, i) => {
-      if (i % 2 === 0) { out += inline(p); return; }
+      if (i % 2 === 0) { out += tables(p); return; }
       const nl = p.indexOf('\n');
       const lang = (nl >= 0 ? p.slice(0, nl) : '').trim().toLowerCase();
       const code = (nl >= 0 ? p.slice(nl + 1) : p).replace(/\n$/, '');
@@ -879,6 +889,28 @@
       else out += `<pre class="ws-code"><code>${esc(code)}</code></pre>`;
     });
     return out;
+  }
+  // Runs of lines that start and end with "|" become a table (escaped cell by cell).
+  function tables(src) {
+    const isRow = l => /^\s*\|.*\|\s*$/.test(l);
+    const isSep = l => /^\s*\|[\s|:-]+\|\s*$/.test(l);
+    const lines = src.split('\n'), out = [];
+    for (let i = 0; i < lines.length;) {
+      if (isRow(lines[i])) {
+        const rows = [];
+        while (i < lines.length && isRow(lines[i])) rows.push(lines[i++]);
+        const cells = r => r.trim().replace(/^\||\|$/g, '').split('|').map(c => inline(c.trim()));
+        const head = rows.length > 1 && isSep(rows[1]) ? rows[0] : null;
+        const body = rows.filter((r, k) => !isSep(r) && !(head && k === 0));
+        out.push('<div class="ws-tablewrap ws-mdtable"><table class="ws-table">'
+          + (head ? '<thead><tr>' + cells(head).map(c => '<th>' + c + '</th>').join('') + '</tr></thead>' : '')
+          + '<tbody>' + body.map(r => '<tr>' + cells(r).map(c => '<td>' + c + '</td>').join('') + '</tr>').join('') + '</tbody></table></div>');
+      } else {
+        out.push(inline(lines[i]) + (i < lines.length - 1 ? '\n' : ''));
+        i++;
+      }
+    }
+    return out.join('');
   }
   function inline(s) {
     return esc(s).replace(/`([^`\n]+)`/g, '<code>$1</code>').replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>').replace(/^#{1,4} (.+)$/gm, '<strong class="ws-mh">$1</strong>');
@@ -908,7 +940,7 @@
         ${st ? `<span class="badge ${hStatusCls(st)}">${esc(hStatusLabel(st))}</span>` : ''}<span class="ws-htext">${inline(m.text)}</span></button><time>${esc(timeOf(m.ts))}</time></div>`;
     }
     const mine = m.role === 'user';
-    const who = mine ? t('ws.you') : (a?.name || 'Agent');
+    const who = m.system_generated ? t('ws.autoCont') : mine ? t('ws.you') : (a?.name || 'Agent');
     const st = m.status && m.status !== 'done' ? `<span class="badge ${m.status === 'failed' ? 'b-err' : m.status === 'cancelled' ? '' : 'b-warn'}">${esc(m.status)}</span>` : '';
     const meta = [
       m.actual_model || m.model ? esc(m.actual_model || m.model) : (m.platform && !mine ? esc(m.platform) : ''),
@@ -918,9 +950,10 @@
     ].filter(Boolean).join(' · ');
     const att = (m.attachments || []).map(x => `<span class="badge">📎 ${esc(x.name)}</span>`).join(' ');
     const retry = m.status === 'failed' && !mine ? `<button type="button" class="btn btn-sm" data-retry="${m.seq}">${esc(t('ws.retryN'))}</button>` : '';
-    return `<div class="ws-msg ${mine ? 'ws-me' : 'ws-ai'}" data-seq="${m.seq}">
+    const toMem = !mine && m.status === 'done' && m.text ? `<button type="button" class="btn-link ws-tomem" data-tomem="${m.seq}">${esc(t('ws.mem.save'))}</button>` : '';
+    return `<div class="ws-msg ${mine ? 'ws-me' : 'ws-ai'}${m.system_generated ? ' ws-auto' : ''}" data-seq="${m.seq}">
       <div class="ws-msg-h"><strong>${esc(who)}</strong>${st}<span class="faint">${meta}</span><time>${esc(timeOf(m.ts))}</time></div>
-      <div class="ws-msg-b">${md(m.text)}</div>${att ? `<div class="ws-msg-att">${att}</div>` : ''}${retry}</div>`;
+      <div class="ws-msg-b">${md(m.text)}</div>${att ? `<div class="ws-msg-att">${att}</div>` : ''}${retry}${toMem}</div>`;
   }
   function renderMessages(full, appended) {
     const box = qs('#wsMsgs', S.el); if (!box) return;
@@ -931,6 +964,11 @@
     box.innerHTML = S.messages.length ? S.messages.map(msgHtml).join('') : `<div class="empty">…</div>`;
     qsa('[data-hid]', box).forEach(b => b.onclick = () => { setPanel('handoffs'); const card = qs(`[data-hcard="${CSS.escape(b.dataset.hid)}"]`, S.el); card?.scrollIntoView({ block: 'nearest' }); card?.classList.add('ws-flash'); });
     qsa('[data-retry]', box).forEach(b => b.onclick = () => retryFrom(+b.dataset.retry));
+    qsa('[data-tomem]', box).forEach(b => b.onclick = () => {
+      const m = S.messages.find(x => x.seq === +b.dataset.tomem); if (!m) return;
+      const first = m.text.split(/\r?\n/).find(l => l.trim()) || '';
+      memoryEditor(curAgent()?.workdir || '', { title: clip(first.replace(/^#+\s*/, ''), 100), body: clip(m.text, 4000), tags: [curAgent()?.team_role || 'chat'] , _new: true }, null);
+    });
     if (full || nearBottom || appended) scrollBottom();
   }
   function scrollBottom() { const box = qs('#wsMsgs', S.el); if (box) box.scrollTop = box.scrollHeight; }
@@ -1055,6 +1093,7 @@
     { id: 'files', key: 'ws.tab.files', stream: 'S5' },
     { id: 'history', key: 'ws.tab.history' },
     { id: 'autorun', key: 'ws.tab.autorun', stream: 'S2' },
+    { id: 'memory', key: 'ws.tab.memory' },
   ];
   function panelList() {
     const ext = S.panels.filter(p => !BUILTIN_PANELS.some(b => b.id === p.id));
@@ -1086,6 +1125,7 @@
     }
     if (p.id === 'handoffs') return renderHandoffs(box);
     if (p.id === 'history') return renderHistory(box);
+    if (p.id === 'memory') return renderMemory(box);
     box.innerHTML = `<div class="ws-ph"><div class="ws-ph-i" aria-hidden="true">⧉</div><p>${esc(t('ws.placeholder', { s: p.stream }))}</p></div>`;
   }
   function renderHistory(box) {
@@ -1094,6 +1134,74 @@
     box.innerHTML = `<table class="ws-table"><thead><tr><th>${esc(t('ws.h.time'))}</th><th>Model</th><th>${esc(t('ws.h.status'))}</th><th>${esc(t('ws.h.cost'))}</th></tr></thead><tbody>
       ${turns.slice().reverse().map(m => `<tr><td>${esc(timeOf(m.ts))}${m.duration_sec ? ` <span class="faint">${dur(m.duration_sec)}</span>` : ''}</td><td class="mono">${esc(m.actual_model || m.model || m.platform || '')}</td><td>${esc(m.status || '')}</td><td>${esc(money(m.cost_usd))}</td></tr>`).join('')}
       </tbody></table>`;
+  }
+
+  // ---------- project memory (N7): .maw/memory/decisions.md of the agent's workdir ----------
+  const MEM = { project: '', entries: [], q: '', at: 0, loading: false, err: '' };
+  async function loadMemory(force) {
+    const project = curAgent()?.workdir || M.project()?.path || '';
+    if (!project) { MEM.entries = []; MEM.project = ''; return; }
+    if (!force && project === MEM.project && Date.now() - MEM.at < 15000) return;
+    MEM.loading = true;
+    try {
+      const d = await get('memory_list', { project_path: project });
+      MEM.entries = d.entries || []; MEM.project = project; MEM.at = Date.now(); MEM.err = '';
+    } catch (e) { MEM.err = errMsg(e); MEM.entries = []; MEM.project = project; }
+    MEM.loading = false;
+  }
+  async function renderMemory(box, force) {
+    const project = curAgent()?.workdir || M.project()?.path || '';
+    if (!project) { box.innerHTML = `<div class="empty">${esc(t('ws.pickAgent'))}</div>`; return; }
+    if (force || project !== MEM.project || Date.now() - MEM.at >= 15000) {
+      box.innerHTML = '<div class="empty">…</div>';
+      await loadMemory(force);
+      if (S.panel !== 'memory') return;
+    }
+    const q = MEM.q.trim().toLowerCase();
+    const list = MEM.entries.filter(e => !q || `${e.title} ${e.body} ${(e.tags || []).join(' ')}`.toLowerCase().includes(q))
+      .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0));
+    box.innerHTML = `<div class="ws-mem-h"><input class="input" type="search" id="wsMemQ" placeholder="${esc(t('ws.mem.search'))}" value="${esc(MEM.q)}">
+        <button type="button" class="btn btn-sm btn-primary" id="wsMemAdd">${esc(t('ws.mem.add'))}</button></div>
+      <p class="sub faint ws-pad ws-path">${esc(t('ws.mem.file'))} <span class="mono">.maw/memory/decisions.md</span></p>
+      ${MEM.err ? `<div class="empty t-err">${esc(MEM.err)}</div>` : ''}
+      ${list.length ? list.map(e => `<article class="ws-mem" data-mem="${esc(e.id)}">
+        <div class="row"><button type="button" class="ws-star ${e.pinned ? 'on' : ''}" data-mpin="${esc(e.id)}" aria-pressed="${!!e.pinned}" title="${esc(t(e.pinned ? 'ws.mem.unpin' : 'ws.mem.pin'))}" aria-label="${esc(t(e.pinned ? 'ws.mem.unpin' : 'ws.mem.pin'))}">${e.pinned ? '📌' : '📍'}</button>
+          <strong class="ws-grow">${esc(e.id)} · ${esc(e.title)}</strong>
+          <button type="button" class="ws-more" data-medit="${esc(e.id)}" aria-label="${esc(t('ws.mem.edit'))}" title="${esc(t('ws.mem.edit'))}">✎</button>
+          <button type="button" class="ws-more" data-mdel="${esc(e.id)}" aria-label="${esc(t('ws.m.del'))}" title="${esc(t('ws.m.del'))}">×</button></div>
+        <div class="faint ws-hid">${esc(e.date || '')}${e.source ? ' · ' + esc(e.source) : ''}${e.agent ? ' · ' + esc(e.agent) : ''}${(e.tags || []).length ? ' · ' + e.tags.map(x => '#' + esc(x)).join(' ') : ''}</div>
+        <p class="ws-hsum">${esc(clip(e.body, 600))}</p></article>`).join('') : (MEM.err ? '' : `<div class="empty">${esc(t('ws.mem.empty'))}</div>`)}`;
+    const qi = qs('#wsMemQ', box);
+    qi.oninput = () => { MEM.q = qi.value; const pos = qi.selectionStart; renderMemory(box).then(() => { const n = qs('#wsMemQ', box); n?.focus(); n?.setSelectionRange(pos, pos); }); };
+    qs('#wsMemAdd', box).onclick = () => memoryEditor(project, null, box);
+    qsa('[data-medit]', box).forEach(b => b.onclick = () => memoryEditor(project, MEM.entries.find(e => e.id === b.dataset.medit), box));
+    qsa('[data-mpin]', box).forEach(b => b.onclick = async () => {
+      const e = MEM.entries.find(x => x.id === b.dataset.mpin); if (!e) return;
+      try { await post('memory_update', { project_path: project, id: e.id, pinned: !e.pinned }); renderMemory(box, true); } catch (err) { fail(err); }
+    });
+    qsa('[data-mdel]', box).forEach(b => b.onclick = async () => {
+      const e = MEM.entries.find(x => x.id === b.dataset.mdel); if (!e) return;
+      if (!(await confirmDlg(t('ws.mem.cDel', { id: e.id, title: e.title }), { danger: true }))) return;
+      try { await post('memory_delete', { project_path: project, id: e.id }); renderMemory(box, true); } catch (err) { fail(err); }
+    });
+  }
+  function memoryEditor(project, e, box) {
+    const f = h('form', { class: 'ws-form' });
+    f.innerHTML = `<label class="ws-f"><span>${esc(t('ws.mem.title'))}</span><input class="input" name="title" maxlength="120" required value="${esc(e?.title || '')}"></label>
+      <label class="ws-f"><span>${esc(t('ws.mem.body'))}</span><textarea name="body" rows="8" maxlength="4000" required>${esc(e?.body || '')}</textarea></label>
+      <label class="ws-f"><span>${esc(t('ws.mem.tags'))}</span><input class="input" name="tags" value="${esc((e?.tags || []).join(', '))}"></label>
+      <label class="ws-check"><input type="checkbox" name="pinned" ${e?.pinned ? 'checked' : ''}> ${esc(t('ws.mem.pin'))}</label>`;
+    dialog({
+      title: e && !e._new ? `${e.id} · ${t('ws.mem.edit')}` : t('ws.mem.add'), body: f,
+      actions: [{ label: t('ws.cancel'), submit: true }, { label: t('ws.save'), primary: true, run: async () => {
+        if (!f.reportValidity()) return false;
+        const body = { project_path: project, title: f.title.value.trim(), body: f.body.value.trim(), tags: f.tags.value.split(/[,\s]+/).map(s => s.replace(/^#/, '')).filter(Boolean).slice(0, 10), pinned: f.pinned.checked };
+        if (e && !e._new) await post('memory_update', { ...body, id: e.id }); else await post('memory_add', { ...body, source: e?._new ? `chat:${S.selConv}` : 'user', agent: curAgent()?.platform || '' });
+        MEM.at = 0;
+        if (box && S.panel === 'memory') renderMemory(box, true); else M.toast(t('ws.saved'), 'ok');
+      } }],
+    });
+    setTimeout(() => f.title.focus(), 0);
   }
 
   // handoffs relevant to the open conversation: as Lead, or as the member
