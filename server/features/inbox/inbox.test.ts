@@ -13,9 +13,18 @@ import {
   handleInboxGet,
   handleInboxList,
   performInboxAction,
+  reconcilePendingClaim,
+  reconcilePendingClaims,
 } from './actions.ts';
+import { acquireFileLock } from './lockfile.ts';
 import { buildMeaningfulDetail, runJobScanner } from './scanner.ts';
-import { addInboxItem, getInboxItem, onInboxResolved, readInboxData } from './store.ts';
+import {
+  addInboxItem,
+  getInboxItem,
+  onInboxResolved,
+  readInboxData,
+  resetInboxResolvedTracker,
+} from './store.ts';
 
 function createTempTestPaths(): { paths: ServerPaths; cleanup: () => void } {
   const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'maw_inbox_test_'));
@@ -887,51 +896,340 @@ test('Codex Review #4 Item 3: items.json store-level lock with withItemsLock', a
   }
 });
 
-test('Codex Review #5 Item 1: stale-lock TOCTOU protection restores live lock if swapped before rename', () => {
+test('Codex Review #6 Item 1: Two processes recovering dead lock => exactly one owner and release never removes someone elses lock', () => {
   const { paths, cleanup } = createTempTestPaths();
   const dataDir = paths.featureDataDir('inbox');
   fs.mkdirSync(dataDir, { recursive: true });
-  const lockFile = path.join(dataDir, 'items.lock');
+  const lockFile = path.join(dataDir, 'test_recovery.lock');
 
   try {
-    // Write dead PID lock
+    // 1. Initial state: dead PID owns the lock
     fs.writeFileSync(lockFile, JSON.stringify({ pid: 999999, ts: 1000 }) + '\n', 'utf8');
 
-    // Simulate TOCTOU swap: right before fs.renameSync runs in withItemsLock,
-    // another process swapped the dead PID lock with a live PID lock.
-    const origRenameSync = fs.renameSync;
-    let swapSimulated = false;
-    (fs as any).renameSync = (oldPath: string, newPath: string) => {
-      if (String(oldPath).includes('items.lock') && !swapSimulated) {
-        swapSimulated = true;
-        // Swap file content with a live lock just before rename
-        fs.writeFileSync(oldPath, JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n', 'utf8');
+    // 2. Process 1 acquires lock via acquireFileLock -> recovers stale lock via .recover mutex
+    const handle1 = acquireFileLock(lockFile, { timeoutMs: 0 });
+    assert.equal(handle1.pid, process.pid);
+    assert.equal(fs.existsSync(lockFile), true);
+    assert.equal(fs.existsSync(lockFile + '.recover'), false, '.recover mutex must be cleaned up in finally');
+
+    // 3. Process 2 attempts immediate acquisition while handle1 is live -> rejected with 409
+    assert.throws(
+      () => {
+        acquireFileLock(lockFile, { timeoutMs: 0 });
+      },
+      (err: any) => err.statusCode === 409 && err.message.includes('already being processed')
+    );
+
+    // 4. Safe release: simulate that someone else replaced the lock on disk with a new PID/ts
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: 888888, ts: Date.now() + 5000 }) + '\n', 'utf8');
+
+    // Process 1 calls release(): because PID/ts do not match handle1, it must NOT unlink someone else's lock!
+    handle1.release();
+    assert.equal(fs.existsSync(lockFile), true, 'release must never unlink someone elses lock');
+    const remaining = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+    assert.equal(remaining.pid, 888888, 'Lock must remain untouched');
+
+    // 5. Normal release when matching pid/ts:
+    const handle3 = acquireFileLock(lockFile + '.norm', { timeoutMs: 0 });
+    assert.equal(fs.existsSync(lockFile + '.norm'), true);
+    handle3.release();
+    assert.equal(fs.existsSync(lockFile + '.norm'), false, 'Normal release unlinks file when pid/ts match');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #6 Item 2: Journal before dispatch failure aborts 503; dead owner with starting/started resolves with note without redispatch', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+
+  let startJobCalls = 0;
+  ctx.startJob = async () => {
+    startJobCalls++;
+    return { ok: true, job_id: 'job_review6_new' };
+  };
+
+  try {
+    // --- Part A: Journal write failure BEFORE startJob aborts with 503 and NO job is started ---
+    const { item: itemA } = addInboxItem(paths, {
+      kind: 'failed',
+      title: 'Journal fail test',
+      actions: ['retry', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Do not start if journal fails',
+      },
+    });
+
+    // Make fs.writeFileSync fail when writing starting journal to claim file
+    const origWriteFileSync = fs.writeFileSync;
+    let failStartingJournal = true;
+    (fs as any).writeFileSync = (targetPath: any, data: any, enc: any) => {
+      if (failStartingJournal && typeof data === 'string' && data.includes('"state":"starting"')) {
+        throw new Error('Disk full during journal write');
       }
-      return origRenameSync(oldPath, newPath);
+      return origWriteFileSync(targetPath, data, enc);
     };
 
     try {
-      // Calling addInboxItem triggers withItemsLock.
-      // It judges the lock stale based on { pid: 999999 }, then renames it.
-      // After rename, it inspects the renamed file, sees it was swapped to process.pid,
-      // puts it back via fs.linkSync, and does NOT unlink it.
-      // Then it retries 'wx' acquisition and fails with 503 because the live lock survives!
-      assert.throws(
-        () => {
-          addInboxItem(paths, {
-            kind: 'failed',
-            title: 'Should fail because live lock was restored',
-          });
-        },
-        (err: any) => err.statusCode === 503 && err.message.includes('Inbox is busy')
+      await assert.rejects(
+        async () => await performInboxAction(ctx, itemA.id, 'retry', undefined, 'ui'),
+        (err: any) => err.statusCode === 503 && err.message.includes('Failed to journal action before job start')
       );
-
-      // Verify the live lock survived on disk!
-      assert.equal(fs.existsSync(lockFile), true, 'Live lock must survive on disk');
-      const liveData = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
-      assert.equal(liveData.pid, process.pid, 'Live lock must be owned by process.pid');
+      assert.equal(startJobCalls, 0, 'ctx.startJob must NEVER be called if journal write fails');
     } finally {
-      fs.renameSync = origRenameSync;
+      fs.writeFileSync = origWriteFileSync;
+    }
+
+    // --- Part B: Claim in state "starting" from dead owner resolves to done with note and NO redispatch ---
+    const { item: itemB } = addInboxItem(paths, {
+      kind: 'failed',
+      title: 'Dead starting claim test',
+      actions: ['retry', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Interrupted while starting',
+      },
+    });
+
+    const claimsDir = path.join(paths.featureDataDir('inbox'), 'claims');
+    fs.mkdirSync(claimsDir, { recursive: true });
+    const claimBPath = path.join(claimsDir, `${itemB.id}.lock`);
+    fs.writeFileSync(
+      claimBPath,
+      JSON.stringify({
+        pid: 999999,
+        ts: 1000,
+        state: 'starting',
+        action: 'retry',
+        by: 'ui',
+        at: new Date().toISOString(),
+      }) + '\n',
+      'utf8'
+    );
+
+    let resolvedNotifiedItem: any = null;
+    const unsubB = onInboxResolved((it) => {
+      resolvedNotifiedItem = it;
+    });
+
+    try {
+      // Reconcile via reconcilePendingClaim
+      const reconciled = await reconcilePendingClaim(paths, itemB.id);
+      assert.equal(reconciled, true);
+      assert.equal(startJobCalls, 0, 'Recovery must NEVER re-dispatch');
+      assert.equal(fs.existsSync(claimBPath), false, 'Claim file must be unlinked after recovery');
+
+      const updatedB = getInboxItem(paths, itemB.id);
+      assert.equal(updatedB?.status, 'done');
+      assert.equal(updatedB?.resolution?.action, 'retry');
+      assert.equal(updatedB?.resolution?.note, 'interrupted \u2014 check the job list');
+      assert.ok(resolvedNotifiedItem);
+      assert.equal(resolvedNotifiedItem.id, itemB.id);
+    } finally {
+      unsubB();
+    }
+
+    // --- Part C: Claim in state "started" with job_id from dead owner resolves to done with job_id and note ---
+    const { item: itemC } = addInboxItem(paths, {
+      kind: 'failed',
+      title: 'Dead started claim test',
+      actions: ['retry', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Interrupted while started',
+      },
+    });
+
+    const claimCPath = path.join(claimsDir, `${itemC.id}.lock`);
+    fs.writeFileSync(
+      claimCPath,
+      JSON.stringify({
+        pid: 999999,
+        ts: 1000,
+        state: 'started',
+        action: 'retry',
+        by: 'ui',
+        at: new Date().toISOString(),
+        job_id: 'job_c_already_dispatched',
+      }) + '\n',
+      'utf8'
+    );
+
+    const reconciledC = await reconcilePendingClaim(paths, itemC.id);
+    assert.equal(reconciledC, true);
+    assert.equal(startJobCalls, 0, 'Recovery must NEVER re-dispatch');
+
+    const updatedC = getInboxItem(paths, itemC.id);
+    assert.equal(updatedC?.status, 'done');
+    assert.equal(updatedC?.resolution?.job_id, 'job_c_already_dispatched');
+    assert.equal(updatedC?.resolution?.note, 'interrupted \u2014 check the job list');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #6 Item 3: Reply stores and fires onInboxResolved first; follow-up job only if no listener handled and item has retry', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+
+  let startJobCalls = 0;
+  ctx.startJob = async (body: any) => {
+    startJobCalls++;
+    return { ok: true, job_id: 'job_followup_r6_' + startJobCalls };
+  };
+
+  try {
+    // --- Part A: Listener handles reply (returns true) => no follow-up job is spawned ---
+    const { item: itemA } = addInboxItem(paths, {
+      kind: 'needs_input',
+      title: 'Reply handled by listener',
+      actions: ['reply', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Original prompt A',
+      },
+    });
+
+    let listenerSawItemA: any = null;
+    const unsubA = onInboxResolved((it) => {
+      listenerSawItemA = it;
+      return true; // Handled by listener (e.g. interactive agent or steer)
+    });
+
+    try {
+      const resA = await performInboxAction(ctx, itemA.id, 'reply', 'User reply for A', 'ui');
+      assert.equal(resA.ok, true);
+      assert.equal(resA.job_id, undefined, 'No follow-up job when handled by listener');
+      assert.equal(startJobCalls, 0, 'startJob must NOT be called when listener returns true');
+
+      assert.ok(listenerSawItemA);
+      assert.equal(listenerSawItemA.id, itemA.id);
+      assert.equal(listenerSawItemA.status, 'done');
+      assert.equal(listenerSawItemA.resolution?.action, 'reply');
+      assert.equal(listenerSawItemA.resolution?.text, 'User reply for A');
+
+      const savedA = getInboxItem(paths, itemA.id);
+      assert.equal(savedA?.status, 'done');
+      assert.equal(savedA?.resolution?.text, 'User reply for A');
+    } finally {
+      unsubA();
+    }
+
+    // --- Part B: No listener returns true, item has retry => follow-up job started ---
+    resetInboxResolvedTracker();
+    const { item: itemB } = addInboxItem(paths, {
+      kind: 'needs_input',
+      title: 'Reply not handled by listener',
+      actions: ['reply', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Original prompt B',
+      },
+    });
+
+    let listenerCallOrder = 0;
+    let startJobCallOrder = 0;
+    let callCounter = 0;
+
+    const unsubB = onInboxResolved((it) => {
+      callCounter++;
+      listenerCallOrder = callCounter;
+      // return void / false => not handled
+    });
+
+    const origStartJob = ctx.startJob;
+    ctx.startJob = async (body: any) => {
+      callCounter++;
+      startJobCallOrder = callCounter;
+      return await origStartJob(body);
+    };
+
+    try {
+      const resB = await performInboxAction(ctx, itemB.id, 'reply', 'User reply for B', 'ui');
+      assert.equal(resB.ok, true);
+      assert.ok(resB.job_id);
+      assert.equal(startJobCalls, 1);
+
+      // Verify listener fired FIRST before startJob!
+      assert.equal(listenerCallOrder, 1, 'Listener must be called FIRST');
+      assert.equal(startJobCallOrder, 2, 'Follow-up job must be started AFTER firing listener');
+
+      const savedB = getInboxItem(paths, itemB.id);
+      assert.equal(savedB?.status, 'done');
+      assert.equal(savedB?.resolution?.text, 'User reply for B');
+      assert.equal(savedB?.resolution?.job_id, resB.job_id);
+    } finally {
+      unsubB();
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #6 Item 4: Reconciling pending claim calls fireInboxResolved exactly once', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  resetInboxResolvedTracker();
+
+  try {
+    const { item } = addInboxItem(paths, {
+      kind: 'failed',
+      title: 'Reconcile firing test',
+      actions: ['retry', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Fix it',
+      },
+    });
+
+    // Create a pending claim from a dead process with starting state
+    const claimsDir = path.join(paths.featureDataDir('inbox'), 'claims');
+    fs.mkdirSync(claimsDir, { recursive: true });
+    const claimPath = path.join(claimsDir, `${item.id}.lock`);
+    fs.writeFileSync(
+      claimPath,
+      JSON.stringify({
+        pid: 999999,
+        ts: 1000,
+        state: 'starting',
+        action: 'retry',
+        by: 'ui',
+        at: new Date().toISOString(),
+      }) + '\n',
+      'utf8'
+    );
+
+    let resolveEventCount = 0;
+    const unsub = onInboxResolved((it) => {
+      if (it.id === item.id) {
+        resolveEventCount++;
+      }
+    });
+
+    try {
+      // 1. First reconcile call
+      const rec1 = await reconcilePendingClaim(paths, item.id);
+      assert.equal(rec1, true);
+      assert.equal(resolveEventCount, 1, 'fireInboxResolved must be called on first reconcile');
+
+      // 2. Second reconcile call on same item
+      const rec2 = await reconcilePendingClaim(paths, item.id);
+      assert.equal(rec2, false); // lock was already unlinked
+      assert.equal(resolveEventCount, 1, 'fireInboxResolved must NOT be called again');
+    } finally {
+      unsub();
     }
   } finally {
     cleanup();
@@ -1010,8 +1308,12 @@ test('Codex Review #5 Item 2: job started but store update fails keeps claim and
       },
     });
 
-    // Hold items.lock again
-    fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n', 'utf8');
+    // Hold items.lock during startJob so the store update with job_id fails after follow-up job has started
+    ctx.startJob = async () => {
+      startedJobId = 'job_started_reply_' + Math.random().toString(36).slice(2);
+      fs.writeFileSync(lockFile, JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n', 'utf8');
+      return { ok: true, job_id: startedJobId };
+    };
 
     const resReply = await performInboxAction(ctx, replyItem.id, 'reply', 'Here is the answer', 'ui');
     assert.equal(resReply.ok, true);

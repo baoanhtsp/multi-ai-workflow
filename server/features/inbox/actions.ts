@@ -5,6 +5,7 @@ import type { ServerPaths } from '../../lib/paths.ts';
 import { isDirectorySafe, isFileSafe } from '../../lib/paths.ts';
 import { isProcessRunning } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
+import { acquireFileLock } from './lockfile.ts';
 import { getJobFlags, runJobScanner } from './scanner.ts';
 import {
   addInboxItem,
@@ -223,6 +224,8 @@ export function handleInboxAdd(
 
 export interface InboxClaim {
   claimFile: string;
+  pid: number;
+  ts: number;
   keep: () => void;
   release: () => void;
 }
@@ -237,27 +240,110 @@ export function reconcilePendingClaim(paths: ServerPaths, id: string): boolean {
   if (!isFileSafe(claimFile)) {
     return false;
   }
+
+  let raw = '';
+  let data: any = null;
   try {
-    const raw = fs.readFileSync(claimFile, 'utf8');
-    const data = JSON.parse(raw);
-    if (data?.resolution?.job_id) {
-      try {
-        updateInboxItemStatus(paths, normId, 'done', data.resolution);
-        try {
-          fs.unlinkSync(claimFile);
-        } catch {
-          // ignore
-        }
-        return true;
-      } catch {
-        // Store may be temporarily busy, leave claim for next attempt
-        return false;
-      }
-    }
+    raw = fs.readFileSync(claimFile, 'utf8');
+    data = JSON.parse(raw);
   } catch {
-    // ignore
+    try {
+      const stat = fs.statSync(claimFile);
+      if (Date.now() - stat.mtimeMs > 600_000) {
+        try { fs.unlinkSync(claimFile); } catch {}
+        return true;
+      }
+    } catch {}
+    return false;
   }
-  return false;
+
+  const pid = Number(data?.pid);
+  const isDead = pid > 0 ? !isProcessRunning(pid) : false;
+  const hasResolution = Boolean(data?.resolution?.job_id || data?.resolution);
+
+  // If owner is alive and does not have a pending completed resolution, leave it alone
+  if (!isDead && !hasResolution) {
+    return false;
+  }
+
+  const recoverPath = claimFile + '.recover';
+  const recStart = Date.now();
+  const sab = new SharedArrayBuffer(4);
+  const int32 = new Int32Array(sab);
+
+  while (true) {
+    let recFd: number | null = null;
+    try {
+      recFd = fs.openSync(recoverPath, 'wx');
+      fs.writeFileSync(recFd, JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n', 'utf8');
+      fs.closeSync(recFd);
+      recFd = null;
+      break;
+    } catch (recErr: any) {
+      if (recFd !== null) {
+        try { fs.closeSync(recFd); } catch {}
+        recFd = null;
+      }
+      if (recErr?.code === 'EEXIST') {
+        try {
+          const recStat = fs.statSync(recoverPath);
+          if (Date.now() - recStat.mtimeMs > 5_000) {
+            try { fs.unlinkSync(recoverPath); } catch {}
+            continue;
+          }
+        } catch {}
+        if (Date.now() - recStart > 10_000) {
+          return false;
+        }
+        Atomics.wait(int32, 0, 0, 25);
+        continue;
+      }
+      return false;
+    }
+  }
+
+  try {
+    let currentRaw = '';
+    let currentData: any = null;
+    try {
+      currentRaw = fs.readFileSync(claimFile, 'utf8');
+      currentData = JSON.parse(currentRaw);
+    } catch {
+      return false;
+    }
+
+    let finalResolution: any = null;
+    if (currentData?.resolution) {
+      finalResolution = currentData.resolution;
+    } else if (isDead && (currentData?.state === 'starting' || currentData?.state === 'started')) {
+      finalResolution = {
+        action: currentData.action || 'retry',
+        by: currentData.by || 'ui',
+        at: currentData.at || new Date().toISOString(),
+        ...(currentData.job_id ? { job_id: currentData.job_id } : {}),
+        note: 'interrupted \u2014 check the job list',
+      };
+    } else if (isDead) {
+      // Dead owner before dispatch, no state or resolution. Just unlink stale claim file
+      try { fs.unlinkSync(claimFile); } catch {}
+      return true;
+    } else {
+      return false;
+    }
+
+    try {
+      const updated = updateInboxItemStatus(paths, normId, 'done', finalResolution);
+      if (updated) {
+        void fireInboxResolved(updated);
+      }
+      try { fs.unlinkSync(claimFile); } catch {}
+      return true;
+    } catch {
+      return false;
+    }
+  } finally {
+    try { fs.unlinkSync(recoverPath); } catch {}
+  }
 }
 
 export function reconcilePendingClaims(paths: ServerPaths): number {
@@ -284,7 +370,7 @@ export function reconcilePendingClaims(paths: ServerPaths): number {
 
 const inFlightActionIds = new Set<string>();
 
-function tryAcquireInboxClaim(paths: ServerPaths, id: string, isRetry = false): InboxClaim {
+function tryAcquireInboxClaim(paths: ServerPaths, id: string): InboxClaim {
   const normId = String(id ?? '').trim().toLowerCase();
   if (!/^i[0-9a-z]{6}$/i.test(normId)) {
     throw new ApiValidationError(`Invalid inbox item id '${id}'. Expected format ^i[0-9a-z]{6}$.`, 400);
@@ -302,145 +388,33 @@ function tryAcquireInboxClaim(paths: ServerPaths, id: string, isRetry = false): 
   // Reconcile pending claim if one already exists (Codex Review #5 Item 2)
   reconcilePendingClaim(paths, normId);
 
-  let fd: number | null = null;
-  try {
-    fd = fs.openSync(claimFile, 'wx');
-    const claimData = JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n';
-    fs.writeFileSync(fd, claimData, 'utf8');
-  } catch (err: any) {
-    if (err?.code === 'EEXIST') {
-      // Check if existing claim records a pending resolution with job_id
-      try {
-        const raw = fs.readFileSync(claimFile, 'utf8');
-        const data = JSON.parse(raw);
-        if (data?.resolution?.job_id) {
-          try {
-            updateInboxItemStatus(paths, normId, 'done', data.resolution);
-            try {
-              fs.unlinkSync(claimFile);
-            } catch {
-              // ignore
-            }
-            throw new ApiValidationError(`Inbox item '${normId}' is already resolved (done).`, 409);
-          } catch (updateErr: any) {
-            if (updateErr instanceof ApiValidationError) throw updateErr;
-            throw new ApiValidationError(`Inbox item '${normId}' is already being processed (pending store update).`, 409);
-          }
+  const handle = acquireFileLock(claimFile, {
+    timeoutMs: 0,
+    onRecoverDeadOwner: (deadContent, deadParsed) => {
+      if (deadParsed?.state === 'starting' || deadParsed?.state === 'started' || deadParsed?.resolution) {
+        const res = deadParsed.resolution ?? {
+          action: deadParsed.action || 'retry',
+          by: deadParsed.by || 'ui',
+          at: deadParsed.at || new Date().toISOString(),
+          ...(deadParsed.job_id ? { job_id: deadParsed.job_id } : {}),
+          note: 'interrupted \u2014 check the job list',
+        };
+        const updated = updateInboxItemStatus(paths, normId, 'done', res);
+        if (updated) {
+          void fireInboxResolved(updated);
         }
-      } catch (parseErr: any) {
-        if (parseErr instanceof ApiValidationError) throw parseErr;
+        try { fs.unlinkSync(claimFile); } catch {}
+        throw new ApiValidationError(`Inbox item '${normId}' is already resolved (done).`, 409);
       }
+    },
+  });
 
-      if (!isRetry) {
-        let isStale = false;
-        let judgedPid: number | undefined;
-        let judgedTs: number | undefined;
-        let judgedRaw: string | undefined;
-
-        try {
-          judgedRaw = fs.readFileSync(claimFile, 'utf8');
-          const data = JSON.parse(judgedRaw);
-          const pid = Number(data?.pid);
-          judgedPid = pid;
-          judgedTs = Number(data?.ts);
-          if (pid > 0) {
-            if (!isProcessRunning(pid)) {
-              isStale = true;
-            }
-          } else {
-            const stat = fs.statSync(claimFile);
-            if (Date.now() - stat.mtimeMs > 600_000) {
-              isStale = true;
-            }
-          }
-        } catch {
-          // Corrupt or unreadable claim file: stale ONLY if > 10m old
-          try {
-            const stat = fs.statSync(claimFile);
-            if (Date.now() - stat.mtimeMs > 600_000) {
-              isStale = true;
-            }
-          } catch {
-            // ignore
-          }
-        }
-
-        if (isStale) {
-          const staleFile = `${claimFile}.stale.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-          try {
-            fs.renameSync(claimFile, staleFile);
-
-            // Stale-lock TOCTOU protection (Codex Review #5 Item 1):
-            // Between judging stale and renaming, another process may have replaced the file
-            // with a live lock. After renaming, read the renamed file: if its pid/ts differ
-            // from what was judged stale (i.e. it is someone's fresh lock), put it back
-            // with fs.linkSync(staleFile, claimFile) (fails if a new lock already exists — then leave it)
-            // and unlink the stale name only when it really was the stale one; then retry.
-            let isSameAsJudged = false;
-            try {
-              const checkRaw = fs.readFileSync(staleFile, 'utf8');
-              const checkData = JSON.parse(checkRaw);
-              if (judgedPid !== undefined && judgedTs !== undefined) {
-                isSameAsJudged = checkData?.pid === judgedPid && checkData?.ts === judgedTs;
-              } else if (judgedRaw !== undefined) {
-                isSameAsJudged = checkRaw === judgedRaw;
-              } else {
-                const stat = fs.statSync(staleFile);
-                isSameAsJudged = Date.now() - stat.mtimeMs > 600_000;
-              }
-            } catch {
-              isSameAsJudged = (judgedPid === undefined);
-            }
-
-            if (isSameAsJudged) {
-              try {
-                fs.unlinkSync(staleFile);
-              } catch {
-                // ignore
-              }
-            } else {
-              // Live lock was swapped in before rename! Restore it.
-              try {
-                fs.linkSync(staleFile, claimFile);
-              } catch {
-                // Fails if a new lock already exists — then leave it
-              }
-            }
-            return tryAcquireInboxClaim(paths, normId, true);
-          } catch {
-            // Another process won rename race, retry claim once
-            return tryAcquireInboxClaim(paths, normId, true);
-          }
-        }
-      }
-      throw new ApiValidationError(`Inbox item '${id}' is already being processed.`, 409);
-    }
-    throw err;
-  } finally {
-    if (fd !== null) {
-      try {
-        fs.closeSync(fd);
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  let keepClaim = false;
   return {
     claimFile,
-    keep: () => {
-      keepClaim = true;
-    },
-    release: () => {
-      if (!keepClaim) {
-        try {
-          fs.unlinkSync(claimFile);
-        } catch {
-          // Ignore unlink error
-        }
-      }
-    },
+    pid: handle.pid,
+    ts: handle.ts,
+    keep: handle.keep,
+    release: handle.release,
   };
 }
 
@@ -535,6 +509,22 @@ export async function performInboxAction(
         throw new ApiValidationError(`Inbox item '${normId}' has no retry configuration.`, 400);
       }
 
+      // 1. Journal BEFORE dispatch (Codex Review #6 Item 2)
+      try {
+        const startingJournal = JSON.stringify({
+          pid: claim.pid,
+          ts: claim.ts,
+          state: 'starting',
+          action: 'retry',
+          by: resolvedBy,
+          at: now,
+        }) + '\n';
+        fs.writeFileSync(claim.claimFile, startingJournal, 'utf8');
+      } catch {
+        throw new ApiValidationError("Failed to journal action before job start.", 503);
+      }
+
+      // 2. Dispatch job
       const jobResult = await ctx.startJob(item.retry as unknown as Record<string, unknown>);
       const newJobId = (jobResult.job_id as string) ?? '';
 
@@ -545,19 +535,24 @@ export async function performInboxAction(
         job_id: newJobId,
       };
 
-      // Before releasing the claim, if startJob succeeded, write the resolution (job_id) into the CLAIM file
+      // 3. Journal AFTER dispatch
       try {
-        const claimContent = JSON.stringify({
-          pid: process.pid,
-          ts: Date.now(),
+        const startedJournal = JSON.stringify({
+          pid: claim.pid,
+          ts: claim.ts,
+          state: 'started',
+          action: 'retry',
+          by: resolvedBy,
+          at: now,
+          job_id: newJobId,
           resolution,
         }) + '\n';
-        fs.writeFileSync(claim.claimFile, claimContent, 'utf8');
+        fs.writeFileSync(claim.claimFile, startedJournal, 'utf8');
       } catch {
         // ignore
       }
 
-      // Make the store update retry (up to 3 x 2s)
+      // 4. Update store (retry up to 3 x 2s)
       let updated: InboxItem | null = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -595,66 +590,109 @@ export async function performInboxAction(
         throw new ApiValidationError("Reply text must be between 1 and 4000 characters.", 400);
       }
 
-      let followUpJobId: string | null = null;
-      if (item.retry) {
+      const resolution = {
+        action: 'reply',
+        text: rawText,
+        by: resolvedBy,
+        at: now,
+        job_id: undefined as string | undefined,
+      };
+
+      // 1. Store reply FIRST (Codex Review #6 Item 3 & design §3.3)
+      let updated: InboxItem | null = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          updated = updateInboxItemStatus(ctx.paths, normId, 'done', resolution);
+          break;
+        } catch {
+          if (attempt === 2) break;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      }
+      if (!updated) {
+        throw new ApiValidationError("Inbox is busy, try again.", 503);
+      }
+
+      // 2. Fire onInboxResolved FIRST
+      const handled = await fireInboxResolved(updated);
+
+      // 3. Start follow-up job ONLY if no listener returned true and item has retry
+      if (!handled && item.retry) {
+        // Journal BEFORE dispatch
+        try {
+          const startingJournal = JSON.stringify({
+            pid: claim.pid,
+            ts: claim.ts,
+            state: 'starting',
+            action: 'reply',
+            by: resolvedBy,
+            at: now,
+            text: rawText,
+          }) + '\n';
+          fs.writeFileSync(claim.claimFile, startingJournal, 'utf8');
+        } catch {
+          throw new ApiValidationError("Failed to journal action before job start.", 503);
+        }
+
         const originalPrompt = item.retry.prompt ?? '';
         const followUpPrompt = `${originalPrompt}\n\n## Follow-up from the user\n${rawText}`.trim();
         const followUpBody = {
           ...item.retry,
           prompt: followUpPrompt,
         };
-        const jobRes = await ctx.startJob(followUpBody as unknown as Record<string, unknown>);
-        followUpJobId = (jobRes?.job_id as string) ?? null;
-      }
-
-      const resolution = {
-        action: 'reply',
-        text: rawText,
-        by: resolvedBy,
-        at: now,
-        job_id: followUpJobId ?? undefined,
-      };
-
-      if (followUpJobId) {
-        // Before releasing the claim, if startJob succeeded, write the resolution (job_id) into the CLAIM file
+        let followUpJobId = '';
         try {
-          const claimContent = JSON.stringify({
-            pid: process.pid,
-            ts: Date.now(),
+          const jobRes = await ctx.startJob(followUpBody as unknown as Record<string, unknown>);
+          followUpJobId = (jobRes?.job_id as string) ?? '';
+        } catch (startErr) {
+          // If follow-up job failed to start, roll back status to 'open' so user can retry reply
+          unmarkInboxResolved(normId);
+          try {
+            updateInboxItemStatus(ctx.paths, normId, 'open', null as any);
+          } catch {}
+          throw startErr;
+        }
+
+        resolution.job_id = followUpJobId;
+
+        // Journal AFTER dispatch
+        try {
+          const startedJournal = JSON.stringify({
+            pid: claim.pid,
+            ts: claim.ts,
+            state: 'started',
+            action: 'reply',
+            by: resolvedBy,
+            at: now,
+            job_id: followUpJobId,
             resolution,
           }) + '\n';
-          fs.writeFileSync(claim.claimFile, claimContent, 'utf8');
+          fs.writeFileSync(claim.claimFile, startedJournal, 'utf8');
         } catch {
           // ignore
         }
-      }
 
-      // Make the store update retry (up to 3 x 2s)
-      let updated: InboxItem | null = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          updated = updateInboxItemStatus(ctx.paths, normId, 'done', resolution);
-          break;
-        } catch (err: any) {
-          if (attempt === 2) {
+        // Store update with job_id
+        let jobUpdated: InboxItem | null = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            jobUpdated = updateInboxItemStatus(ctx.paths, normId, 'done', resolution);
             break;
+          } catch {
+            if (attempt === 2) break;
+            await new Promise((r) => setTimeout(r, 50));
           }
-          await new Promise((r) => setTimeout(r, 50));
         }
-      }
 
-      if (updated) {
-        await fireInboxResolved(updated);
-        return {
-          ok: true,
-          item: updated,
-          job_id: followUpJobId,
-        };
-      }
+        if (jobUpdated) {
+          return {
+            ok: true,
+            item: jobUpdated,
+            job_id: followUpJobId,
+          };
+        }
 
-      if (followUpJobId) {
-        // Store update failed, but follow-up job started: KEEP claim file and return pending_store_update
-        // NEVER roll back to open once its follow-up job started!
+        // Store update failed, follow-up job started: keep claim file
         claim.keep();
         return {
           ok: true,
@@ -663,7 +701,11 @@ export async function performInboxAction(
         };
       }
 
-      throw new ApiValidationError("Inbox is busy, try again.", 503);
+      // No follow-up job started (handled by listener or no retry)
+      return {
+        ok: true,
+        item: updated,
+      };
     }
 
     throw new ApiValidationError(`Unsupported action '${normAction}'.`, 400);

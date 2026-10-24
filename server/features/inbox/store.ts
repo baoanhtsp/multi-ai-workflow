@@ -6,6 +6,7 @@ import { isDirectorySafe, isFileSafe } from '../../lib/paths.ts';
 import { isProcessRunning } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { redactSecrets } from '../health/probes.ts';
+import { acquireFileLock } from './lockfile.ts';
 
 export type InboxKind =
   | 'needs_login'
@@ -56,6 +57,7 @@ export interface InboxResolution {
   by: 'ui' | 'telegram' | string;
   at: string;
   job_id?: string;
+  note?: string;
 }
 
 export interface InboxItem {
@@ -167,135 +169,15 @@ export function withItemsLock<T>(paths: ServerPaths, fn: () => T): T {
   }
 
   const dataDir = paths.featureDataDir('inbox');
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
-  }
   const lockFile = path.win32.join(dataDir, 'items.lock');
-  const start = Date.now();
-  const TIMEOUT_MS = 2000;
-  const STEP_MS = 25;
-  const sab = new SharedArrayBuffer(4);
-  const int32 = new Int32Array(sab);
-
-  while (true) {
-    let fd: number | null = null;
-    try {
-      fd = fs.openSync(lockFile, 'wx');
-      const lockData = JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n';
-      fs.writeFileSync(fd, lockData, 'utf8');
-      fs.closeSync(fd);
-      fd = null;
-      break;
-    } catch (err: any) {
-      if (fd !== null) {
-        try {
-          fs.closeSync(fd);
-        } catch {
-          // ignore
-        }
-        fd = null;
-      }
-      if (err?.code === 'EEXIST') {
-        // Check if stale (stale only when pid is dead, or corrupt/unreadable > 10m)
-        let isStale = false;
-        let judgedPid: number | undefined;
-        let judgedTs: number | undefined;
-        let judgedRaw: string | undefined;
-        try {
-          judgedRaw = fs.readFileSync(lockFile, 'utf8');
-          const parsed = JSON.parse(judgedRaw);
-          const pid = Number(parsed?.pid);
-          judgedPid = pid;
-          judgedTs = Number(parsed?.ts);
-          if (pid > 0) {
-            if (!isProcessRunning(pid)) {
-              isStale = true;
-            }
-          } else {
-            const stat = fs.statSync(lockFile);
-            if (Date.now() - stat.mtimeMs > 600_000) {
-              isStale = true;
-            }
-          }
-        } catch {
-          try {
-            const stat = fs.statSync(lockFile);
-            if (Date.now() - stat.mtimeMs > 600_000) {
-              isStale = true;
-            }
-          } catch {
-            // ignore
-          }
-        }
-
-        if (isStale) {
-          const staleFile = `${lockFile}.stale.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-          try {
-            fs.renameSync(lockFile, staleFile);
-
-            // Stale-lock TOCTOU protection (Codex Review #5 Item 1):
-            // Between judging stale and renaming, another process may have replaced the file
-            // with a live lock. After renaming, read the renamed file: if its pid/ts differ
-            // from what was judged stale (i.e. it is someone's fresh lock), put it back
-            // with fs.linkSync(staleFile, lockFile) (fails if a new lock already exists — then leave it)
-            // and unlink the stale name only when it really was the stale one; then retry.
-            let isSameAsJudged = false;
-            try {
-              const checkRaw = fs.readFileSync(staleFile, 'utf8');
-              const checkParsed = JSON.parse(checkRaw);
-              if (judgedPid !== undefined && judgedTs !== undefined) {
-                isSameAsJudged = checkParsed?.pid === judgedPid && checkParsed?.ts === judgedTs;
-              } else if (judgedRaw !== undefined) {
-                isSameAsJudged = checkRaw === judgedRaw;
-              } else {
-                const stat = fs.statSync(staleFile);
-                isSameAsJudged = Date.now() - stat.mtimeMs > 600_000;
-              }
-            } catch {
-              isSameAsJudged = (judgedPid === undefined);
-            }
-
-            if (isSameAsJudged) {
-              try {
-                fs.unlinkSync(staleFile);
-              } catch {
-                // ignore
-              }
-            } else {
-              // File was replaced by a fresh lock before rename! Restore it.
-              try {
-                fs.linkSync(staleFile, lockFile);
-              } catch {
-                // Fails if a new lock already exists — then leave it
-              }
-            }
-            continue;
-          } catch {
-            // Another process renamed it, continue to sleep/retry
-          }
-        }
-
-        if (Date.now() - start >= TIMEOUT_MS) {
-          throw new ApiValidationError("Inbox is busy, try again.", 503);
-        }
-
-        Atomics.wait(int32, 0, 0, STEP_MS);
-        continue;
-      }
-      throw err;
-    }
-  }
+  const handle = acquireFileLock(lockFile, { timeoutMs: 2000, stepMs: 25 });
 
   itemsLockDepth = 1;
   try {
     return fn();
   } finally {
     itemsLockDepth = 0;
-    try {
-      fs.unlinkSync(lockFile);
-    } catch {
-      // Ignore unlink error
-    }
+    handle.release();
   }
 }
 
