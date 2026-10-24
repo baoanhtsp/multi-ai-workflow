@@ -264,12 +264,19 @@ export async function handleWorktreeMerge(
         }
         const gateRes = await callAction('checks_gate', { query: gateQuery });
         checksResult = gateRes;
-        if (gateRes && gateRes.green === false) {
+        const isAllowed =
+          typeof gateRes === 'object' &&
+          gateRes !== null &&
+          (gateRes as { ok?: unknown }).ok !== false &&
+          ((gateRes as { green?: unknown }).green === true ||
+            (gateRes as { overridden?: unknown }).overridden === true);
+
+        if (!isAllowed) {
           return {
             ok: true,
             merged: false,
             blocked: 'checks',
-            checks: gateRes,
+            checks: gateRes ?? { ok: false, green: false },
           };
         }
       } catch (err: unknown) {
@@ -423,11 +430,15 @@ export async function handleWorktreeMerge(
     const commitRes = await gitRun(['rev-parse', 'HEAD'], { cwd: repoPath });
     const mergeCommit = commitRes.stdout.trim();
 
+    const branchTipRes = await gitRun(['rev-parse', record.branch], { cwd: repoPath, allowFailure: true });
+    const branchTip = branchTipRes.code === 0 ? branchTipRes.stdout.trim() : '';
+
     record.status = 'merged';
     record.merged = {
       strategy,
       commit: mergeCommit,
       at: new Date().toISOString(),
+      branch_tip: branchTip,
     };
     record.updated_at = new Date().toISOString();
 

@@ -1507,3 +1507,73 @@ test('S1 Worktrees S4-3: Merge gate fails closed on error and skips only on unkn
     cleanupWorktreeEnv(env);
   }
 });
+
+test('S1 Worktrees S4-4: Merge gate requires green === true or overridden === true (Z4)', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    let mockGateResponse: any = null;
+
+    const gateCtx = {
+      ...env.ctx,
+      callAction: async (action: string) => {
+        if (action === 'checks_gate') {
+          return mockGateResponse;
+        }
+        throw new Error(`Unknown action: ${action}`);
+      },
+    };
+
+    const runMergeWithGate = async (name: string, resp: any) => {
+      mockGateResponse = resp;
+      const wtRes = await createWorktreeRecord(env.ctx, {
+        project_path: env.repoDir,
+        base: 'master',
+        name,
+        origin: 'manual',
+      });
+      fs.writeFileSync(path.win32.join(wtRes.worktree.worktree_path, `${name}.txt`), `${name}\n`, 'utf8');
+
+      return await handleWorktreeMerge(gateCtx as any, {
+        id: name,
+        strategy: 'merge',
+        confirm: true,
+      });
+    };
+
+    // 1. { ok: false } -> blocked: 'checks'
+    const res1 = await runMergeWithGate('z4-wt-1', { ok: false });
+    assert.equal(res1.ok, true);
+    assert.equal(res1.merged, false);
+    assert.equal(res1.blocked, 'checks');
+
+    // 2. {} (missing green) -> blocked: 'checks'
+    const res2 = await runMergeWithGate('z4-wt-2', {});
+    assert.equal(res2.ok, true);
+    assert.equal(res2.merged, false);
+    assert.equal(res2.blocked, 'checks');
+
+    // 3. null -> blocked: 'checks'
+    const res3 = await runMergeWithGate('z4-wt-3', null);
+    assert.equal(res3.ok, true);
+    assert.equal(res3.merged, false);
+    assert.equal(res3.blocked, 'checks');
+
+    // 4. { ok: true, green: false } -> blocked: 'checks'
+    const res4 = await runMergeWithGate('z4-wt-4', { ok: true, green: false });
+    assert.equal(res4.ok, true);
+    assert.equal(res4.merged, false);
+    assert.equal(res4.blocked, 'checks');
+
+    // 5. { ok: true, green: false, overridden: true } -> proceeds to merge
+    const res5 = await runMergeWithGate('z4-wt-5', { ok: true, green: false, overridden: true });
+    assert.equal(res5.ok, true);
+    assert.equal(res5.merged, true);
+
+    // 6. { ok: true, green: true } -> proceeds to merge
+    const res6 = await runMergeWithGate('z4-wt-6', { ok: true, green: true });
+    assert.equal(res6.ok, true);
+    assert.equal(res6.merged, true);
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});

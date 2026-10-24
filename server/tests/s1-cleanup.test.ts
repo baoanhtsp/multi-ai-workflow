@@ -19,6 +19,7 @@ import {
   handleCleanupRestore,
   handleCleanupTrash,
   loadCleanupConfig,
+  parseTrashRefTimestamp,
   runAutomaticSweep,
   saveCleanupConfig,
   scanCleanup,
@@ -822,6 +823,265 @@ test('S1 Cleanup K7 & K8: worktree branch deletion backs up unmerged clean branc
       cwd: env.repoDir,
     });
     assert.equal(activeBranchCheck.code, 0, 'Active branch maw/wt-k8-active must not be deleted');
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup Z1: branch and worktree with commits added after merge are treated as unmerged/stale', async () => {
+  const env = await setupCleanupEnv();
+  try {
+    const dataDir = env.paths.featureDataDir('worktrees');
+
+    // 1. Branch: Create branch, record as merged with old tip, then add new commit
+    await runCommand('git', ['checkout', '-b', 'maw/z1-branch'], { cwd: env.repoDir });
+    fs.writeFileSync(path.win32.join(env.repoDir, 'z1-1.txt'), 'version 1\n', 'utf8');
+    await runCommand('git', ['add', '.'], { cwd: env.repoDir });
+    await runCommand('git', ['commit', '-m', 'feat: v1'], { cwd: env.repoDir });
+    const tip1Res = await runCommand('git', ['rev-parse', 'HEAD'], { cwd: env.repoDir });
+    const oldTip = tip1Res.stdout.trim();
+
+    // Store record: status merged with branch_tip = oldTip
+    const store = await loadWorktreesStore(dataDir);
+    store.worktrees.push({
+      id: 'wt-z1-branch',
+      project_path: env.repoDir,
+      worktree_path: path.win32.join(env.tempBase, 'wt-dummy'),
+      branch: 'maw/z1-branch',
+      base: 'main',
+      base_commit: oldTip,
+      port: 4491,
+      origin: 'manual',
+      status: 'merged',
+      merged: { strategy: 'merge', commit: oldTip, at: new Date().toISOString(), branch_tip: oldTip },
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    await saveWorktreesStore(dataDir, store);
+
+    // Now add new commit to branch (moving tip past branch_tip)
+    fs.writeFileSync(path.win32.join(env.repoDir, 'z1-2.txt'), 'version 2 unmerged\n', 'utf8');
+    await runCommand('git', ['add', '.'], { cwd: env.repoDir });
+    await runCommand('git', ['commit', '-m', 'feat: v2 unmerged'], { cwd: env.repoDir });
+    await runCommand('git', ['checkout', 'main'], { cwd: env.repoDir });
+
+    const cfg = loadCleanupConfig(env.ctx);
+    const candidates = await getCleanupCandidates(env.ctx, env.repoDir, cfg);
+
+    // Branch maw/z1-branch must NOT be detected as merged_branch
+    const mergedCand = candidates.find((c) => c.name === 'maw/z1-branch' && c.kind === 'merged_branch');
+    assert.equal(mergedCand, undefined, 'Branch with commits after merge must not be classified as merged_branch');
+
+    // 2. Kept worktree: Create worktree, record as merged with past remove_after and old tip, add commit in worktree
+    const wtRes = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'wt-z1-wt',
+      base: 'main',
+    });
+    const wtPath = wtRes.worktree.worktree_path;
+    const storeAfterWt = await loadWorktreesStore(dataDir);
+    const wtRec = storeAfterWt.worktrees.find((w) => w.id === 'wt-z1-wt')!;
+    const wtHeadRes = await runCommand('git', ['rev-parse', 'HEAD'], { cwd: wtPath });
+    const originalWtHead = wtHeadRes.stdout.trim();
+
+    wtRec.status = 'merged';
+    wtRec.remove_after = new Date(Date.now() - 3600 * 1000).toISOString();
+    wtRec.merged = {
+      strategy: 'merge',
+      commit: originalWtHead,
+      at: new Date().toISOString(),
+      branch_tip: originalWtHead,
+    };
+    await saveWorktreesStore(dataDir, storeAfterWt);
+
+    // Add new commit inside worktree
+    fs.writeFileSync(path.win32.join(wtPath, 'post-merge.txt'), 'work after merge\n', 'utf8');
+    await runCommand('git', ['add', '.'], { cwd: wtPath });
+    await runCommand('git', ['commit', '-m', 'commit after merge'], { cwd: wtPath });
+
+    const candsAfterCommit = await getCleanupCandidates(env.ctx, env.repoDir, cfg);
+    const keptCand = candsAfterCommit.find((c) => c.name === 'wt-z1-wt' && c.kind === 'kept_worktree');
+    assert.equal(keptCand, undefined, 'Worktree with commits after merge must not be kept_worktree');
+
+    const staleCand = candsAfterCommit.find((c) => c.name === 'wt-z1-wt');
+    assert.ok(staleCand, 'Worktree should be detected as stale/risky worktree');
+    assert.equal(staleCand!.kind, 'stale_worktree');
+    assert.equal(staleCand!.risky, true);
+    assert.equal(staleCand!.default_selected, false);
+
+    // Verify sweep does NOT auto-remove it
+    await runAutomaticSweep(env.ctx);
+    assert.ok(fs.existsSync(wtPath), 'Sweep must not auto-remove worktree with commits added after merge');
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup Z2: trash expiry uses ref timestamp, recent backup of old commit does not expire, unparseable is risky', async () => {
+  const env = await setupCleanupEnv();
+  try {
+    const cfg = loadCleanupConfig(env.ctx);
+    const treeRes = await runCommand('git', ['write-tree'], { cwd: env.repoDir });
+
+    // 1. Old commit (60 days ago), backed up recently (today)
+    const oldDate = new Date(Date.now() - 60 * 86400 * 1000).toISOString();
+    const msgFile = path.win32.join(env.tempBase, 'old-msg.txt');
+    fs.writeFileSync(msgFile, 'old commit\n', 'utf8');
+    const oldCommitRes = await runCommand('git', ['commit-tree', treeRes.stdout.trim(), '-F', msgFile], {
+      cwd: env.repoDir,
+      env: { GIT_COMMITTER_DATE: oldDate, GIT_AUTHOR_DATE: oldDate },
+    });
+
+    const now = new Date();
+    const yyyy = String(now.getFullYear());
+    const MM = String(now.getMonth() + 1).padStart(2, '0');
+    const dd = String(now.getDate()).padStart(2, '0');
+    const HH = String(now.getHours()).padStart(2, '0');
+    const mm = String(now.getMinutes()).padStart(2, '0');
+    const ss = String(now.getSeconds()).padStart(2, '0');
+    const recentTs = `${yyyy}${MM}${dd}${HH}${mm}${ss}`;
+
+    const recentRef = `refs/maw/trash/maw-recent-${recentTs}`;
+    await runCommand('git', ['update-ref', recentRef, oldCommitRes.stdout.trim()], { cwd: env.repoDir });
+
+    // 2. Unparseable trash ref
+    const unparseableRef = 'refs/maw/trash/maw-unparseable-ref';
+    await runCommand('git', ['update-ref', unparseableRef, oldCommitRes.stdout.trim()], { cwd: env.repoDir });
+
+    const candidates = await getCleanupCandidates(env.ctx, env.repoDir, cfg);
+
+    // Recent trash ref pointing to old commit must NOT be trash_expired (age < 30 days)
+    const recentCand = candidates.find((c) => c.name === recentRef && c.kind === 'trash_expired');
+    assert.equal(recentCand, undefined, 'Recent trash backup of old commit must not be expired');
+
+    // Unparseable ref must be listed, but risky and default_selected: false
+    const unparseCand = candidates.find((c) => c.name === unparseableRef);
+    assert.ok(unparseCand, 'Unparseable trash ref must be listed');
+    assert.equal(unparseCand!.kind, 'trash_expired');
+    assert.equal(unparseCand!.risky, true);
+    assert.equal(unparseCand!.default_selected, false);
+
+    // Check handleCleanupTrash
+    const trashRes = await handleCleanupTrash(env.ctx, new URLSearchParams(`project_path=${env.repoDir}`));
+    const trashItems = trashRes.trash as Array<Record<string, unknown>>;
+    const recentItem = trashItems.find((t) => t.ref === recentRef);
+    assert.ok(recentItem, 'Recent trash item must be listed in cleanup_trash');
+    assert.notEqual(recentItem!.expires_at, 'never');
+
+    const unparseItem = trashItems.find((t) => t.ref === unparseableRef);
+    assert.ok(unparseItem, 'Unparseable trash item must be listed');
+    assert.equal(unparseItem!.expires_at, 'never');
+
+    // Verify sweep does NOT purge the unparseable ref
+    await runAutomaticSweep(env.ctx);
+    const unparseCheck = await runCommand('git', ['show-ref', '--verify', unparseableRef], { cwd: env.repoDir });
+    assert.equal(unparseCheck.code, 0, 'Sweep must never auto-purge unparseable trash ref');
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup Z3: unmerged branch deletion is blocked when trash backup fails, branch kept intact', async () => {
+  const env = await setupCleanupEnv();
+  try {
+    const dataDir = env.paths.featureDataDir('worktrees');
+
+    const wtRes = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'wt-z3-unmerged',
+      base: 'main',
+    });
+    const wtPath = wtRes.worktree.worktree_path;
+
+    // Add unmerged commit, leave working tree clean
+    fs.writeFileSync(path.win32.join(wtPath, 'unmerged.txt'), 'unmerged work\n', 'utf8');
+    await runCommand('git', ['add', '.'], { cwd: wtPath });
+    await runCommand('git', ['commit', '-m', 'feat: unmerged commit on wt-z3'], { cwd: wtPath });
+
+    // Mark as kept_worktree in past
+    const store = await loadWorktreesStore(dataDir);
+    const rec = store.worktrees.find((w) => w.id === 'wt-z3-unmerged')!;
+    rec.status = 'merged';
+    rec.remove_after = new Date(Date.now() - 3600 * 1000).toISOString();
+    await saveWorktreesStore(dataDir, store);
+
+    // Block update-ref by creating .git/refs/maw/trash as a file
+    const gitRefsMawDir = path.win32.join(env.repoDir, '.git', 'refs', 'maw');
+    fs.mkdirSync(gitRefsMawDir, { recursive: true });
+    const trashBlocker = path.win32.join(gitRefsMawDir, 'trash');
+    fs.writeFileSync(trashBlocker, 'blocking-file\n', 'utf8');
+
+    const candId = 'kept_worktree:wt-z3-unmerged';
+    const applyRes = await handleCleanupApply(env.ctx, {
+      project_path: env.repoDir,
+      items: [candId],
+      confirm: true,
+      confirm_risky: [candId],
+    });
+
+    assert.equal(applyRes.ok, true);
+    assert.equal(applyRes.deleted.length, 1);
+    const del = applyRes.deleted[0]!;
+    assert.equal(del.id, candId);
+    assert.ok(
+      del.note?.includes('kept') && del.note?.includes('branch'),
+      `Note should mention branch kept, got: ${del.note}`
+    );
+
+    // Worktree was removed
+    assert.ok(!fs.existsSync(wtPath), 'Worktree directory must be removed');
+
+    // Unmerged branch was NOT deleted because backup failed
+    const branchCheck = await runCommand('git', ['show-ref', '--verify', 'refs/heads/maw/wt-z3-unmerged'], {
+      cwd: env.repoDir,
+    });
+    assert.equal(branchCheck.code, 0, 'Unmerged branch must be preserved when trash backup fails');
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup Z5: selective prune does not prune external worktrees outside .maw-wt', async () => {
+  const env = await setupCleanupEnv();
+  try {
+    const containerDir = path.win32.join(env.projectsRoot, '.maw-wt', 'sample-repo');
+    fs.mkdirSync(containerDir, { recursive: true });
+
+    // 1. External worktree outside .maw-wt
+    const outsideWtPath = path.win32.join(env.tempBase, 'external-wt');
+    await runCommand('git', ['worktree', 'add', '-b', 'ext-branch', outsideWtPath, 'main'], {
+      cwd: env.repoDir,
+    });
+    // Delete folder on disk so it becomes prunable
+    fs.rmSync(outsideWtPath, { recursive: true, force: true });
+
+    // 2. Inside worktree inside .maw-wt
+    const insideWtPath = path.win32.join(containerDir, 'wt-z5-inside');
+    await runCommand('git', ['worktree', 'add', '-b', 'maw/z5-inside', insideWtPath, 'main'], {
+      cwd: env.repoDir,
+    });
+    // Delete folder on disk so it becomes prunable
+    fs.rmSync(insideWtPath, { recursive: true, force: true });
+
+    // Apply cleanup for inside worktree
+    const applyRes = await handleCleanupApply(env.ctx, {
+      project_path: env.repoDir,
+      items: ['orphan_worktree:wt-z5-inside'],
+      confirm: true,
+      confirm_risky: ['orphan_worktree:wt-z5-inside'],
+    });
+
+    assert.equal(applyRes.ok, true);
+    assert.equal(applyRes.deleted.length, 1);
+    assert.equal(applyRes.deleted[0]!.id, 'orphan_worktree:wt-z5-inside');
+
+    // Verify git worktree list: inside worktree is removed, but outside worktree was NOT pruned
+    const wtListRes = await runCommand('git', ['worktree', 'list', '--porcelain'], { cwd: env.repoDir });
+    assert.ok(!wtListRes.stdout.includes('wt-z5-inside'), 'Inside worktree must be removed');
+    assert.ok(wtListRes.stdout.includes('external-wt'), 'External worktree outside .maw-wt must NOT be pruned');
+
+    // Clean up external worktree registration
+    await runCommand('git', ['worktree', 'prune'], { cwd: env.repoDir });
   } finally {
     cleanupTestEnv(env);
   }

@@ -23,7 +23,7 @@ export interface WorktreeRecord {
   status: 'creating' | 'active' | 'merged' | 'discarded' | 'missing';
   created_at: string;
   updated_at: string;
-  merged?: { strategy: string; commit: string; at: string };
+  merged?: { strategy: string; commit: string; at: string; branch_tip?: string };
   setup?: { ran: boolean; exit_code: number | null; log: string };
   [key: string]: unknown;
 }

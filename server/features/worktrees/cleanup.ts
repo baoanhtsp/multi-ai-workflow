@@ -60,7 +60,7 @@ export interface CleanupPreviewResult {
 
 export interface CleanupApplyResult {
   ok: true;
-  deleted: Array<{ id: string; kind: string; name: string; backup_ref?: string }>;
+  deleted: Array<{ id: string; kind: string; name: string; backup_ref?: string; note?: string }>;
   skipped: Array<{ id: string; reason: string }>;
   freed_bytes: number;
   [key: string]: unknown;
@@ -303,6 +303,65 @@ function formatTrashTimestamp(d = new Date()): string {
   return `${yyyy}${MM}${dd}${HH}${mm}${ss}`;
 }
 
+export function parseTrashRefTimestamp(ref: string): Date | null {
+  const match = ref.match(/-(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})$/);
+  if (!match) return null;
+  const [, yyyy, MM, dd, HH, mm, ss] = match;
+  const d = new Date(
+    Number(yyyy),
+    Number(MM) - 1,
+    Number(dd),
+    Number(HH),
+    Number(mm),
+    Number(ss)
+  );
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+export async function getGitCommonDir(repoPath: string): Promise<string> {
+  const res = await gitRun(['rev-parse', '--git-common-dir'], { cwd: repoPath, allowFailure: true });
+  if (res.code === 0 && res.stdout.trim()) {
+    return path.resolve(repoPath, res.stdout.trim());
+  }
+  return path.join(repoPath, '.git');
+}
+
+export async function removeSpecificWorktreeRegistration(
+  repoPath: string,
+  targetWtPath: string
+): Promise<boolean> {
+  try {
+    const commonDir = await getGitCommonDir(repoPath);
+    const metaWorktreesDir = path.join(commonDir, 'worktrees');
+    if (!fs.existsSync(metaWorktreesDir)) return false;
+
+    const normTarget = normalizePath(targetWtPath);
+    const entries = fs.readdirSync(metaWorktreesDir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const entryDir = path.join(metaWorktreesDir, entry.name);
+        const gitdirFile = path.join(entryDir, 'gitdir');
+        if (fs.existsSync(gitdirFile)) {
+          const content = fs.readFileSync(gitdirFile, 'utf8').trim();
+          const pointedFolder = content.endsWith('.git')
+            ? path.dirname(content)
+            : content;
+          if (normalizePath(pointedFolder) === normTarget) {
+            if (isUnderMawWtContainer(pointedFolder, repoPath)) {
+              fs.rmSync(entryDir, { recursive: true, force: true });
+              return true;
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
 export function extractBranchFromTrashRef(ref: string): string {
   const baseRefName = ref.replace(/^refs\/maw\/trash\//, '');
   const withoutTs = baseRefName.replace(/-\d{14}$/, '');
@@ -420,16 +479,23 @@ export async function getCleanupCandidates(
     const rec = projectStoreRecords.find((w) => w.branch === b.name);
     const branchBase = rec?.base || repoBase;
 
-    // Check if merged
+    // Check if merged (Z1)
+    const tipRes = await gitRun(['rev-parse', b.name], { cwd: repoPath, allowFailure: true });
+    const currentTip = tipRes.code === 0 ? tipRes.stdout.trim() : '';
+
+    const ancRes = await gitRun(
+      ['merge-base', '--is-ancestor', b.name, branchBase],
+      { cwd: repoPath, allowFailure: true }
+    );
+    const isAncestor = ancRes.code === 0;
+    const recordedTip = rec?.merged?.branch_tip;
     let isMerged = false;
-    if (rec && rec.status === 'merged') {
+    if (isAncestor) {
       isMerged = true;
-    } else {
-      const ancRes = await gitRun(
-        ['merge-base', '--is-ancestor', b.name, branchBase],
-        { cwd: repoPath, allowFailure: true }
-      );
-      if (ancRes.code === 0) {
+    } else if (rec && rec.status === 'merged') {
+      if (recordedTip) {
+        isMerged = currentTip === recordedTip;
+      } else {
         isMerged = true;
       }
     }
@@ -503,6 +569,27 @@ export async function getCleanupCandidates(
     if (rec.status === 'merged' && rec.remove_after) {
       const removeAfterTime = new Date(String(rec.remove_after)).getTime();
       if (removeAfterTime <= Date.now() && fs.existsSync(rec.worktree_path)) {
+        // Check if the worktree's branch tip moved past branch_tip (Z1)
+        const wtHeadRes = await gitRun(['rev-parse', 'HEAD'], {
+          cwd: rec.worktree_path,
+          allowFailure: true,
+        });
+        const currentWtHead = wtHeadRes.code === 0 ? wtHeadRes.stdout.trim() : '';
+        const recordedMergedTip = rec.merged?.branch_tip;
+        const branchBase = rec.base || repoBase;
+
+        const ancRes = await gitRun(
+          ['merge-base', '--is-ancestor', currentWtHead, branchBase],
+          { cwd: repoPath, allowFailure: true }
+        );
+        const isAncestor = ancRes.code === 0;
+        const hasMovedPastTip =
+          Boolean(recordedMergedTip) &&
+          currentWtHead !== '' &&
+          currentWtHead !== recordedMergedTip &&
+          !isAncestor;
+        const isStillMerged = !hasMovedPastTip;
+
         const statusRes = await gitRun(['status', '--porcelain'], {
           cwd: rec.worktree_path,
           allowFailure: true,
@@ -510,21 +597,40 @@ export async function getCleanupCandidates(
         const dirty = statusRes.code === 0 && statusRes.stdout.trim() !== '';
         const sizeInfo = computeFolderSize(rec.worktree_path);
 
-        candidates.push({
-          id: `kept_worktree:${rec.id}`,
-          kind: 'kept_worktree',
-          name: rec.id,
-          path: rec.worktree_path,
-          reason: `past remove_after (${rec.remove_after})`,
-          merged: true,
-          risky: dirty,
-          dirty,
-          protected: false,
-          last_commit_at: rec.updated_at || rec.created_at,
-          size_bytes: sizeInfo.size_bytes,
-          size_approx: sizeInfo.size_approx,
-          default_selected: !dirty,
-        });
+        if (isStillMerged) {
+          candidates.push({
+            id: `kept_worktree:${rec.id}`,
+            kind: 'kept_worktree',
+            name: rec.id,
+            path: rec.worktree_path,
+            reason: `past remove_after (${rec.remove_after})`,
+            merged: true,
+            risky: dirty,
+            dirty,
+            protected: false,
+            last_commit_at: rec.updated_at || rec.created_at,
+            size_bytes: sizeInfo.size_bytes,
+            size_approx: sizeInfo.size_approx,
+            default_selected: !dirty,
+          });
+        } else {
+          // Tip moved past branch_tip: not kept_worktree, but stale/risky worktree (Z1)
+          candidates.push({
+            id: `stale_worktree:${rec.id}`,
+            kind: 'stale_worktree',
+            name: rec.id,
+            path: rec.worktree_path,
+            reason: 'commits added after merge (unmerged branch tip)',
+            merged: false,
+            risky: true,
+            dirty,
+            protected: false,
+            last_commit_at: rec.updated_at || rec.created_at,
+            size_bytes: sizeInfo.size_bytes,
+            size_approx: sizeInfo.size_approx,
+            default_selected: false,
+          });
+        }
       }
     } else if (rec.status === 'active') {
       let isRunning = false;
@@ -786,7 +892,7 @@ export async function getCleanupCandidates(
     }
   }
 
-  // 6. Kind: trash_expired
+  // 6. Kind: trash_expired (Z2)
   const trashRefsRes = await gitRun(
     ['for-each-ref', '--format=%(refname)%09%(creatordate:iso-strict)', 'refs/maw/trash/'],
     { cwd: repoPath, allowFailure: true }
@@ -795,26 +901,45 @@ export async function getCleanupCandidates(
     for (const line of trashRefsRes.stdout.split(/\r?\n/)) {
       const parts = line.trim().split('\t');
       const ref = parts[0];
-      const date = parts[1];
+      const commitDate = parts[1];
       if (!ref) continue;
 
-      const createdTime = new Date(date || Date.now()).getTime();
-      const ageDays = (Date.now() - createdTime) / (86400 * 1000);
-      if (ageDays >= cfg.trash_days) {
+      const trashDate = parseTrashRefTimestamp(ref);
+      if (!trashDate) {
+        // refs without a parsable suffix are never auto-purged (listed, risky) (Z2)
         candidates.push({
           id: `trash_expired:${ref}`,
           kind: 'trash_expired',
           name: ref,
           path: null,
-          reason: `trash backup expired (older than ${cfg.trash_days} days)`,
+          reason: 'unparseable trash timestamp; requires manual confirmation to purge',
           merged: false,
-          risky: false,
+          risky: true,
           dirty: false,
           protected: false,
-          last_commit_at: date || null,
+          last_commit_at: commitDate || null,
           size_bytes: null,
-          default_selected: true,
+          default_selected: false,
         });
+      } else {
+        const createdTime = trashDate.getTime();
+        const ageDays = (Date.now() - createdTime) / (86400 * 1000);
+        if (ageDays >= cfg.trash_days) {
+          candidates.push({
+            id: `trash_expired:${ref}`,
+            kind: 'trash_expired',
+            name: ref,
+            path: null,
+            reason: `trash backup expired (older than ${cfg.trash_days} days)`,
+            merged: false,
+            risky: false,
+            dirty: false,
+            protected: false,
+            last_commit_at: trashDate.toISOString(),
+            size_bytes: null,
+            default_selected: true,
+          });
+        }
       }
     }
   }
@@ -894,8 +1019,9 @@ export async function applyCleanupCandidates(
     repoBase = headBranchRes.stdout.trim();
   }
 
-  const deleted: Array<{ id: string; kind: string; name: string; backup_ref?: string }> = [];
+  const deleted: Array<{ id: string; kind: string; name: string; backup_ref?: string; note?: string }> = [];
   const skipped: Array<{ id: string; reason: string }> = [];
+  const appliedPrunableItems: Array<{ id: string; name: string; path: string }> = [];
   let freedBytes = 0;
 
   const dataDir = ctx.paths.featureDataDir('worktrees');
@@ -1010,13 +1136,13 @@ export async function applyCleanupCandidates(
           continue;
         }
 
-        // K2: Prunable worktree whose folder is missing
+        // K2 / Z5: Prunable worktree whose folder is missing
         if (!fs.existsSync(wtPath)) {
           if (!isUnderMawWtContainer(wtPath, repoPath)) {
             skipped.push({ id, reason: 'path outside .maw-wt or invalid' });
             continue;
           }
-          await gitRun(['worktree', 'prune'], { cwd: repoPath, allowFailure: true });
+          appliedPrunableItems.push({ id, name: cand.name, path: wtPath });
           const auditEntry = {
             Timestamp: new Date().toISOString(),
             Tool: 'maw-s1',
@@ -1069,6 +1195,7 @@ export async function applyCleanupCandidates(
 
         // Registered worktree:
         let backupRef: string | undefined;
+        let itemNote: string | undefined;
         let createdWorktreeBackup = false;
 
         if (cand.dirty || !cand.merged) {
@@ -1179,21 +1306,36 @@ export async function applyCleanupCandidates(
               );
               const isMerged = ancRes.code === 0;
 
-              // If unmerged and no snapshot backup was created, back up branch tip (K7)
+              let createdBranchBackup = false;
+              let branchDeleteError: string | undefined;
+
+              // If unmerged and no snapshot backup was created, back up branch tip (K7, Z3)
               if (!isMerged && !createdWorktreeBackup) {
                 const safeName = branchName.replace(/\//g, '-');
                 const branchBackupRef = `refs/maw/trash/${safeName}-${formatTrashTimestamp()}`;
-                const tipRes = await gitRun(['rev-parse', branchName], { cwd: repoPath });
+                const tipRes = await gitRun(['rev-parse', branchName], { cwd: repoPath, allowFailure: true });
                 if (tipRes.code === 0 && tipRes.stdout.trim()) {
-                  await gitRun(['update-ref', branchBackupRef, tipRes.stdout.trim()], {
+                  const updateRes = await gitRun(['update-ref', branchBackupRef, tipRes.stdout.trim()], {
                     cwd: repoPath,
                     allowFailure: true,
                   });
-                  if (!backupRef) backupRef = branchBackupRef;
+                  if (updateRes.code === 0) {
+                    createdBranchBackup = true;
+                    if (!backupRef) backupRef = branchBackupRef;
+                  } else {
+                    branchDeleteError = `failed to create trash backup ref: ${updateRes.stderr.trim() || 'update-ref failed'}`;
+                  }
+                } else {
+                  branchDeleteError = 'failed to resolve unmerged branch tip';
                 }
               }
 
-              await gitRun(['branch', '-D', branchName], { cwd: repoPath, allowFailure: true });
+              // Never branch -D an unmerged branch without a verified backup ref (Z3)
+              if (isMerged || createdWorktreeBackup || createdBranchBackup) {
+                await gitRun(['branch', '-D', branchName], { cwd: repoPath, allowFailure: true });
+              } else if (branchDeleteError) {
+                itemNote = `worktree removed; branch '${branchName}' kept (${branchDeleteError})`;
+              }
             }
           }
         }
@@ -1211,19 +1353,30 @@ export async function applyCleanupCandidates(
           });
         }
 
+        const detailSuffix = [
+          backupRef ? `[backup ${backupRef}]` : '',
+          itemNote ? `[${itemNote}]` : '',
+        ].filter(Boolean).join(' ');
+
         // Audit
         const auditEntry = {
           Timestamp: new Date().toISOString(),
           Tool: 'maw-s1',
           Action: 'cleanup_delete',
           Project: repoPath,
-          Detail: `${cand.kind} ${cand.name}${backupRef ? ` [backup ${backupRef}]` : ''}`,
+          Detail: `${cand.kind} ${cand.name}${detailSuffix ? ` ${detailSuffix}` : ''}`,
         };
         appendAuditEntry(ctx.paths.auditFile, auditEntry);
         appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
 
         if (typeof cand.size_bytes === 'number') freedBytes += cand.size_bytes;
-        deleted.push({ id, kind: cand.kind, name: cand.name, backup_ref: backupRef });
+        deleted.push({
+          id,
+          kind: cand.kind,
+          name: cand.name,
+          backup_ref: backupRef,
+          ...(itemNote ? { note: itemNote } : {}),
+        });
       } else if (
         cand.kind === 'checkpoint_excess' ||
         cand.kind === 'checkpoint_orphan' ||
@@ -1264,8 +1417,51 @@ export async function applyCleanupCandidates(
     }
   }
 
-  // Prune worktrees once at the end
-  await gitRun(['worktree', 'prune'], { cwd: repoPath, allowFailure: true });
+  // Z5: Run prune ONLY when a prunable (a) item was applied, and ONLY if every prunable registration
+  // reported by git worktree list --porcelain is inside the .maw-wt container;
+  // otherwise remove just that registration directly and skip global prune.
+  if (appliedPrunableItems.length > 0) {
+    const listRes = await gitRun(['worktree', 'list', '--porcelain'], {
+      cwd: repoPath,
+      allowFailure: true,
+    });
+    const prunableOutsideMawWt: string[] = [];
+
+    if (listRes.code === 0 && listRes.stdout.trim()) {
+      let currentPath = '';
+      let isCurrentPrunable = false;
+
+      for (const line of listRes.stdout.split(/\r?\n/)) {
+        const t = line.trim();
+        if (t.startsWith('worktree ')) {
+          if (currentPath && (isCurrentPrunable || !fs.existsSync(currentPath))) {
+            if (!isUnderMawWtContainer(currentPath, repoPath)) {
+              prunableOutsideMawWt.push(currentPath);
+            }
+          }
+          currentPath = t.slice('worktree '.length).trim();
+          isCurrentPrunable = false;
+        } else if (t.startsWith('prunable')) {
+          isCurrentPrunable = true;
+        }
+      }
+      if (currentPath && (isCurrentPrunable || !fs.existsSync(currentPath))) {
+        if (!isUnderMawWtContainer(currentPath, repoPath)) {
+          prunableOutsideMawWt.push(currentPath);
+        }
+      }
+    }
+
+    if (prunableOutsideMawWt.length === 0) {
+      // Every prunable registration is inside .maw-wt -> safe to run global prune
+      await gitRun(['worktree', 'prune'], { cwd: repoPath, allowFailure: true });
+    } else {
+      // Registrations outside .maw-wt exist -> prune only the specific applied registrations
+      for (const item of appliedPrunableItems) {
+        await removeSpecificWorktreeRegistration(repoPath, item.path);
+      }
+    }
+  }
 
   return {
     ok: true,
@@ -1319,12 +1515,22 @@ export async function handleCleanupTrash(
     for (const line of trashRefsRes.stdout.split(/\r?\n/)) {
       const parts = line.trim().split('\t');
       const ref = parts[0];
-      const createdIso = parts[1] || new Date().toISOString();
+      const commitIso = parts[1] || new Date().toISOString();
       const subject = parts[2] || '';
       if (!ref) continue;
 
-      const createdTime = new Date(createdIso).getTime();
-      const expiresIso = new Date(createdTime + cfg.trash_days * 86400 * 1000).toISOString();
+      const trashDate = parseTrashRefTimestamp(ref);
+      let createdIso: string;
+      let expiresIso: string;
+
+      if (trashDate) {
+        createdIso = trashDate.toISOString();
+        expiresIso = new Date(trashDate.getTime() + cfg.trash_days * 86400 * 1000).toISOString();
+      } else {
+        createdIso = commitIso;
+        expiresIso = 'never';
+      }
+
       const branchName = extractBranchFromTrashRef(ref);
 
       trash.push({
@@ -1530,7 +1736,7 @@ export async function runAutomaticSweep(ctx: MawFeatureContext): Promise<void> {
       const candidates = await getCleanupCandidates(ctx, repo, config);
       // Automatic safe actions: kept_worktree past remove_after and trash_expired
       const autoIds = candidates
-        .filter((c) => (c.kind === 'kept_worktree' && !c.dirty) || c.kind === 'trash_expired')
+        .filter((c) => (c.kind === 'kept_worktree' && !c.dirty) || (c.kind === 'trash_expired' && !c.risky))
         .map((c) => c.id);
 
       if (autoIds.length > 0) {
