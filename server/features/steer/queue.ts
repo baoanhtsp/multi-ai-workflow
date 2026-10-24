@@ -31,6 +31,7 @@ export interface SteerData {
 
 let queueTimer: NodeJS.Timeout | null = null;
 let isQueueProcessing = false;
+const inFlightLaunches = new Set<string>();
 
 const jobWriteChains = new Map<string, Promise<unknown>>();
 
@@ -224,6 +225,24 @@ export async function runQueueProcessor(ctx: MawFeatureContext): Promise<void> {
       const jobId = path.basename(file, '.json');
       await withJobLock(jobId, async () => {
         const data = loadSteerData(jobId, ctx.paths);
+
+        // Check for orphaned "started" entries after server restart / crash (> 2 minutes old with no child_job_id and not in flight)
+        let hasOrphanedFixes = false;
+        const nowMs = Date.now();
+        for (const entry of data.entries) {
+          if (entry.status === 'started' && !entry.child_job_id && !inFlightLaunches.has(entry.id)) {
+            const entryAgeMs = nowMs - new Date(entry.ts).getTime();
+            if (entryAgeMs > 2 * 60 * 1000) {
+              entry.status = 'failed';
+              entry.error = 'Server stopped during launch; send again.';
+              hasOrphanedFixes = true;
+            }
+          }
+        }
+        if (hasOrphanedFixes) {
+          saveSteerData(data, ctx.paths);
+        }
+
         const queuedEntries = data.entries.filter((e) => e.status === 'queued');
         if (queuedEntries.length === 0) {
           return;
@@ -279,6 +298,7 @@ export async function runQueueProcessor(ctx: MawFeatureContext): Promise<void> {
         // Mark them "started" and save BEFORE the await on the launch
         for (const entry of toLaunch) {
           entry.status = 'started';
+          inFlightLaunches.add(entry.id);
         }
         saveSteerData(freshData, ctx.paths);
 
@@ -387,6 +407,10 @@ export async function runQueueProcessor(ctx: MawFeatureContext): Promise<void> {
           }
         } catch (err: unknown) {
           launchError = err instanceof Error ? err.message : String(err);
+        } finally {
+          for (const entry of toLaunch) {
+            inFlightLaunches.delete(entry.id);
+          }
         }
 
         // Re-load again and patch ONLY toLaunchIds

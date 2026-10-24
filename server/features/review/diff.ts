@@ -41,10 +41,11 @@ export interface ParsedDiffResult {
 const MAX_RAW_DIFF_BYTES = 5 * 1024 * 1024; // 5 MB (SPEC §1.2)
 const MAX_FILE_DIFF_LINES_NORMAL = 3000;
 const MAX_FILE_DIFF_LINES_FULL = 20000;
-const MAX_FILE_DIFF_BYTES = 400 * 1024; // 400 KB
+const MAX_FILE_DIFF_BYTES_NORMAL = 400 * 1024; // 400 KB
+const MAX_FILE_DIFF_BYTES_FULL = 4 * 1024 * 1024; // 4 MB (SPEC §1.2 with full=1 for targetPath)
 const MAX_DIFF_FILES = 300;
 
-export function unquoteGitPath(raw: string): string {
+export function unquoteGitPath(raw: string, stripDiffPrefix: boolean = true): string {
   let s = raw.trim();
   if (s.endsWith('\r')) {
     s = s.slice(0, -1).trim();
@@ -118,8 +119,8 @@ export function unquoteGitPath(raw: string): string {
     s = Buffer.from(bytes).toString('utf8');
   }
 
-  // Strip leading a/ or b/
-  if (s.startsWith('a/') || s.startsWith('b/')) {
+  // Only strip leading a/ or b/ when explicitly requested (for diff --git, --- a/, +++ b/)
+  if (stripDiffPrefix && (s.startsWith('a/') || s.startsWith('b/'))) {
     s = s.slice(2);
   }
   return s.replace(/\\/g, '/');
@@ -213,8 +214,8 @@ export function parseUnifiedDiff(
 
       const gitMatch = /^diff --(?:git|no-index) (?:--\s+)?("?[^"]+"?|\S+)\s+("?[^"]+"?|\S+)/.exec(line);
       if (gitMatch && curChunk) {
-        curChunk.oldPath = unquoteGitPath(gitMatch[1]!);
-        curChunk.newPath = unquoteGitPath(gitMatch[2]!);
+        curChunk.oldPath = unquoteGitPath(gitMatch[1]!, true);
+        curChunk.newPath = unquoteGitPath(gitMatch[2]!, true);
       }
       continue;
     }
@@ -308,14 +309,24 @@ export function parseUnifiedDiff(
       curChunk.change = 'D';
     } else if (line.startsWith('rename from ')) {
       curChunk.headerLines.push(line);
-      curChunk.oldPath = unquoteGitPath(line.slice(12));
+      curChunk.oldPath = unquoteGitPath(line.slice(12), false);
       curChunk.status = 'R';
       curChunk.change = 'R';
     } else if (line.startsWith('rename to ')) {
       curChunk.headerLines.push(line);
-      curChunk.newPath = unquoteGitPath(line.slice(10));
+      curChunk.newPath = unquoteGitPath(line.slice(10), false);
       curChunk.status = 'R';
       curChunk.change = 'R';
+    } else if (line.startsWith('copy from ')) {
+      curChunk.headerLines.push(line);
+      curChunk.oldPath = unquoteGitPath(line.slice(10), false);
+      curChunk.status = 'A';
+      curChunk.change = 'A';
+    } else if (line.startsWith('copy to ')) {
+      curChunk.headerLines.push(line);
+      curChunk.newPath = unquoteGitPath(line.slice(8), false);
+      curChunk.status = 'A';
+      curChunk.change = 'A';
     } else if (
       line.startsWith('similarity index ') ||
       line.startsWith('index ') ||
@@ -325,13 +336,13 @@ export function parseUnifiedDiff(
       curChunk.headerLines.push(line);
     } else if (line.startsWith('--- ')) {
       curChunk.headerLines.push(line);
-      const parsed = unquoteGitPath(line.slice(4));
+      const parsed = unquoteGitPath(line.slice(4), true);
       if (parsed !== '/dev/null') {
         curChunk.oldPath = parsed;
       }
     } else if (line.startsWith('+++ ')) {
       curChunk.headerLines.push(line);
-      const parsed = unquoteGitPath(line.slice(4));
+      const parsed = unquoteGitPath(line.slice(4), true);
       if (parsed !== '/dev/null') {
         curChunk.newPath = parsed;
       }
@@ -361,13 +372,22 @@ export function parseUnifiedDiff(
     const finalOldPath = chunk.oldPath || chunk.newPath;
     const isOmitted = cIdx >= MAX_DIFF_FILES;
 
-    const maxLinesForThisFile =
-      options?.full && options.targetPath && options.targetPath === finalPath
-        ? MAX_FILE_DIFF_LINES_FULL
-        : MAX_FILE_DIFF_LINES_NORMAL;
+    const isFullTarget = Boolean(
+      options?.full &&
+      options.targetPath &&
+      (options.targetPath.toLowerCase() === finalPath.toLowerCase() ||
+        options.targetPath.toLowerCase() === finalOldPath.toLowerCase())
+    );
+
+    const maxLinesForThisFile = isFullTarget
+      ? MAX_FILE_DIFF_LINES_FULL
+      : MAX_FILE_DIFF_LINES_NORMAL;
+    const maxBytesForThisFile = isFullTarget
+      ? MAX_FILE_DIFF_BYTES_FULL
+      : MAX_FILE_DIFF_BYTES_NORMAL;
 
     const isTooLarge =
-      chunk.totalDiffLines > maxLinesForThisFile || chunk.totalBytes > MAX_FILE_DIFF_BYTES;
+      chunk.totalDiffLines > maxLinesForThisFile || chunk.totalBytes > maxBytesForThisFile;
 
     let fileAdditions = 0;
     let fileDeletions = 0;
@@ -451,7 +471,11 @@ export function buildHunkPatch(file: DiffFile, hunkId: string | null): string {
       ? file.hunks
       : file.hunks.filter((h) => h.id === hunkId);
 
+  // Pure renames or mode-only changes have no hunks; git apply -R accepts a header-only patch
   if (hunksToInclude.length === 0) {
+    if (hunkId === null && file.headerLines.length > 0) {
+      return `${file.headerLines.join('\n')}\n`;
+    }
     throw new Error(`Hunk ${hunkId ?? 'all'} not found in file ${file.path}`);
   }
 

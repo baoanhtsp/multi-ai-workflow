@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { runCommand } from '../../lib/proc.ts';
-import { validateSafeRelativePath } from '../review/git.ts';
+import { validateSafeExistingPath, validateSafeRelativePath } from '../review/git.ts';
 import { getProjectGitStatus } from './gitStatus.ts';
 
 export interface FileTreeEntry {
@@ -35,7 +35,6 @@ export async function getFilesTree(options: {
   const relDir = rawDir ? validateSafeRelativePath(projectPath, rawDir) : '';
 
   const realProject = fs.realpathSync.native(projectPath);
-  const targetDir = relDir ? path.win32.join(realProject, relDir.replace(/\//g, '\\')) : realProject;
 
   // Check git repo
   const revParseRes = await runCommand('git', ['-C', realProject, 'rev-parse', '--is-inside-work-tree']);
@@ -53,8 +52,14 @@ export async function getFilesTree(options: {
   const rawEntries: FileTreeEntry[] = [];
   const existingNames = new Set<string>();
 
-  if (fs.existsSync(targetDir)) {
-    const dirents = fs.readdirSync(targetDir, { withFileTypes: true });
+  // Re-run realpath.native containment & .git check immediately before readdirSync to eliminate TOCTOU across await getProjectGitStatus
+  // (residual race window between check and readdir is minimal and unavoidable without OS-level openat/O_NOFOLLOW).
+  const safeTargetDir = relDir
+    ? validateSafeExistingPath(projectPath, relDir).realPath
+    : fs.realpathSync.native(projectPath);
+
+  if (fs.existsSync(safeTargetDir)) {
+    const dirents = fs.readdirSync(safeTargetDir, { withFileTypes: true });
     for (const d of dirents) {
       const name = d.name;
       if (name.toLowerCase() === '.git') {
@@ -74,7 +79,7 @@ export async function getFilesTree(options: {
       if (d.isSymbolicLink()) {
         type = 'link';
         try {
-          const st = fs.lstatSync(path.win32.join(targetDir, name));
+          const st = fs.lstatSync(path.win32.join(safeTargetDir, name));
           mtime = new Date(st.mtimeMs).toISOString();
         } catch {
           // Ignore stat error
@@ -82,7 +87,7 @@ export async function getFilesTree(options: {
       } else if (d.isDirectory()) {
         type = 'dir';
         try {
-          const st = fs.statSync(path.win32.join(targetDir, name));
+          const st = fs.statSync(path.win32.join(safeTargetDir, name));
           mtime = new Date(st.mtimeMs).toISOString();
         } catch {
           // Ignore stat error
@@ -90,7 +95,7 @@ export async function getFilesTree(options: {
       } else {
         type = 'file';
         try {
-          const st = fs.statSync(path.win32.join(targetDir, name));
+          const st = fs.statSync(path.win32.join(safeTargetDir, name));
           size = st.size;
           mtime = new Date(st.mtimeMs).toISOString();
         } catch {

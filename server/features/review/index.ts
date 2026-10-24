@@ -21,6 +21,7 @@ import {
   loadReviewSession,
   readReviewVerdicts,
   saveReviewSession,
+  withReviewLock,
   type ReviewComment,
   type ReviewSession,
 } from './session.ts';
@@ -214,152 +215,156 @@ export const feature: MawFeature = {
         }
 
         const reviewKey = computeReviewKey(projectPath, source, diffRun.ref, diffRun.base);
-        const session = loadReviewSession(
-          reviewKey,
-          projectPath,
-          source,
-          diffRun.ref,
-          diffRun.base,
-          ctx.paths
-        );
 
-        if (!session.states[validPath]) {
-          session.states[validPath] = { file: null, hunks: {}, headers: {} };
-        }
-        session.states[validPath].headers = session.states[validPath].headers || {};
+        return await withReviewLock(reviewKey, async () => {
+          const session = loadReviewSession(
+            reviewKey,
+            projectPath,
+            source,
+            diffRun.ref,
+            diffRun.base,
+            ctx.paths
+          );
 
-        let snapshotRef: string | undefined;
-
-        if (action === 'reject') {
-          if (!confirm) {
-            throw new ApiValidationError('Confirmation required.', 400);
+          if (!session.states[validPath]) {
+            session.states[validPath] = { file: null, hunks: {}, headers: {} };
           }
-          if (diffRun.target_path === null) {
-            throw new ApiValidationError('Target is not writable.', 409);
-          }
+          session.states[validPath].headers = session.states[validPath].headers || {};
 
-          let rejectFile = file;
-          if (ignore_ws) {
-            const nonWsDiffRun = await runReviewDiff(
-              {
-                project_path: projectPath,
-                source,
-                ref,
-                base,
-                path: validPath,
-                full: true,
-                context,
-                ignore_ws: false,
-              },
-              ctx.paths
-            );
+          let snapshotRef: string | undefined;
 
-            const nonWsFile = nonWsDiffRun.diffResult.files.find(
-              (f) => f.path.toLowerCase() === validPath.toLowerCase()
-            );
-            if (!nonWsFile) {
-              throw new ApiValidationError("Turn off 'ignore whitespace' to reject this hunk.", 409);
+          if (action === 'reject') {
+            if (!confirm) {
+              throw new ApiValidationError('Confirmation required.', 400);
+            }
+            if (diffRun.target_path === null) {
+              throw new ApiValidationError('Target is not writable.', 409);
             }
 
-            if (hunkId !== null) {
-              const nonWsHunk = nonWsFile.hunks.find((h) => h.id === hunkId);
-              if (!nonWsHunk) {
+            let rejectFile = file;
+            if (ignore_ws) {
+              const nonWsDiffRun = await runReviewDiff(
+                {
+                  project_path: projectPath,
+                  source,
+                  ref,
+                  base,
+                  path: validPath,
+                  full: true,
+                  context,
+                  ignore_ws: false,
+                },
+                ctx.paths
+              );
+
+              const nonWsFile = nonWsDiffRun.diffResult.files.find(
+                (f) => f.path.toLowerCase() === validPath.toLowerCase()
+              );
+              if (!nonWsFile) {
                 throw new ApiValidationError("Turn off 'ignore whitespace' to reject this hunk.", 409);
               }
+
+              if (hunkId !== null) {
+                const nonWsHunk = nonWsFile.hunks.find((h) => h.id === hunkId);
+                if (!nonWsHunk) {
+                  throw new ApiValidationError("Turn off 'ignore whitespace' to reject this hunk.", 409);
+                }
+              }
+              rejectFile = nonWsFile;
             }
-            rejectFile = nonWsFile;
-          }
 
-          try {
-            snapshotRef = await createSafetySnapshot(diffRun.target_path, ctx.paths);
-            await executeRejectHunk({
-              targetPath: diffRun.target_path,
-              file: rejectFile,
-              hunkId,
-              snapshotRef,
-              source,
-              beforeRef: diffRun.beforeRef,
-              ref: diffRun.ref,
-              paths: ctx.paths,
-            });
-
-            appendReviewAudit(
-              {
-                ts: new Date().toISOString(),
-                action: 'reject',
-                project_path: projectPath,
+            try {
+              snapshotRef = await createSafetySnapshot(diffRun.target_path, ctx.paths);
+              await executeRejectHunk({
+                targetPath: diffRun.target_path,
+                file: rejectFile,
+                hunkId,
+                snapshotRef,
                 source,
+                beforeRef: diffRun.beforeRef,
                 ref: diffRun.ref,
-                path: validPath,
-                hunk_id: hunkId,
-                snapshot_ref: snapshotRef,
-                ok: true,
-              },
-              ctx.paths
-            );
+                base: diffRun.base,
+                paths: ctx.paths,
+              });
 
+              appendReviewAudit(
+                {
+                  ts: new Date().toISOString(),
+                  action: 'reject',
+                  project_path: projectPath,
+                  source,
+                  ref: diffRun.ref,
+                  path: validPath,
+                  hunk_id: hunkId,
+                  snapshot_ref: snapshotRef,
+                  ok: true,
+                },
+                ctx.paths
+              );
+
+              if (hunkId === null) {
+                session.states[validPath].file = 'rejected';
+              } else {
+                session.states[validPath].hunks[hunkId] = 'rejected';
+                if (targetHunk) {
+                  session.states[validPath].headers![hunkId] = targetHunk.header;
+                }
+              }
+            } catch (err: unknown) {
+              appendReviewAudit(
+                {
+                  ts: new Date().toISOString(),
+                  action: 'reject',
+                  project_path: projectPath,
+                  source,
+                  ref: diffRun.ref,
+                  path: validPath,
+                  hunk_id: hunkId,
+                  snapshot_ref: snapshotRef ?? null,
+                  ok: false,
+                  error: err instanceof Error ? err.message : String(err),
+                },
+                ctx.paths
+              );
+              throw err;
+            }
+          } else if (action === 'accept') {
             if (hunkId === null) {
-              session.states[validPath].file = 'rejected';
+              session.states[validPath].file = 'accepted';
             } else {
-              session.states[validPath].hunks[hunkId] = 'rejected';
+              session.states[validPath].hunks[hunkId] = 'accepted';
               if (targetHunk) {
                 session.states[validPath].headers![hunkId] = targetHunk.header;
               }
             }
-          } catch (err: unknown) {
-            appendReviewAudit(
-              {
-                ts: new Date().toISOString(),
-                action: 'reject',
-                project_path: projectPath,
-                source,
-                ref: diffRun.ref,
-                path: validPath,
-                hunk_id: hunkId,
-                snapshot_ref: snapshotRef ?? null,
-                ok: false,
-                error: err instanceof Error ? err.message : String(err),
-              },
-              ctx.paths
-            );
-            throw err;
-          }
-        } else if (action === 'accept') {
-          if (hunkId === null) {
-            session.states[validPath].file = 'accepted';
           } else {
-            session.states[validPath].hunks[hunkId] = 'accepted';
-            if (targetHunk) {
-              session.states[validPath].headers![hunkId] = targetHunk.header;
+            // reset
+            if (hunkId === null) {
+              session.states[validPath].file = null;
+            } else {
+              delete session.states[validPath].hunks[hunkId];
+              if (session.states[validPath].headers) {
+                delete session.states[validPath].headers![hunkId];
+              }
             }
           }
-        } else {
-          // reset
-          if (hunkId === null) {
-            session.states[validPath].file = null;
-          } else {
-            delete session.states[validPath].hunks[hunkId];
-            if (session.states[validPath].headers) {
-              delete session.states[validPath].headers![hunkId];
-            }
-          }
-        }
 
-        saveReviewSession(session, ctx.paths);
+          saveReviewSession(session, ctx.paths);
 
-        const storedState =
-          hunkId === null
-            ? session.states[validPath].file
-            : (session.states[validPath].hunks[hunkId] ?? null);
+          const storedState =
+            hunkId === null
+              ? session.states[validPath].file
+              : (session.states[validPath].hunks[hunkId] ?? null);
 
-        return {
-          ok: true,
-          action,
-          path: validPath,
-          hunk_id: hunkId,
-          state: storedState,
-          ...(snapshotRef ? { snapshot_ref: snapshotRef } : {}),
-        };
+          return {
+            ok: true,
+            action,
+            path: validPath,
+            hunk_id: hunkId,
+            state: storedState,
+            ...(snapshotRef ? { snapshot_ref: snapshotRef } : {}),
+          };
+        });
       },
     },
 
@@ -391,77 +396,80 @@ export const feature: MawFeature = {
 
         const op = String(req.body.op ?? '').trim().toLowerCase();
         const reviewKey = computeReviewKey(projectPath, source, ref, base);
-        const session = loadReviewSession(reviewKey, projectPath, source, ref, base, ctx.paths);
 
-        if (op === 'add') {
-          if (session.comments.length >= 500) {
-            throw new ApiValidationError('Maximum 500 comments per session.', 400);
-          }
-          const relPath = String(req.body.path ?? '').trim();
-          const validPath = validateSafeRelativePath(projectPath, relPath);
-          const line = Number.parseInt(String(req.body.line ?? '1'), 10);
-          if (Number.isNaN(line) || line < 1) {
-            throw new ApiValidationError('Invalid line number (must be >= 1).', 400);
-          }
-          const rawSide = String(req.body.side ?? 'new').trim().toLowerCase();
-          const side: 'new' | 'old' = rawSide === 'old' ? 'old' : 'new';
-          const quote = String(req.body.quote ?? '').slice(0, 500);
-          const body = String(req.body.body ?? '').trim();
-          if (body.length < 1 || body.length > 4000) {
-            throw new ApiValidationError('Comment body must be 1 to 4000 characters.', 400);
+        return await withReviewLock(reviewKey, async () => {
+          const session = loadReviewSession(reviewKey, projectPath, source, ref, base, ctx.paths);
+
+          if (op === 'add') {
+            if (session.comments.length >= 500) {
+              throw new ApiValidationError('Maximum 500 comments per session.', 400);
+            }
+            const relPath = String(req.body.path ?? '').trim();
+            const validPath = validateSafeRelativePath(projectPath, relPath);
+            const line = Number.parseInt(String(req.body.line ?? '1'), 10);
+            if (Number.isNaN(line) || line < 1) {
+              throw new ApiValidationError('Invalid line number (must be >= 1).', 400);
+            }
+            const rawSide = String(req.body.side ?? 'new').trim().toLowerCase();
+            const side: 'new' | 'old' = rawSide === 'old' ? 'old' : 'new';
+            const quote = String(req.body.quote ?? '').slice(0, 500);
+            const body = String(req.body.body ?? '').trim();
+            if (body.length < 1 || body.length > 4000) {
+              throw new ApiValidationError('Comment body must be 1 to 4000 characters.', 400);
+            }
+
+            const now = new Date().toISOString();
+            const comment: ReviewComment = {
+              id: crypto.randomBytes(4).toString('hex'),
+              path: validPath,
+              line,
+              side,
+              quote,
+              body,
+              created_at: now,
+              updated_at: now,
+              resolved: false,
+              sent_at: null,
+            };
+            session.comments.push(comment);
+          } else if (op === 'edit') {
+            const id = String(req.body.id ?? '').trim();
+            const comment = session.comments.find((c) => c.id === id);
+            if (!comment) {
+              throw new ApiValidationError(`Comment '${id}' not found.`, 404);
+            }
+            const body = String(req.body.body ?? '').trim();
+            if (body.length < 1 || body.length > 4000) {
+              throw new ApiValidationError('Comment body must be 1 to 4000 characters.', 400);
+            }
+            comment.body = body;
+            comment.updated_at = new Date().toISOString();
+          } else if (op === 'delete') {
+            const id = String(req.body.id ?? '').trim();
+            session.comments = session.comments.filter((c) => c.id !== id);
+          } else if (op === 'resolve') {
+            const id = String(req.body.id ?? '').trim();
+            const comment = session.comments.find((c) => c.id === id);
+            if (!comment) {
+              throw new ApiValidationError(`Comment '${id}' not found.`, 404);
+            }
+            // Honour resolved boolean so the UI can reopen comments
+            const resolved = typeof req.body.resolved === 'boolean' ? req.body.resolved : true;
+            comment.resolved = resolved;
+            comment.updated_at = new Date().toISOString();
+          } else {
+            throw new ApiValidationError(
+              "Invalid op. Expected 'add', 'edit', 'delete', or 'resolve'.",
+              400
+            );
           }
 
-          const now = new Date().toISOString();
-          const comment: ReviewComment = {
-            id: crypto.randomBytes(4).toString('hex'),
-            path: validPath,
-            line,
-            side,
-            quote,
-            body,
-            created_at: now,
-            updated_at: now,
-            resolved: false,
-            sent_at: null,
+          saveReviewSession(session, ctx.paths);
+          return {
+            ok: true,
+            comments: session.comments,
           };
-          session.comments.push(comment);
-        } else if (op === 'edit') {
-          const id = String(req.body.id ?? '').trim();
-          const comment = session.comments.find((c) => c.id === id);
-          if (!comment) {
-            throw new ApiValidationError(`Comment '${id}' not found.`, 404);
-          }
-          const body = String(req.body.body ?? '').trim();
-          if (body.length < 1 || body.length > 4000) {
-            throw new ApiValidationError('Comment body must be 1 to 4000 characters.', 400);
-          }
-          comment.body = body;
-          comment.updated_at = new Date().toISOString();
-        } else if (op === 'delete') {
-          const id = String(req.body.id ?? '').trim();
-          session.comments = session.comments.filter((c) => c.id !== id);
-        } else if (op === 'resolve') {
-          const id = String(req.body.id ?? '').trim();
-          const comment = session.comments.find((c) => c.id === id);
-          if (!comment) {
-            throw new ApiValidationError(`Comment '${id}' not found.`, 404);
-          }
-          // Honour resolved boolean so the UI can reopen comments
-          const resolved = typeof req.body.resolved === 'boolean' ? req.body.resolved : true;
-          comment.resolved = resolved;
-          comment.updated_at = new Date().toISOString();
-        } else {
-          throw new ApiValidationError(
-            "Invalid op. Expected 'add', 'edit', 'delete', or 'resolve'.",
-            400
-          );
-        }
-
-        saveReviewSession(session, ctx.paths);
-        return {
-          ok: true,
-          comments: session.comments,
-        };
+        });
       },
     },
 
@@ -515,7 +523,7 @@ export const feature: MawFeature = {
         const note = typeof req.body.note === 'string' ? req.body.note : undefined;
         const projectName = path.basename(projectPath);
 
-        const prompt = buildFixPrompt({
+        const fixPromptResult = buildFixPrompt({
           projectName,
           source,
           ref,
@@ -524,10 +532,16 @@ export const feature: MawFeature = {
           note,
         });
 
+        const prompt = fixPromptResult.prompt;
+        const included = fixPromptResult.included;
+        const remaining = fixPromptResult.remaining;
+
         if (dryRun) {
           return {
             ok: true,
             prompt,
+            included: included.length,
+            remaining: remaining.length,
           };
         }
 
@@ -593,19 +607,27 @@ export const feature: MawFeature = {
 
         const childJobId = String(jobResult.job_id ?? '');
         const sentNow = new Date().toISOString();
-        for (const c of unsentComments) {
-          c.sent_at = sentNow;
-        }
-        if (childJobId) {
-          session.fix_jobs.push(childJobId);
-        }
 
-        saveReviewSession(session, ctx.paths);
+        await withReviewLock(reviewKey, async () => {
+          const freshSession = loadReviewSession(reviewKey, projectPath, source, ref, base, ctx.paths);
+          const includedIds = new Set(included.map((c) => c.id));
+          for (const c of freshSession.comments) {
+            if (includedIds.has(c.id)) {
+              c.sent_at = sentNow;
+            }
+          }
+          if (childJobId) {
+            freshSession.fix_jobs.push(childJobId);
+          }
+          saveReviewSession(freshSession, ctx.paths);
+        });
 
         return {
           ok: true,
           prompt,
           job_id: childJobId,
+          included: included.length,
+          remaining: remaining.length,
         };
       },
     },
@@ -652,40 +674,43 @@ export const feature: MawFeature = {
         const note = String(req.body.note ?? '').slice(0, 2000);
 
         const reviewKey = computeReviewKey(projectPath, source, ref, base);
-        const session = loadReviewSession(reviewKey, projectPath, source, ref, base, ctx.paths);
 
-        const now = new Date().toISOString();
-        session.verdict = {
-          verdict: verdict as 'APPROVED' | 'CHANGES_REQUESTED',
-          score,
-          note,
-          ts: now,
-        };
+        return await withReviewLock(reviewKey, async () => {
+          const session = loadReviewSession(reviewKey, projectPath, source, ref, base, ctx.paths);
 
-        if (source === 'job' && ref) {
-          const jobMeta = readJobMetaDirect(ref, ctx.paths);
-          appendReviewVerdict(
-            {
-              ts: now,
-              job_id: ref,
-              agent: typeof jobMeta?.agent === 'string' ? jobMeta.agent : undefined,
-              role: typeof jobMeta?.role === 'string' ? jobMeta.role : undefined,
-              model: typeof jobMeta?.model === 'string' ? jobMeta.model : undefined,
-              project_path: projectPath,
-              verdict: verdict as 'APPROVED' | 'CHANGES_REQUESTED',
-              score,
-              note,
-              reviewer: 'human',
-            },
-            ctx.paths
-          );
-        }
+          const now = new Date().toISOString();
+          session.verdict = {
+            verdict: verdict as 'APPROVED' | 'CHANGES_REQUESTED',
+            score,
+            note,
+            ts: now,
+          };
 
-        saveReviewSession(session, ctx.paths);
-        return {
-          ok: true,
-          verdict: session.verdict,
-        };
+          if (source === 'job' && ref) {
+            const jobMeta = readJobMetaDirect(ref, ctx.paths);
+            appendReviewVerdict(
+              {
+                ts: now,
+                job_id: ref,
+                agent: typeof jobMeta?.agent === 'string' ? jobMeta.agent : undefined,
+                role: typeof jobMeta?.role === 'string' ? jobMeta.role : undefined,
+                model: typeof jobMeta?.model === 'string' ? jobMeta.model : undefined,
+                project_path: projectPath,
+                verdict: verdict as 'APPROVED' | 'CHANGES_REQUESTED',
+                score,
+                note,
+                reviewer: 'human',
+              },
+              ctx.paths
+            );
+          }
+
+          saveReviewSession(session, ctx.paths);
+          return {
+            ok: true,
+            verdict: session.verdict,
+          };
+        });
       },
     },
 

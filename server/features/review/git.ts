@@ -116,6 +116,48 @@ export function validateSafeRelativePath(projectPath: string, relPath: string): 
   return trimmed.replace(/\\/g, '/');
 }
 
+export function validateSafeExistingPath(
+  projectPath: string,
+  relPath: string
+): { relPath: string; realPath: string } {
+  const validRel = validateSafeRelativePath(projectPath, relPath);
+  let realProject: string;
+  try {
+    realProject = fs.realpathSync.native(projectPath);
+  } catch {
+    throw new ApiValidationError('Invalid project_path.', 400);
+  }
+
+  const normBase = realProject.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  const targetCandidate = path.win32.resolve(realProject, validRel.replace(/\//g, '\\'));
+
+  let realTarget: string;
+  try {
+    realTarget = fs.realpathSync.native(targetCandidate);
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      throw new ApiValidationError(`File not found: ${validRel}`, 404);
+    }
+    throw new ApiValidationError('Invalid path.', 400);
+  }
+
+  const normTarget = realTarget.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  if (!normTarget.startsWith(normBase + '\\') && normTarget !== normBase) {
+    throw new ApiValidationError('Invalid path.', 400);
+  }
+
+  const relFromProject = path.win32.relative(realProject, realTarget);
+  const realSegments = relFromProject.split('\\');
+  if (realSegments.some((s) => s.toLowerCase() === '.git')) {
+    throw new ApiValidationError('Invalid path.', 400);
+  }
+
+  return {
+    relPath: validRel,
+    realPath: realTarget,
+  };
+}
+
 export function isValidGitRef(ref: string): boolean {
   return (
     /^[A-Za-z0-9._/@{}^~-]{1,200}$/.test(ref) &&
@@ -380,14 +422,15 @@ async function appendUntrackedFilesDiff(options: {
   } = options;
 
   let totalRawBytes = options.currentRawDiffBytes;
-  let diffedCount = 0;
 
   for (const uFile of untrackedFiles) {
     if (combinedParsed.truncated) {
       break;
     }
 
-    if (diffedCount >= 300) {
+    // Global 300-file guard across tracked + untracked:
+    // Tracked files are already in combinedParsed.files; once total reaches 300, omit remainder
+    if (combinedParsed.files.length >= 300) {
       combinedParsed.files.push({
         path: uFile,
         old_path: uFile,
@@ -402,6 +445,7 @@ async function appendUntrackedFilesDiff(options: {
         hunks: [],
         headerLines: [],
       });
+      combinedParsed.stats.files = combinedParsed.files.length;
       continue;
     }
 
@@ -413,7 +457,14 @@ async function appendUntrackedFilesDiff(options: {
       continue;
     }
 
-    if (fileSize > 400 * 1024) {
+    const isFullTarget = Boolean(
+      full &&
+      filterPath &&
+      filterPath.toLowerCase() === uFile.toLowerCase()
+    );
+    const maxBytes = isFullTarget ? 4 * 1024 * 1024 : 400 * 1024;
+
+    if (fileSize > maxBytes) {
       combinedParsed.files.push({
         path: uFile,
         old_path: uFile,
@@ -428,6 +479,7 @@ async function appendUntrackedFilesDiff(options: {
         hunks: [],
         headerLines: [],
       });
+      combinedParsed.stats.files = combinedParsed.files.length;
       continue;
     }
 
@@ -460,12 +512,42 @@ async function appendUntrackedFilesDiff(options: {
       });
 
       combinedParsed.files.push(...uParsed.files);
-      combinedParsed.stats.files += uParsed.stats.files;
+      combinedParsed.stats.files = combinedParsed.files.length;
       combinedParsed.stats.additions += uParsed.stats.additions;
       combinedParsed.stats.deletions += uParsed.stats.deletions;
-      diffedCount++;
     }
   }
+}
+
+async function findRenameRelatedPaths(
+  workingDir: string,
+  targetSpec: string[],
+  filterPath: string
+): Promise<string[]> {
+  if (!filterPath) return [];
+  const res = await runCommand('git', ['-C', workingDir, '-c', 'core.quotepath=off', ...targetSpec]);
+  if (res.code !== 0 || !res.stdout) {
+    return [filterPath];
+  }
+  const parts = res.stdout.split('\0').filter(Boolean);
+  const normFilter = filterPath.toLowerCase();
+  for (let i = 0; i < parts.length; i++) {
+    const item = parts[i]!;
+    if (item.startsWith('R') || item.startsWith('C')) {
+      const srcPath = parts[i + 1];
+      const dstPath = parts[i + 2];
+      if (srcPath && dstPath) {
+        if (dstPath.toLowerCase() === normFilter) {
+          return [srcPath, filterPath];
+        }
+        if (srcPath.toLowerCase() === normFilter) {
+          return [filterPath, dstPath];
+        }
+      }
+      i += 2;
+    }
+  }
+  return [filterPath];
 }
 
 export async function runReviewDiff(
@@ -524,6 +606,7 @@ export async function runReviewDiff(
       '-c',
       'core.quotepath=off',
       'diff',
+      '-M',
       '--no-color',
       '--no-ext-diff',
       `-U${ctx}`,
@@ -531,10 +614,19 @@ export async function runReviewDiff(
     if (ignore_ws) diffArgs.push('-w');
     diffArgs.push(headTarget);
     if (filterPath) {
-      diffArgs.push('--', filterPath);
+      const pathsToDiff = await findRenameRelatedPaths(
+        effectiveProjectPath,
+        ['diff', '-M', '--name-status', '-z', headTarget],
+        filterPath
+      );
+      diffArgs.push('--', ...pathsToDiff);
     }
 
     const diffRes = await runCommand('git', diffArgs);
+    if (diffRes.code !== 0) {
+      const firstErr = (diffRes.stderr || 'git diff exited non-zero').trim().split(/\r?\n/)[0]!.trim();
+      throw new ApiValidationError(`git diff failed: ${firstErr}`, 400);
+    }
     combinedParsed = parseUnifiedDiff(diffRes.stdout, {
       full: Boolean(full),
       targetPath: filterPath,
@@ -611,6 +703,7 @@ export async function runReviewDiff(
       '-c',
       'core.quotepath=off',
       'diff',
+      '-M',
       '--no-color',
       '--no-ext-diff',
       `-U${ctx}`,
@@ -618,9 +711,18 @@ export async function runReviewDiff(
     if (ignore_ws) diffArgs.push('-w');
     diffArgs.push(`${base}...${ref}`);
     if (filterPath) {
-      diffArgs.push('--', filterPath);
+      const pathsToDiff = await findRenameRelatedPaths(
+        effectiveProjectPath,
+        ['diff', '-M', '--name-status', '-z', `${base}...${ref}`],
+        filterPath
+      );
+      diffArgs.push('--', ...pathsToDiff);
     }
     const diffRes = await runCommand('git', diffArgs);
+    if (diffRes.code !== 0) {
+      const firstErr = (diffRes.stderr || 'git diff exited non-zero').trim().split(/\r?\n/)[0]!.trim();
+      throw new ApiValidationError(`git diff failed: ${firstErr}`, 400);
+    }
     combinedParsed = parseUnifiedDiff(diffRes.stdout, {
       full: Boolean(full),
       targetPath: filterPath,
@@ -679,6 +781,7 @@ export async function runReviewDiff(
         '-c',
         'core.quotepath=off',
         'diff',
+        '-M',
         '--no-color',
         '--no-ext-diff',
         `-U${ctx}`,
@@ -686,9 +789,18 @@ export async function runReviewDiff(
       if (ignore_ws) diffArgs.push('-w');
       diffArgs.push(beforeRef, `refs/maw/checkpoints/${ref}/finish`);
       if (filterPath) {
-        diffArgs.push('--', filterPath);
+        const pathsToDiff = await findRenameRelatedPaths(
+          effectiveProjectPath,
+          ['diff', '-M', '--name-status', '-z', beforeRef, `refs/maw/checkpoints/${ref}/finish`],
+          filterPath
+        );
+        diffArgs.push('--', ...pathsToDiff);
       }
       const diffRes = await runCommand('git', diffArgs);
+      if (diffRes.code !== 0) {
+        const firstErr = (diffRes.stderr || 'git diff exited non-zero').trim().split(/\r?\n/)[0]!.trim();
+        throw new ApiValidationError(`git diff failed: ${firstErr}`, 400);
+      }
       combinedParsed = parseUnifiedDiff(diffRes.stdout, {
         full: Boolean(full),
         targetPath: filterPath,
@@ -703,6 +815,7 @@ export async function runReviewDiff(
         '-c',
         'core.quotepath=off',
         'diff',
+        '-M',
         '--no-color',
         '--no-ext-diff',
         `-U${ctx}`,
@@ -710,9 +823,18 @@ export async function runReviewDiff(
       if (ignore_ws) diffArgs.push('-w');
       diffArgs.push(beforeRef);
       if (filterPath) {
-        diffArgs.push('--', filterPath);
+        const pathsToDiff = await findRenameRelatedPaths(
+          workingDir,
+          ['diff', '-M', '--name-status', '-z', beforeRef],
+          filterPath
+        );
+        diffArgs.push('--', ...pathsToDiff);
       }
       const diffRes = await runCommand('git', diffArgs);
+      if (diffRes.code !== 0) {
+        const firstErr = (diffRes.stderr || 'git diff exited non-zero').trim().split(/\r?\n/)[0]!.trim();
+        throw new ApiValidationError(`git diff failed: ${firstErr}`, 400);
+      }
       combinedParsed = parseUnifiedDiff(diffRes.stdout, {
         full: Boolean(full),
         targetPath: filterPath,
@@ -773,6 +895,7 @@ export async function runReviewDiff(
       '-c',
       'core.quotepath=off',
       'diff-tree',
+      '-M',
       '-p',
       '--root',
       '-m',
@@ -783,9 +906,18 @@ export async function runReviewDiff(
     if (ignore_ws) diffArgs.push('-w');
     diffArgs.push(ref);
     if (filterPath) {
-      diffArgs.push('--', filterPath);
+      const pathsToDiff = await findRenameRelatedPaths(
+        effectiveProjectPath,
+        ['diff-tree', '-M', '--name-status', '-r', '-z', ref],
+        filterPath
+      );
+      diffArgs.push('--', ...pathsToDiff);
     }
     const diffRes = await runCommand('git', diffArgs);
+    if (diffRes.code !== 0) {
+      const firstErr = (diffRes.stderr || 'git diff exited non-zero').trim().split(/\r?\n/)[0]!.trim();
+      throw new ApiValidationError(`git diff failed: ${firstErr}`, 400);
+    }
     combinedParsed = parseUnifiedDiff(diffRes.stdout, {
       full: Boolean(full),
       targetPath: filterPath,
@@ -894,9 +1026,10 @@ export async function executeRejectHunk(options: {
   source: string;
   beforeRef?: string;
   ref?: string;
+  base?: string;
   paths: ServerPaths;
 }): Promise<void> {
-  const { targetPath, file, hunkId, source, beforeRef, ref, paths } = options;
+  const { targetPath, file, hunkId, source, beforeRef, ref, base, paths } = options;
 
   if (file.binary) {
     if (hunkId !== null) {
@@ -904,6 +1037,52 @@ export async function executeRejectHunk(options: {
     }
 
     const fullFilePath = path.win32.join(targetPath, file.path.replace(/\//g, '\\'));
+
+    // Check first that the worktree file still equals the after side before reverting
+    if (fs.existsSync(fullFilePath)) {
+      const hashRes = await runCommand('git', ['-C', targetPath, 'hash-object', file.path]);
+      if (hashRes.code !== 0) {
+        throw new ApiValidationError('File changed since the diff; reload.', 409);
+      }
+      const currentBlob = hashRes.stdout.trim().toLowerCase();
+
+      if (source === 'branch') {
+        const revRes = await runCommand('git', ['-C', targetPath, 'rev-parse', `${ref || 'HEAD'}:${file.path}`]);
+        if (revRes.code !== 0) {
+          throw new ApiValidationError('File changed since the diff; reload.', 409);
+        }
+        const expectedBlob = revRes.stdout.trim().toLowerCase();
+        if (currentBlob !== expectedBlob) {
+          throw new ApiValidationError('File changed since the diff; reload.', 409);
+        }
+      } else {
+        let expectedAfterSha: string | null = null;
+        for (const hLine of file.headerLines) {
+          const m = /^index\s+[0-9a-fA-F]+\.\.([0-9a-fA-F]+)/.exec(hLine);
+          if (m && m[1]) {
+            expectedAfterSha = m[1].toLowerCase();
+            break;
+          }
+        }
+        if (expectedAfterSha && !expectedAfterSha.startsWith('0000000')) {
+          if (!currentBlob.startsWith(expectedAfterSha)) {
+            throw new ApiValidationError('File changed since the diff; reload.', 409);
+          }
+        } else {
+          const headRes = await runCommand('git', ['-C', targetPath, 'rev-parse', `HEAD:${file.path}`]);
+          if (headRes.code === 0) {
+            const headBlob = headRes.stdout.trim().toLowerCase();
+            if (currentBlob !== headBlob) {
+              throw new ApiValidationError('File changed since the diff; reload.', 409);
+            }
+          }
+        }
+      }
+    } else {
+      if (file.change !== 'D') {
+        throw new ApiValidationError('File changed since the diff; reload.', 409);
+      }
+    }
 
     let beforeSource = 'HEAD';
     if (source === 'worktree') {
@@ -913,7 +1092,15 @@ export async function executeRejectHunk(options: {
     } else if (source === 'commit') {
       beforeSource = ref ? `${ref}^` : 'HEAD';
     } else if (source === 'branch') {
-      beforeSource = beforeRef ?? 'HEAD';
+      const baseRef = base || 'HEAD';
+      const mbRes = await runCommand('git', [
+        '-C',
+        targetPath,
+        'merge-base',
+        baseRef,
+        ref || 'HEAD',
+      ]);
+      beforeSource = mbRes.code === 0 && mbRes.stdout.trim() ? mbRes.stdout.trim() : baseRef;
     }
 
     // Check if the binary file existed on the before side

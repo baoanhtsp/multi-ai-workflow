@@ -11,6 +11,7 @@ import {
   loadSteerData,
   runQueueProcessor,
   saveSteerData,
+  type SteerData,
 } from './queue.ts';
 import {
   buildResumeCommand,
@@ -866,6 +867,58 @@ test('steer: processor marks queued entries failed when parent job meta missing 
   assert.equal(dataAfter.entries[0]!.error, 'Parent job meta not found.');
 
   // Clean up
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('steer: processor marks orphaned started entries (>2min without child_job_id) failed', async () => {
+  const tmpRoot = path.win32.join(
+    os.tmpdir(),
+    `maw_steer_restart_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+  const jobsDir = path.win32.join(tmpRoot, 'jobs');
+  const mawHome = path.win32.join(tmpRoot, 'maw_home');
+  fs.mkdirSync(jobsDir, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot: tmpRoot,
+    mawHome,
+    repoRoot: tmpRoot,
+  });
+
+  const parentJobId = 'job_20261024_150000_aaaaaa';
+  const threeMinutesAgo = new Date(Date.now() - 3 * 60 * 1000).toISOString();
+
+  const steerData: SteerData = {
+    job_id: parentJobId,
+    root_job_id: parentJobId,
+    entries: [
+      {
+        id: 'steer_orphaned_1',
+        ts: threeMinutesAgo,
+        strategy: 'queue',
+        message: 'Interrupted during launch',
+        status: 'started',
+      },
+    ],
+  };
+  saveSteerData(steerData, paths);
+
+  const fakeCtx = {
+    paths,
+    registry: { agents: [] } as any,
+    readJobs: async () => [],
+    startJob: async () => ({ ok: true }),
+  };
+
+  await runQueueProcessor(fakeCtx as any);
+
+  const dataAfter = loadSteerData(parentJobId, paths);
+  assert.equal(dataAfter.entries[0]!.status, 'failed');
+  assert.equal(dataAfter.entries[0]!.error, 'Server stopped during launch; send again.');
+
   try {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   } catch {}

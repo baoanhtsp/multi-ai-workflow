@@ -197,6 +197,31 @@ export function readReviewVerdicts(
   return entries.slice(0, cappedLimit);
 }
 
+const reviewLocks = new Map<string, Promise<void>>();
+
+export function withReviewLock<T>(reviewKey: string, fn: () => Promise<T>): Promise<T> {
+  const prev = reviewLocks.get(reviewKey) ?? Promise.resolve();
+  let resultPromise: Promise<T>;
+  const next = prev.then(() => {
+    resultPromise = fn();
+    return resultPromise;
+  });
+  reviewLocks.set(
+    reviewKey,
+    next.then(
+      () => {},
+      () => {}
+    )
+  );
+  return next;
+}
+
+export interface BuildFixPromptResult {
+  prompt: string;
+  included: ReviewComment[];
+  remaining: ReviewComment[];
+}
+
 export function buildFixPrompt(options: {
   projectName: string;
   source: string;
@@ -204,59 +229,86 @@ export function buildFixPrompt(options: {
   comments: ReviewComment[];
   rejectedHunks: Array<{ path: string; header: string }>;
   note?: string;
-}): string {
+}): BuildFixPromptResult {
   const { projectName, source, ref, comments, rejectedHunks, note } = options;
-
-  let includeQuotes = true;
   const maxLen = 20000;
 
-  const render = (withQuotes: boolean): string => {
-    const parts: string[] = [];
-    const sourceLabel = [source, ref].filter(Boolean).join(' ');
-    parts.push(
-      `Code review feedback for ${projectName} (${sourceLabel}). Fix every item below. Do not change anything else. When done, list what you changed per item.\n`
-    );
+  const sourceLabel = [source, ref].filter(Boolean).join(' ');
+  const header = `Code review feedback for ${projectName} (${sourceLabel}). Fix every item below. Do not change anything else. When done, list what you changed per item.\n\n`;
 
-    if (comments.length > 0) {
-      for (let i = 0; i < comments.length; i++) {
-        const c = comments[i]!;
-        const sideLabel = c.side === 'old' ? 'old side' : 'new side';
-        let block = `${i + 1}. ${c.path}:${c.line} (${sideLabel})\n`;
-        if (withQuotes && c.quote && c.quote.trim()) {
-          const quoteLines = c.quote
-            .trim()
-            .split('\n')
-            .map((l) => `   > ${l}`)
-            .join('\n');
-          block += `${quoteLines}\n`;
-        }
-        block += `   Comment: ${c.body}\n`;
-        parts.push(block);
-      }
+  let footer = '';
+  if (rejectedHunks.length > 0) {
+    footer += `Rejected by the reviewer (already reverted — do not reintroduce):\n`;
+    for (const h of rejectedHunks) {
+      footer += `- ${h.path} ${h.header}\n`;
     }
+    footer += '\n';
+  }
+  if (note && note.trim()) {
+    footer += `Reviewer note: ${note.trim()}\n`;
+  }
 
-    if (rejectedHunks.length > 0) {
-      parts.push(`Rejected by the reviewer (already reverted — do not reintroduce):`);
-      for (const h of rejectedHunks) {
-        parts.push(`- ${h.path} ${h.header}`);
-      }
-      parts.push('');
+  const baseLen = header.length + footer.length;
+  const availableBudget = Math.max(0, maxLen - baseLen);
+
+  const included: ReviewComment[] = [];
+  const remaining: ReviewComment[] = [];
+  const commentBlocks: string[] = [];
+  let currentCommentsLen = 0;
+
+  const renderCommentBlock = (i: number, c: ReviewComment, withQuote: boolean): string => {
+    const sideLabel = c.side === 'old' ? 'old side' : 'new side';
+    let block = `${i + 1}. ${c.path}:${c.line} (${sideLabel})\n`;
+    if (withQuote && c.quote && c.quote.trim()) {
+      const quoteLines = c.quote
+        .trim()
+        .split('\n')
+        .map((l) => `   > ${l}`)
+        .join('\n');
+      block += `${quoteLines}\n`;
     }
-
-    if (note && note.trim()) {
-      parts.push(`Reviewer note: ${note.trim()}\n`);
-    }
-
-    return parts.join('\n');
+    block += `   Comment: ${c.body}\n`;
+    return block;
   };
 
-  let prompt = render(includeQuotes);
-  if (prompt.length > maxLen) {
-    includeQuotes = false;
-    prompt = render(false);
+  for (let i = 0; i < comments.length; i++) {
+    const c = comments[i]!;
+    let block = renderCommentBlock(included.length, c, true);
+    let extraLen = (commentBlocks.length > 0 ? 1 : 0) + block.length;
+
+    if (currentCommentsLen + extraLen > availableBudget) {
+      // Try without quote to see if it fits within budget
+      block = renderCommentBlock(included.length, c, false);
+      extraLen = (commentBlocks.length > 0 ? 1 : 0) + block.length;
+    }
+
+    if (currentCommentsLen + extraLen <= availableBudget) {
+      commentBlocks.push(block);
+      currentCommentsLen += extraLen;
+      included.push(c);
+    } else {
+      // Budget exhausted without cutting mid-item
+      remaining.push(...comments.slice(i));
+      break;
+    }
   }
+
+  const parts: string[] = [header.trimEnd()];
+  if (commentBlocks.length > 0) {
+    parts.push(commentBlocks.join('\n'));
+  }
+  if (footer.trim()) {
+    parts.push(footer.trim());
+  }
+
+  let prompt = parts.join('\n\n') + '\n';
   if (prompt.length > maxLen) {
     prompt = prompt.slice(0, maxLen);
   }
-  return prompt;
+
+  return {
+    prompt,
+    included,
+    remaining,
+  };
 }

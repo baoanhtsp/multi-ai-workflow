@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ApiValidationError } from '../../lib/validate.ts';
-import { validateSafeRelativePath } from '../review/git.ts';
+import { validateSafeExistingPath, validateSafeRelativePath } from '../review/git.ts';
 import { getProjectGitStatus } from './gitStatus.ts';
 
 const EXTENSION_LANGUAGE_MAP: Record<string, string> = {
@@ -36,11 +36,13 @@ export async function readProjectFile(
 ): Promise<Record<string, unknown>> {
   const validPath = validateSafeRelativePath(projectPath, relPathInput);
   const realProject = fs.realpathSync.native(projectPath);
-  const fullPath = path.win32.join(realProject, validPath.replace(/\//g, '\\'));
+
+  // Validate initial existing path
+  const { realPath: initialPath } = validateSafeExistingPath(projectPath, validPath);
 
   let stat: fs.Stats;
   try {
-    stat = fs.statSync(fullPath);
+    stat = fs.statSync(initialPath);
   } catch {
     throw new ApiValidationError(`File not found: ${validPath}`, 404);
   }
@@ -76,8 +78,12 @@ export async function readProjectFile(
     };
   }
 
+  // Re-run realpath.native containment & .git check immediately before opening to eliminate TOCTOU across await getProjectGitStatus
+  // (residual race window between check and open is minimal and unavoidable without OS-level openat/O_NOFOLLOW).
+  const { realPath: safeFinalPath } = validateSafeExistingPath(projectPath, validPath);
+
   // Check binary in first 8000 bytes
-  const fd = fs.openSync(fullPath, 'r');
+  const fd = fs.openSync(safeFinalPath, 'r');
   let isBinary = false;
   let probeBuf: Buffer;
   try {
@@ -110,7 +116,7 @@ export async function readProjectFile(
   }
 
   // Read full content as UTF-8
-  let rawBuf = fs.readFileSync(fullPath);
+  let rawBuf = fs.readFileSync(safeFinalPath);
   // Strip leading UTF-8 BOM if present
   if (rawBuf.length >= 3 && rawBuf[0] === 0xef && rawBuf[1] === 0xbb && rawBuf[2] === 0xbf) {
     rawBuf = rawBuf.subarray(3);
