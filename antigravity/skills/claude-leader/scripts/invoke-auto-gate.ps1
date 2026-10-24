@@ -27,6 +27,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 . (Join-Path $PSScriptRoot "lib\maw-common.ps1")
 . (Join-Path $PSScriptRoot "lib\maw-registry.ps1")
+. (Join-Path $PSScriptRoot "lib\maw-hooks.ps1")
 
 if ($PromptFile) {
     if (-not (Test-Path -LiteralPath $PromptFile)) {
@@ -84,6 +85,28 @@ if (-not $SkipInitialImplement) {
     Get-DirtySnapshot -WorkDir $WorkDir -OutFile $baselineFile | Out-Null
 }
 
+function Invoke-AutoGateHookOrExit {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$EventName,
+
+        [int]$RoundNum = 1
+    )
+
+    $hookRes = Invoke-MawHooks -Event $EventName -Context @{
+        workdir     = $WorkDir
+        project     = $WorkDir
+        implementer = $effImplementer
+        reviewers   = $effReviewers
+        round       = $RoundNum
+        max_rounds  = $MaxRounds
+    }
+    if ($hookRes -and $hookRes.Block) {
+        Write-Output "[Auto-Gate HOOK BLOCKED: $EventName] $($hookRes.Reason)"
+        exit 4
+    }
+}
+
 try {
     # Step 1: Initial Implementation via invoke-agent.ps1 -Role backend (unless skipped)
     if (-not $SkipInitialImplement -and $Prompt) {
@@ -97,6 +120,7 @@ try {
             Write-Output "[Auto-Gate] Initial implementation by $effImplementer failed or timed out (exit code $implCode). Aborting before review."
             exit $implCode
         }
+        Invoke-AutoGateHookOrExit -EventName "after-implement" -RoundNum 1
     }
 
     $roundsHistory = @()
@@ -105,6 +129,11 @@ try {
     $finalExitCode = 2
 
     for ($round = 1; $round -le $MaxRounds; $round++) {
+        Invoke-AutoGateHookOrExit -EventName "round-start" -RoundNum $round
+        if ($SkipInitialImplement -or (-not $Prompt -and $round -eq 1)) {
+            Invoke-AutoGateHookOrExit -EventName "after-implement" -RoundNum $round
+        }
+
         Write-Output "`n------------------------------------------------------------------"
         if ($SkipInitialImplement) {
             Write-Output "  [Round $round / $MaxRounds] Running SPEC.md Contract Guard (review-only mode)..."
@@ -131,6 +160,8 @@ try {
         } catch {
             Write-Output $guardJsonRaw
         }
+
+        Invoke-AutoGateHookOrExit -EventName "before-review" -RoundNum $round
 
         Write-Output "`n------------------------------------------------------------------"
         Write-Output "  [Round $round / $MaxRounds] Running Parallel AI Council Review ($effReviewers)..."
@@ -241,6 +272,7 @@ $cleanReview
                 Write-Output "[Auto-Gate] Implementer ($effImplementer) fix turn failed or timed out (exit code $fixExit). Stopping."
                 exit $fixExit
             }
+            Invoke-AutoGateHookOrExit -EventName "after-implement" -RoundNum ($round + 1)
         }
     }
 

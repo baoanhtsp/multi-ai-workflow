@@ -20,6 +20,7 @@ import {
   loadInternalNotifyConfig,
 } from '../actions/notify.ts';
 import { createMawHttpServer } from '../http.ts';
+import { type MawFeature } from '../lib/feature.ts';
 
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 
@@ -1278,4 +1279,231 @@ test('v4.0 status, registry-driven dispatch, uninstalled agent 400 on run_job, a
     cleanup();
   }
 });
+
+test('F0 plugin foundation: feature loader (hello fixture), route security, status isolation (feature_data / feature_errors / ui_features), ctx.paths.featureDataDir, duplicate action failure, and v4 follow-up registry fields', async () => {
+  const { tempDir, cleanup } = makeTempEnv();
+  const testMawHome = path.join(tempDir, '.maw-f0');
+  const fixturesFeaturesDir = path.join(repoRoot, 'server', 'tests', 'fixtures', 'features');
+
+  // 1. Duplicate action name (colliding with built-in or another feature) or invalid feature name stops startup
+  assert.throws(
+    () =>
+      createMawHttpServer({
+        repoRoot,
+        projectsRoot: path.dirname(repoRoot),
+        userProfile: tempDir,
+        mawHome: testMawHome,
+        extraFeatures: [
+          {
+            name: 'bad-dup-builtin',
+            routes: {
+              status: {
+                method: 'GET',
+                handler: () => ({ ok: true }),
+              },
+            },
+          },
+        ],
+      }),
+    /Duplicate action 'status'/
+  );
+
+  assert.throws(
+    () =>
+      createMawHttpServer({
+        repoRoot,
+        projectsRoot: path.dirname(repoRoot),
+        userProfile: tempDir,
+        mawHome: testMawHome,
+        featuresDir: fixturesFeaturesDir,
+        extraFeatures: [
+          {
+            name: 'dup-hello-route',
+            routes: {
+              hello_ping: {
+                method: 'GET',
+                handler: () => ({ ok: true }),
+              },
+            },
+          },
+        ],
+      }),
+    /Duplicate action 'hello_ping'/
+  );
+
+  assert.throws(
+    () =>
+      createMawHttpServer({
+        repoRoot,
+        projectsRoot: path.dirname(repoRoot),
+        userProfile: tempDir,
+        mawHome: testMawHome,
+        extraFeatures: [
+          {
+            name: 'INVALID_UPPERCASE',
+            routes: {},
+          },
+        ],
+      }),
+    /Invalid feature name/
+  );
+
+  // 2. Load hello fixture + a feature whose status(ctx) throws + a POST route that uses ctx.readJobs
+  const extraFeat: MawFeature = {
+    name: 'broken-status',
+    routes: {
+      broken_post: {
+        method: 'POST',
+        handler: async (ctx, req) => {
+          const jobs = await ctx.readJobs();
+          return {
+            ok: true,
+            received: req.body.value ?? null,
+            jobs_count: jobs.length,
+          };
+        },
+      },
+    },
+    status: () => {
+      throw new Error('Simulated feature status failure');
+    },
+  };
+
+  const { server } = createMawHttpServer({
+    repoRoot,
+    projectsRoot: path.dirname(repoRoot),
+    userProfile: tempDir,
+    mawHome: testMawHome,
+    featuresDir: fixturesFeaturesDir,
+    extraFeatures: [extraFeat],
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+
+  try {
+    // 3. GET /api?action=hello_ping works and creates $MAW_HOME/data/hello
+    const pingRes = await rawHttpRequest({
+      port,
+      path: '/api?action=hello_ping&msg=f0-works',
+      headers: { Host: `127.0.0.1:${port}` },
+    });
+    assert.equal(pingRes.statusCode, 200);
+    const pingData = JSON.parse(pingRes.body) as {
+      ok: boolean;
+      feature: string;
+      echo: string;
+      data_dir: string;
+    };
+    assert.equal(pingData.ok, true);
+    assert.equal(pingData.feature, 'hello');
+    assert.equal(pingData.echo, 'f0-works');
+    assert.ok(fs.existsSync(pingData.data_dir), 'featureDataDir should create directory on disk');
+
+    // Method mismatch on GET feature route -> 405
+    const wrongMethod = await rawHttpRequest({
+      port,
+      method: 'POST',
+      path: '/api?action=hello_ping',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: `http://127.0.0.1:${port}`,
+        'X-MAW-Request': '1',
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    });
+    assert.equal(wrongMethod.statusCode, 405);
+
+    // POST feature route enforces X-MAW-Request header (403 without it, 200 with it)
+    const postForbidden = await rawHttpRequest({
+      port,
+      method: 'POST',
+      path: '/api?action=broken_post',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ value: 42 }),
+    });
+    assert.equal(postForbidden.statusCode, 403);
+
+    const postOk = await rawHttpRequest({
+      port,
+      method: 'POST',
+      path: '/api?action=broken_post',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: `http://127.0.0.1:${port}`,
+        'X-MAW-Request': '1',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ value: 42 }),
+    });
+    assert.equal(postOk.statusCode, 200);
+    const postOkData = JSON.parse(postOk.body) as { ok: boolean; received: number };
+    assert.equal(postOkData.ok, true);
+    assert.equal(postOkData.received, 42);
+
+    // 4. GET /api?action=status includes feature names, feature_data.hello, feature_errors['broken-status'], and registry fields
+    const statusRes = await rawHttpRequest({
+      port,
+      path: '/api?action=status',
+      headers: { Host: `127.0.0.1:${port}` },
+    });
+    assert.equal(statusRes.statusCode, 200);
+    const statusJson = JSON.parse(statusRes.body) as {
+      features: string[];
+      feature_data: Record<string, { greeting?: string }>;
+      feature_errors: Record<string, string>;
+      ui_features: Array<{ name: string; script: string }>;
+      agents: Array<{
+        id: string;
+        version: string | null;
+        login_cmd: string[] | null;
+        status_cmd: string[] | null;
+        resume_args: string[] | null;
+      }>;
+    };
+
+    assert.ok(statusJson.features.includes('hello'));
+    assert.ok(statusJson.features.includes('broken-status'));
+    assert.equal(statusJson.feature_data.hello?.greeting, 'Hello from F0 plugin!');
+    assert.match(
+      String(statusJson.feature_errors['broken-status'] ?? ''),
+      /Simulated feature status failure/
+    );
+    // Since dashboard/feat-hello.js does not exist on disk, ui_features must NOT include it
+    assert.equal(
+      statusJson.ui_features.some((u) => u.name === 'hello'),
+      false
+    );
+
+    // Check v4 registry extensions (login_cmd, status_cmd, resume_args, and versions)
+    const claudeAgent = statusJson.agents.find((a) => a.id === 'claude');
+    const codexAgent = statusJson.agents.find((a) => a.id === 'codex');
+    const geminiAgent = statusJson.agents.find((a) => a.id === 'gemini');
+    const cursorAgent = statusJson.agents.find((a) => a.id === 'cursor');
+    const aiderAgent = statusJson.agents.find((a) => a.id === 'aider');
+
+    assert.deepEqual(claudeAgent?.login_cmd, ['claude', '/login']);
+    assert.deepEqual(claudeAgent?.status_cmd, ['claude', 'auth', 'status']);
+    assert.deepEqual(claudeAgent?.resume_args, ['--resume', '{session_id}']);
+    assert.ok(claudeAgent?.version && claudeAgent.version.length > 0, 'claude version should be populated');
+
+    assert.deepEqual(codexAgent?.login_cmd, ['codex', 'login']);
+    assert.deepEqual(codexAgent?.status_cmd, ['codex', 'login', 'status']);
+    assert.deepEqual(codexAgent?.resume_args, ['exec', 'resume', '{session_id}']);
+    assert.ok(codexAgent?.version && codexAgent.version.length > 0, 'codex version should be populated');
+
+    assert.deepEqual(geminiAgent?.login_cmd, ['gemini']);
+    assert.deepEqual(geminiAgent?.resume_args, ['--resume', '{session_id}']);
+    assert.deepEqual(cursorAgent?.login_cmd, ['cursor-agent', 'login']);
+    assert.equal(aiderAgent?.login_cmd, null);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    cleanup();
+  }
+});
+
 

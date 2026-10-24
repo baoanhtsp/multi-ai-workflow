@@ -86,6 +86,19 @@ if (Test-Path -LiteralPath "$repoRoot\antigravity\skills\multi-ai\SKILL.md") {
 }
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\lib\maw-common.ps1" "$geminiScriptsLibDir\maw-common.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\lib\maw-registry.ps1" "$geminiScriptsLibDir\maw-registry.ps1"
+Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\lib\maw-hooks.ps1" "$geminiScriptsLibDir\maw-hooks.ps1"
+
+$geminiHooksDir = Join-Path $geminiScriptsDir "hooks"
+foreach ($hookEvt in @("job-start", "job-finish", "round-start", "after-implement", "before-review", "before-agent")) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $geminiHooksDir $hookEvt) | Out-Null
+}
+$srcHooksDir = "$repoRoot\antigravity\skills\claude-leader\scripts\hooks"
+if (Test-Path -LiteralPath $srcHooksDir -PathType Container) {
+    foreach ($hookFile in (Get-ChildItem -LiteralPath $srcHooksDir -Filter "*.ps1" -File -Recurse)) {
+        $relHook = $hookFile.FullName.Substring($srcHooksDir.Length).TrimStart('\', '/')
+        Copy-WithUserPath $hookFile.FullName (Join-Path $geminiHooksDir $relHook)
+    }
+}
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-agent.ps1" "$geminiScriptsDir\invoke-agent.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-cli-agent.ps1" "$geminiScriptsDir\invoke-cli-agent.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-claude.ps1" "$geminiScriptsDir\invoke-claude.ps1"

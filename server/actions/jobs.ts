@@ -419,24 +419,56 @@ export async function handleRunJob(
 
   const spec = buildCommandSpec(info, paths.scriptsDir, promptFile);
   const notifyScript = path.win32.join(paths.scriptsDir, 'send-notification.ps1');
+  const hooksLib = path.win32.join(paths.scriptsDir, 'lib', 'maw-hooks.ps1');
   const projShort = path.basename(validatedProjectPath);
 
-  // C1 + C2 fix: Write self-contained PowerShell runner script that streams output to logFile,
-  // records the real $LASTEXITCODE in JOB_FINISHED, and triggers send-notification.ps1 independently of Node.
+  // C1 + C2 fix + F0 §9.0 hooks: Write self-contained PowerShell runner script that invokes job-start/job-finish hooks,
+  // streams output to logFile, records the real $LASTEXITCODE in JOB_FINISHED, and triggers send-notification.ps1.
   const runnerCode =
     `$ErrorActionPreference = 'Continue'\n` +
     `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n` +
     `$OutputEncoding = [System.Text.Encoding]::UTF8\n` +
     `$logPath = ${psq(logFile)}\n` +
-    `try {\n` +
-    `    ${spec.preview} *>&1 | ForEach-Object {\n` +
-    `        $line = $_.ToString()\n` +
-    `        [System.IO.File]::AppendAllText($logPath, $line + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    `if (Test-Path -LiteralPath ${psq(hooksLib)}) {\n` +
+    `    try { . ${psq(hooksLib)} } catch {}\n` +
+    `}\n` +
+    `$code = 0\n` +
+    `$hookBlocked = $false\n` +
+    `if (Get-Command Invoke-MawHooks -ErrorAction SilentlyContinue) {\n` +
+    `    try {\n` +
+    `        $startRes = @(Invoke-MawHooks -Event 'job-start' -Context @{ job_id = ${psq(jobId)}; mode = ${psq(mode)}; agent = ${psq(agent)}; role = ${psq(role)}; project = ${psq(validatedProjectPath)}; exit_code = $null })\n` +
+    `        foreach ($item in $startRes) {\n` +
+    `            if ($item -is [string] -and $item.Trim()) {\n` +
+    `                [System.IO.File]::AppendAllText($logPath, $item + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    `            } elseif ($null -ne $item -and $item.Block) {\n` +
+    `                $hookBlocked = $true\n` +
+    `                [System.IO.File]::AppendAllText($logPath, "[HOOK BLOCKED: job-start] " + [string]$item.Reason + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    `                $code = 4\n` +
+    `            }\n` +
+    `        }\n` +
+    `    } catch {}\n` +
+    `}\n` +
+    `if (-not $hookBlocked) {\n` +
+    `    try {\n` +
+    `        ${spec.preview} *>&1 | ForEach-Object {\n` +
+    `            $line = $_.ToString()\n` +
+    `            [System.IO.File]::AppendAllText($logPath, $line + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    `        }\n` +
+    `        $code = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }\n` +
+    `    } catch {\n` +
+    `        [System.IO.File]::AppendAllText($logPath, "[ERROR] " + $_.Exception.Message + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    `        $code = 1\n` +
     `    }\n` +
-    `    $code = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }\n` +
-    `} catch {\n` +
-    `    [System.IO.File]::AppendAllText($logPath, "[ERROR] " + $_.Exception.Message + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
-    `    $code = 1\n` +
+    `}\n` +
+    `if (Get-Command Invoke-MawHooks -ErrorAction SilentlyContinue) {\n` +
+    `    try {\n` +
+    `        $finRes = @(Invoke-MawHooks -Event 'job-finish' -Context @{ job_id = ${psq(jobId)}; mode = ${psq(mode)}; agent = ${psq(agent)}; role = ${psq(role)}; project = ${psq(validatedProjectPath)}; exit_code = $code })\n` +
+    `        foreach ($item in $finRes) {\n` +
+    `            if ($item -is [string] -and $item.Trim()) {\n` +
+    `                [System.IO.File]::AppendAllText($logPath, $item + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    `            }\n` +
+    `        }\n` +
+    `    } catch {}\n` +
     `}\n` +
     `[System.IO.File]::AppendAllText($logPath, "\`r\`n=== [JOB_FINISHED exit_code=$code] ===\`r\`n", [System.Text.Encoding]::UTF8)\n` +
     `if (Test-Path -LiteralPath ${psq(notifyScript)}) {\n` +

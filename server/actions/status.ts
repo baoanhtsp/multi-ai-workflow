@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { getAuditStats } from '../lib/audit.ts';
+import { createFeatureContext, type MawFeature } from '../lib/feature.ts';
 import { getTempDir, isDirectorySafe, isFileSafe, type ServerPaths } from '../lib/paths.ts';
 import { loadAgentRegistry } from '../lib/registry.ts';
 import { detectRegistryAgents, getCodexModels, getDetectedToolVersions } from '../lib/versions.ts';
@@ -369,7 +370,10 @@ export function getLocalProjects(projectsRoot: string): Array<Record<string, unk
   return projects;
 }
 
-export async function handleStatus(paths: ServerPaths): Promise<Record<string, unknown>> {
+export async function handleStatus(
+  paths: ServerPaths,
+  loadedFeatures: MawFeature[] = []
+): Promise<Record<string, unknown>> {
   const lineCache = loadLineCountCache();
   const conversations = getConversations(paths.presenceDir, paths.brainDir, lineCache);
   saveLineCountCache(lineCache);
@@ -408,9 +412,51 @@ export async function handleStatus(paths: ServerPaths): Promise<Record<string, u
       version: det.version,
       models,
       efforts: [...entry.efforts],
+      login_cmd: entry.login_cmd ? [...entry.login_cmd] : null,
+      status_cmd: entry.status_cmd ? [...entry.status_cmd] : null,
+      resume_args: entry.resume_args ? [...entry.resume_args] : null,
       capabilities: { ...entry.capabilities },
     };
   });
+
+  const featureList = ['agents', 'sse', 'registry'];
+  const featureData: Record<string, unknown> = {};
+  const featureErrors: Record<string, string> = {};
+  const uiFeatures: Array<{ name: string; script: string; style?: string }> = [];
+  const featCtx = createFeatureContext(paths, registry);
+
+  for (const feat of loadedFeatures) {
+    if (!featureList.includes(feat.name)) {
+      featureList.push(feat.name);
+    }
+    if (typeof feat.status === 'function') {
+      try {
+        featureData[feat.name] = await feat.status(featCtx);
+      } catch (err: unknown) {
+        featureErrors[feat.name] = err instanceof Error ? err.message : String(err);
+      }
+    }
+    if (feat.ui) {
+      const scriptName = feat.ui.script;
+      if (
+        /^feat-[a-z0-9-]+\.js$/.test(scriptName) &&
+        isFileSafe(path.win32.join(paths.dashboardDir, scriptName))
+      ) {
+        const uiEntry: { name: string; script: string; style?: string } = {
+          name: feat.name,
+          script: scriptName,
+        };
+        if (
+          feat.ui.style &&
+          /^feat-[a-z0-9-]+\.css$/.test(feat.ui.style) &&
+          isFileSafe(path.win32.join(paths.dashboardDir, feat.ui.style))
+        ) {
+          uiEntry.style = feat.ui.style;
+        }
+        uiFeatures.push(uiEntry);
+      }
+    }
+  }
 
   const claudeStatus = detectedAgentsMap.get('claude') ?? {
     installed: isDirectorySafe(path.win32.join(paths.userProfile, '.claude')),
@@ -428,7 +474,10 @@ export async function handleStatus(paths: ServerPaths): Promise<Record<string, u
   return {
     ok: true,
     api_version: '4.0',
-    features: ['agents', 'sse', 'registry'],
+    features: featureList,
+    feature_data: featureData,
+    feature_errors: featureErrors,
+    ui_features: uiFeatures,
     timestamp: new Date().toISOString(),
     user_profile: paths.userProfile,
     bridge,

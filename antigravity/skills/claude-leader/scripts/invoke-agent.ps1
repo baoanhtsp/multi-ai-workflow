@@ -41,6 +41,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 . (Join-Path $PSScriptRoot "lib\maw-common.ps1")
 . (Join-Path $PSScriptRoot "lib\maw-registry.ps1")
+. (Join-Path $PSScriptRoot "lib\maw-hooks.ps1")
 
 $normAgent = $Agent.Trim().ToLowerInvariant()
 $normRole  = $Role.Trim().ToLowerInvariant()
@@ -150,6 +151,19 @@ $fullPrompt = if ($Prompt -and $Prompt.Trim()) {
 
 if ($normRole -eq "reviewer") {
     $fullPrompt = Add-ReviewerContract -Prompt $fullPrompt
+}
+
+# 4b. Invoke before-agent hooks (SPEC §9.0: block exits 5 with reason)
+$beforeHookRes = Invoke-MawHooks -Event "before-agent" -Context @{
+    agent   = $normAgent
+    role    = $normRole
+    workdir = $WorkDir
+    model   = $ModelOverride
+    effort  = $EffortOverride
+}
+if ($beforeHookRes -and $beforeHookRes.Block) {
+    Write-Output "HOOK_BLOCKED (before-agent): $($beforeHookRes.Reason)"
+    exit 5
 }
 
 # 5. Map (Agent.adapter, Role) to Target Script & Arguments per SPEC §5.1 & §7.4

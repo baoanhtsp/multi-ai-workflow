@@ -24,6 +24,185 @@ function ConvertTo-NativeArgument {
     return '"' + $escaped + '"'
 }
 
+function ConvertTo-CmdSafeArgument {
+    param(
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    if ($null -eq $Value -or $Value.Length -eq 0) {
+        return '""'
+    }
+
+    # Escape cmd.exe metacharacters (^ " & | < > ( ) % ! and whitespace) with ^ outside quotes
+    # so cmd.exe /d /s /c never enters quote-toggling mode and never interprets shell operators.
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($ch in $Value.ToCharArray()) {
+        if ($ch -in @([char]'^', [char]'"', [char]'&', [char]'|', [char]'<', [char]'>', [char]'(', [char]')', [char]'%', [char]'!', [char]' ', [char]"`t")) {
+            [void]$sb.Append('^')
+        }
+        [void]$sb.Append($ch)
+    }
+    return $sb.ToString()
+}
+
+function Normalize-MawWorkspacePath {
+    param(
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$RawPath
+    )
+
+    if (-not $RawPath -or -not $RawPath.Trim()) {
+        return ""
+    }
+    $decoded = [uri]::UnescapeDataString($RawPath.Trim())
+    $clean = $decoded -replace '^file:///', ''
+    return $clean.Replace('\', '/').TrimEnd('/').ToLowerInvariant()
+}
+
+function Resolve-GitMainWorktreePath {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$WorkDir
+    )
+
+    if (-not $WorkDir -or -not (Test-Path -LiteralPath $WorkDir)) {
+        return ""
+    }
+
+    try {
+        $res = Invoke-NativeProcess -FilePath "git" -ArgumentList @("-C", $WorkDir, "rev-parse", "--git-common-dir") -TimeoutMs 4000
+        if ($res.ExitCode -ne 0 -or -not $res.StdOut -or -not $res.StdOut.Trim()) {
+            return ""
+        }
+        $rawCommon = $res.StdOut.Trim() -replace '/', '\'
+        $commonFull = if ([System.IO.Path]::IsPathRooted($rawCommon)) {
+            $rawCommon
+        } else {
+            Join-Path $WorkDir $rawCommon
+        }
+        if (Test-Path -LiteralPath $commonFull) {
+            $commonFull = (Resolve-Path -LiteralPath $commonFull).Path
+        }
+        $parent = Split-Path -Parent $commonFull
+        if ($parent) {
+            return $parent
+        }
+    } catch {}
+
+    return ""
+}
+
+function Resolve-AntigravityProjectIdFromMetas {
+    param(
+        [Parameter(Mandatory=$false)]
+        [AllowEmptyString()]
+        [string]$WorkDir = "",
+
+        [Parameter(Mandatory=$false)]
+        [AllowEmptyCollection()]
+        [object[]]$MetadataList = @(),
+
+        [Parameter(Mandatory=$false)]
+        [AllowEmptyString()]
+        [string]$MainWorktreePath = ""
+    )
+
+    if ($null -eq $MetadataList -or $MetadataList.Count -eq 0) {
+        return ""
+    }
+
+    $normWorkDir = Normalize-MawWorkspacePath -RawPath $WorkDir
+    if (-not $MainWorktreePath -and $WorkDir -and (Test-Path -LiteralPath $WorkDir)) {
+        $MainWorktreePath = Resolve-GitMainWorktreePath -WorkDir $WorkDir
+    }
+    $normMainRepo = Normalize-MawWorkspacePath -RawPath $MainWorktreePath
+
+    $parsedEntries = [System.Collections.Generic.List[psobject]]::new()
+    foreach ($rawItem in $MetadataList) {
+        if ($null -eq $rawItem) { continue }
+        $item = $rawItem
+        if ($item -is [string]) {
+            if (-not $item.Trim()) { continue }
+            try {
+                $item = $item | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                continue
+            }
+        }
+
+        $meta = $item
+        if ($null -ne $item.response -and $null -ne $item.response.conversationMetadata -and $null -ne $item.response.conversationMetadata.metadata) {
+            $meta = $item.response.conversationMetadata.metadata
+        } elseif ($null -ne $item.conversationMetadata -and $null -ne $item.conversationMetadata.metadata) {
+            $meta = $item.conversationMetadata.metadata
+        }
+
+        if ($null -eq $meta) { continue }
+        $projId = if ($null -ne $meta.projectId) { ([string]$meta.projectId).Trim() } else { "" }
+        if (-not $projId) { continue }
+
+        $wsPaths = [System.Collections.Generic.List[string]]::new()
+        if ($null -ne $meta.workspaces) {
+            foreach ($ws in @($meta.workspaces)) {
+                if ($null -eq $ws) { continue }
+                foreach ($rawUri in @($ws.workspaceFolderAbsoluteUri, $ws.gitRootAbsoluteUri)) {
+                    $np = Normalize-MawWorkspacePath -RawPath ([string]$rawUri)
+                    if ($np -and -not $wsPaths.Contains($np)) {
+                        $wsPaths.Add($np)
+                    }
+                }
+            }
+        }
+        if ($null -ne $meta.workspaceUris) {
+            foreach ($u in @($meta.workspaceUris)) {
+                $np = Normalize-MawWorkspacePath -RawPath ([string]$u)
+                if ($np -and -not $wsPaths.Contains($np)) {
+                    $wsPaths.Add($np)
+                }
+            }
+        }
+
+        $parsedEntries.Add([PSCustomObject]@{
+            ProjectId = $projId
+            Paths     = $wsPaths.ToArray()
+        })
+    }
+
+    if ($parsedEntries.Count -eq 0) {
+        return ""
+    }
+
+    if (-not $normWorkDir -and -not $normMainRepo) {
+        return $parsedEntries[0].ProjectId
+    }
+
+    # Pass 1: Exact match on WorkDir or MainWorktreePath
+    foreach ($entry in $parsedEntries) {
+        foreach ($wp in $entry.Paths) {
+            if (($normWorkDir -and $wp -eq $normWorkDir) -or ($normMainRepo -and $wp -eq $normMainRepo)) {
+                return $entry.ProjectId
+            }
+        }
+    }
+
+    # Pass 2: Parent repo match (WorkDir or MainWorktreePath is a subdirectory of workspace path, or vice versa)
+    foreach ($entry in $parsedEntries) {
+        foreach ($wp in $entry.Paths) {
+            if ($normWorkDir -and ($normWorkDir.StartsWith("$wp/") -or $wp.StartsWith("$normWorkDir/"))) {
+                return $entry.ProjectId
+            }
+            if ($normMainRepo -and ($normMainRepo.StartsWith("$wp/") -or $wp.StartsWith("$normMainRepo/"))) {
+                return $entry.ProjectId
+            }
+        }
+    }
+
+    return ""
+}
+
 function Invoke-NativeProcess {
     param(
         [Parameter(Mandatory=$true)]

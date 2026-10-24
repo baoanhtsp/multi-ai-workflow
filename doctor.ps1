@@ -201,6 +201,7 @@ $expectedFiles = @(
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\agents.json"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\lib\maw-common.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\lib\maw-registry.ps1"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\lib\maw-hooks.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-agent.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-cli-agent.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-claude.ps1"),
@@ -232,6 +233,22 @@ foreach ($f in $expectedFiles) {
     } else {
         Write-Host "  [MISSING] $f (Run .\install.ps1 to sync)" -ForegroundColor Red
     }
+}
+
+$installedHooksDir = Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\hooks"
+Write-Host "`n  --- Installed Script Hooks ($installedHooksDir) ---" -ForegroundColor Cyan
+if (Test-Path -LiteralPath $installedHooksDir -PathType Container) {
+    $installedHookFiles = @(Get-ChildItem -LiteralPath $installedHooksDir -Filter "*.ps1" -File -Recurse -ErrorAction SilentlyContinue | Sort-Object FullName)
+    if ($installedHookFiles.Count -gt 0) {
+        foreach ($hf in $installedHookFiles) {
+            $rel = $hf.FullName.Substring($installedHooksDir.Length).TrimStart('\', '/')
+            Write-Host "  [HOOK] $rel" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "  [INFO] Hook runner ready (0 hook scripts currently installed)" -ForegroundColor Gray
+    }
+} else {
+    Write-Host "  [INFO] Hooks directory not yet created (Run .\install.ps1 to initialize)" -ForegroundColor Gray
 }
 
 # 6. Audit & Telemetry Summary

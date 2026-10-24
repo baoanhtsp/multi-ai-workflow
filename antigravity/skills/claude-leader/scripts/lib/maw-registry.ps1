@@ -14,7 +14,7 @@ function Merge-AgentEntryObjects {
     foreach ($prop in $OverrideObj.PSObject.Properties) {
         $name = $prop.Name
         $val  = $prop.Value
-        if ($null -eq $val) { continue }
+        if ($null -eq $val -and $name -notin @("login_cmd", "status_cmd", "resume_args")) { continue }
 
         if ($name -in @("capabilities", "detect", "cli") -and $merged.ContainsKey($name) -and $null -ne $merged[$name] -and ($val -is [psobject])) {
             $sub = @{}
@@ -24,7 +24,7 @@ function Merge-AgentEntryObjects {
                 foreach ($sp in $merged[$name].PSObject.Properties) { $sub[$sp.Name] = $sp.Value }
             }
             foreach ($up in $val.PSObject.Properties) {
-                if ($null -ne $up.Value) {
+                if ($null -ne $up.Value -or $up.Name -eq "resume_args") {
                     $sub[$up.Name] = $up.Value
                 }
             }
@@ -197,6 +197,15 @@ function ConvertTo-ValidatedAgentEntry {
         $rawEffortArgs = & $getCliProp $rawCli "effort_args"
         $effortArgs = if ($null -ne $rawEffortArgs) { @($rawEffortArgs | ForEach-Object { [string]$_ }) } else { @() }
 
+        $rawCliResumeArgs = & $getCliProp $rawCli "resume_args"
+        $cliResumeArgs = $null
+        if ($null -ne $rawCliResumeArgs -and ($rawCliResumeArgs -is [array] -or $rawCliResumeArgs.GetType().Name -eq "Object[]" -or $rawCliResumeArgs -is [System.Collections.IEnumerable] -and $rawCliResumeArgs -isnot [string])) {
+            $rList = @($rawCliResumeArgs | ForEach-Object { [string]$_ } | Where-Object { $_ -ne "" })
+            if ($rList.Count -gt 0) {
+                $cliResumeArgs = [string[]]$rList
+            }
+        }
+
         $cliOutput = ([string](& $getCliProp $rawCli "output")).Trim().ToLowerInvariant()
         if (-not $cliOutput) { $cliOutput = "text" }
         if ($cliOutput -notin @("text", "gemini-json")) {
@@ -230,6 +239,7 @@ function ConvertTo-ValidatedAgentEntry {
             role_args     = $roleArgsMap
             model_args    = [string[]]$modelArgs
             effort_args   = [string[]]$effortArgs
+            resume_args   = $cliResumeArgs
             output        = $cliOutput
             max_arg_chars = $maxArgChars
             pricing       = [PSCustomObject]@{
@@ -237,6 +247,25 @@ function ConvertTo-ValidatedAgentEntry {
                 output_per_mtok = $outMtok
             }
         }
+    }
+
+    $parseCmdArr = {
+        param($rawVal)
+        if ($null -eq $rawVal) { return $null }
+        if ($rawVal -is [string]) { return $null }
+        $items = @($rawVal | ForEach-Object { [string]$_ } | Where-Object { $_ -ne "" })
+        if ($items.Count -eq 0) { return $null }
+        return [string[]]$items
+    }
+
+    $loginCmd  = & $parseCmdArr $RawEntry.login_cmd
+    $statusCmd = & $parseCmdArr $RawEntry.status_cmd
+    $resumeArgs = & $parseCmdArr $RawEntry.resume_args
+    if ($null -eq $resumeArgs -and $null -ne $cliBlock -and $null -ne $cliBlock.resume_args) {
+        $resumeArgs = $cliBlock.resume_args
+    }
+    if ($null -ne $cliBlock -and $null -eq $cliBlock.resume_args -and $null -ne $resumeArgs) {
+        $cliBlock.resume_args = $resumeArgs
     }
 
     return @{
@@ -252,6 +281,9 @@ function ConvertTo-ValidatedAgentEntry {
         }
         models       = [string[]]$models.ToArray()
         efforts      = [string[]]$efforts.ToArray()
+        login_cmd    = $loginCmd
+        status_cmd   = $statusCmd
+        resume_args  = $resumeArgs
         capabilities = [PSCustomObject]@{
             write       = $capWrite
             review      = $capReview

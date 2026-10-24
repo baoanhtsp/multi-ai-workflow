@@ -52,6 +52,9 @@
         "claude-haiku-4-5"
       ],
       "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "login_cmd": ["claude", "/login"],
+      "status_cmd": ["claude", "auth", "status"],
+      "resume_args": ["--resume", "{session_id}"],
       "capabilities": {
         "write": true,
         "review": true,
@@ -83,6 +86,9 @@
         "codex-auto-review"
       ],
       "efforts": ["low", "medium", "high", "xhigh"],
+      "login_cmd": ["codex", "login"],
+      "status_cmd": ["codex", "login", "status"],
+      "resume_args": ["exec", "resume", "{session_id}"],
       "capabilities": {
         "write": true,
         "review": true,
@@ -110,6 +116,9 @@
       },
       "models": ["pro", "flash", "flash_lite"],
       "efforts": [],
+      "login_cmd": null,
+      "status_cmd": null,
+      "resume_args": null,
       "capabilities": {
         "write": true,
         "review": true,
@@ -131,6 +140,9 @@
       },
       "models": ["auto", "pro", "flash", "flash-lite"],
       "efforts": [],
+      "login_cmd": ["gemini"],
+      "status_cmd": null,
+      "resume_args": ["--resume", "{session_id}"],
       "capabilities": {
         "write": true,
         "review": true,
@@ -154,6 +166,7 @@
         },
         "model_args": ["-m", "{model}"],
         "effort_args": [],
+        "resume_args": ["--resume", "{session_id}"],
         "output": "gemini-json",
         "max_arg_chars": 30000,
         "pricing": {
@@ -175,6 +188,9 @@
       },
       "models": ["auto"],
       "efforts": [],
+      "login_cmd": ["cursor-agent", "login"],
+      "status_cmd": null,
+      "resume_args": null,
       "capabilities": {
         "write": true,
         "review": true,
@@ -192,6 +208,7 @@
         },
         "model_args": ["-m", "{model}"],
         "effort_args": [],
+        "resume_args": null,
         "output": "text",
         "max_arg_chars": 30000,
         "pricing": {
@@ -213,6 +230,9 @@
       },
       "models": ["sonnet", "opus", "haiku", "4o", "deepseek", "gemini"],
       "efforts": [],
+      "login_cmd": null,
+      "status_cmd": null,
+      "resume_args": null,
       "capabilities": {
         "write": true,
         "review": true,
@@ -238,6 +258,7 @@
         },
         "model_args": ["--model", "{model}"],
         "effort_args": [],
+        "resume_args": null,
         "output": "text",
         "max_arg_chars": 30000,
         "pricing": {

@@ -28,6 +28,7 @@ export interface AgentCliConfig {
   role_args: Record<string, string[]>;
   model_args: string[];
   effort_args: string[];
+  resume_args: string[] | null;
   output: 'text' | 'gemini-json';
   max_arg_chars: number;
   pricing: AgentCliPricing;
@@ -43,6 +44,9 @@ export interface AgentEntry {
   detect: AgentDetectConfig;
   models: string[];
   efforts: string[];
+  login_cmd: string[] | null;
+  status_cmd: string[] | null;
+  resume_args: string[] | null;
   capabilities: AgentCapabilities;
   cli: AgentCliConfig | null;
 }
@@ -77,6 +81,14 @@ function isPlainObject(val: unknown): val is Record<string, unknown> {
   return Boolean(val) && typeof val === 'object' && !Array.isArray(val);
 }
 
+function parseNullableCmdArray(raw: unknown): string[] | null {
+  if (!Array.isArray(raw)) {
+    return null;
+  }
+  const items = raw.map((x) => String(x ?? '').trim()).filter((x) => x !== '');
+  return items.length > 0 ? items : null;
+}
+
 function mergeRawAgentObjects(
   base: AgentEntry,
   override: Record<string, unknown>
@@ -91,6 +103,9 @@ function mergeRawAgentObjects(
     detect: { ...base.detect, version_args: [...base.detect.version_args] },
     models: [...base.models],
     efforts: [...base.efforts],
+    login_cmd: base.login_cmd ? [...base.login_cmd] : null,
+    status_cmd: base.status_cmd ? [...base.status_cmd] : null,
+    resume_args: base.resume_args ? [...base.resume_args] : null,
     capabilities: { ...base.capabilities },
     cli: base.cli
       ? {
@@ -99,13 +114,17 @@ function mergeRawAgentObjects(
           role_args: { ...base.cli.role_args },
           model_args: [...base.cli.model_args],
           effort_args: [...base.cli.effort_args],
+          resume_args: base.cli.resume_args ? [...base.cli.resume_args] : null,
           pricing: { ...base.cli.pricing },
         }
       : null,
   };
 
   for (const [k, v] of Object.entries(override)) {
-    if (v === undefined || v === null) continue;
+    if (v === undefined) continue;
+    if (v === null && k !== 'login_cmd' && k !== 'status_cmd' && k !== 'resume_args') {
+      continue;
+    }
     if (
       (k === 'capabilities' || k === 'detect' || k === 'cli') &&
       isPlainObject(v) &&
@@ -275,6 +294,7 @@ function validateAgentEntry(
     const effortArgs = Array.isArray(raw.cli.effort_args)
       ? raw.cli.effort_args.map((x) => String(x ?? ''))
       : [];
+    const cliResumeArgs = parseNullableCmdArray(raw.cli.resume_args);
 
     const outputRaw = String(raw.cli.output ?? 'text')
       .trim()
@@ -302,6 +322,7 @@ function validateAgentEntry(
       role_args: roleArgs,
       model_args: modelArgs,
       effort_args: effortArgs,
+      resume_args: cliResumeArgs,
       output: outputRaw as AgentCliConfig['output'],
       max_arg_chars: maxArgChars,
       pricing: {
@@ -309,6 +330,16 @@ function validateAgentEntry(
         output_per_mtok: Number.isFinite(outMtok) ? outMtok : 0,
       },
     };
+  }
+
+  const loginCmd = parseNullableCmdArray(raw.login_cmd);
+  const statusCmd = parseNullableCmdArray(raw.status_cmd);
+  let resumeArgs = parseNullableCmdArray(raw.resume_args);
+  if (!resumeArgs && cliConfig?.resume_args) {
+    resumeArgs = [...cliConfig.resume_args];
+  }
+  if (cliConfig && !cliConfig.resume_args && resumeArgs) {
+    cliConfig.resume_args = [...resumeArgs];
   }
 
   return {
@@ -324,6 +355,9 @@ function validateAgentEntry(
     },
     models,
     efforts,
+    login_cmd: loginCmd,
+    status_cmd: statusCmd,
+    resume_args: resumeArgs,
     capabilities,
     cli: cliConfig,
   };

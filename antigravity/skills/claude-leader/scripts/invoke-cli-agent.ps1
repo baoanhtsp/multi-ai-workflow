@@ -257,18 +257,36 @@ try {
             $execFile = "powershell.exe"
             $execArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $resolvedCmd) + $renderedArgs
         } elseif ($ext -eq ".cmd" -or $ext -eq ".bat") {
+            if ($promptVia -eq "arg" -or ($rawTokens | Where-Object { $_ -like "*{prompt}*" })) {
+                Write-Output "ERROR: Refusing to execute .cmd/.bat shim '$resolvedCmd' with prompt_via='arg' through cmd.exe (shell injection risk). Configure prompt_via='stdin' or 'file_arg' instead."
+                exit 1
+            }
+            foreach ($ra in $renderedArgs) {
+                if ($ra -match "[\r\n\0]") {
+                    Write-Output "ERROR: Refusing to pass argument containing newline or NUL byte to .cmd/.bat shim '$resolvedCmd' through cmd.exe."
+                    exit 1
+                }
+            }
             $execFile = "cmd.exe"
-            $quotedInner = (ConvertTo-NativeArgument -Value $resolvedCmd) + " " + (($renderedArgs | ForEach-Object { ConvertTo-NativeArgument -Value $_ }) -join " ")
-            $execArgs = @("/d", "/s", "/c", "`"$quotedInner`"")
+            $escapedBatchArgs = foreach ($ra in $renderedArgs) {
+                ConvertTo-CmdSafeArgument -Value ([string]$ra)
+            }
+            $batchArgsStr = ($escapedBatchArgs -join " ").Trim()
+            $innerCmd = if ($batchArgsStr) { "`"$resolvedCmd`" $batchArgsStr" } else { "`"$resolvedCmd`"" }
+            $rawCmdLineArgs = "/d /s /c `"$innerCmd`""
         }
     }
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $execFile
-    $quotedExecArgs = foreach ($arg in $execArgs) {
-        ConvertTo-NativeArgument -Value ([string]$arg)
+    if ($execFile -eq "cmd.exe" -and $rawCmdLineArgs) {
+        $psi.Arguments = $rawCmdLineArgs
+    } else {
+        $quotedExecArgs = foreach ($arg in $execArgs) {
+            ConvertTo-NativeArgument -Value ([string]$arg)
+        }
+        $psi.Arguments = ($quotedExecArgs -join " ")
     }
-    $psi.Arguments = ($quotedExecArgs -join " ")
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardInput = $true

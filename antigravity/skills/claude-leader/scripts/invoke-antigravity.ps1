@@ -9,6 +9,8 @@ param(
 
     [string]$ConversationId = "",
 
+    [string]$ProjectId = "",
+
     [string]$WorkDir = "",
 
     [string]$Title = "Task from Claude Leader",
@@ -205,18 +207,10 @@ function Assert-AgentApiSuccess {
 }
 
 function Normalize-WorkspacePath([string]$rawPath) {
-    if (-not $rawPath) { return "" }
-    $decoded = [uri]::UnescapeDataString($rawPath)
-    $clean = $decoded -replace '^file:///', ''
-    return $clean.Replace('\', '/').TrimEnd('/').ToLowerInvariant()
+    return Normalize-MawWorkspacePath -RawPath $rawPath
 }
 
-# 2. Workspace-Aware Target Conversation Discovery
-function Get-TargetConversationId {
-    if ($ConversationId) {
-        return $ConversationId
-    }
-
+function Get-CandidateConversationIds {
     $candidates = New-Object System.Collections.Generic.List[string]
     if (Test-Path -LiteralPath $presenceDir) {
         $locks = Get-ChildItem -LiteralPath $presenceDir -Filter "*.lock" -ErrorAction SilentlyContinue |
@@ -231,20 +225,65 @@ function Get-TargetConversationId {
     if (Test-Path -LiteralPath $brainDir) {
         $dirs = Get-ChildItem -LiteralPath $brainDir -Directory -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
-            Select-Object -First 10
+            Select-Object -First 12
         foreach ($d in $dirs) {
-            if ($d.Name -and -not $candidates.Contains($d.Name)) {
+            if ($d.Name -and -not $d.Name.StartsWith(".") -and -not $candidates.Contains($d.Name)) {
                 $candidates.Add($d.Name)
             }
         }
     }
+    return $candidates.ToArray()
+}
 
+function Resolve-EffectiveProjectId {
+    if ($ProjectId -and $ProjectId.Trim()) {
+        return $ProjectId.Trim()
+    }
+    if ($env:ANTIGRAVITY_PROJECT_ID -and $env:ANTIGRAVITY_PROJECT_ID.Trim()) {
+        return $env:ANTIGRAVITY_PROJECT_ID.Trim()
+    }
+
+    $candidates = @(Get-CandidateConversationIds)
+    if ($candidates.Count -eq 0) {
+        return ""
+    }
+
+    $metaJsons = New-Object System.Collections.Generic.List[string]
+    foreach ($cid in $candidates) {
+        try {
+            $metaRes = Invoke-AgentApi -SubArgs @("get-conversation-metadata", $cid) -AllowBatFallback
+            if ($metaRes.StdOut -and $metaRes.StdOut.Trim()) {
+                $metaJsons.Add($metaRes.StdOut.Trim())
+            }
+        } catch {}
+    }
+
+    if ($metaJsons.Count -eq 0) {
+        return ""
+    }
+
+    $resolved = Resolve-AntigravityProjectIdFromMetas -WorkDir $WorkDir -MetadataList $metaJsons.ToArray()
+    if (-not $resolved) {
+        $resolved = Resolve-AntigravityProjectIdFromMetas -WorkDir "" -MetadataList $metaJsons.ToArray()
+    }
+    return $resolved
+}
+
+# 2. Workspace-Aware Target Conversation Discovery
+function Get-TargetConversationId {
+    if ($ConversationId -and $ConversationId.Trim()) {
+        return $ConversationId.Trim()
+    }
+
+    $candidates = @(Get-CandidateConversationIds)
     if ($candidates.Count -eq 0) {
         return $null
     }
 
     if ($WorkDir) {
         $normWorkDir = Normalize-WorkspacePath $WorkDir
+        $mainWt = Resolve-GitMainWorktreePath -WorkDir $WorkDir
+        $normMainRepo = Normalize-WorkspacePath $mainWt
         foreach ($cid in $candidates) {
             try {
                 $metaRes = Invoke-AgentApi -SubArgs @("get-conversation-metadata", $cid) -AllowBatFallback
@@ -257,7 +296,8 @@ function Get-TargetConversationId {
                             foreach ($ws in $meta.workspaces) {
                                 $wsFolder = Normalize-WorkspacePath $ws.workspaceFolderAbsoluteUri
                                 $gitRoot  = Normalize-WorkspacePath $ws.gitRootAbsoluteUri
-                                if (($wsFolder -and $wsFolder -eq $normWorkDir) -or ($gitRoot -and $gitRoot -eq $normWorkDir)) {
+                                if (($wsFolder -and ($wsFolder -eq $normWorkDir -or ($normMainRepo -and $wsFolder -eq $normMainRepo))) -or
+                                    ($gitRoot -and ($gitRoot -eq $normWorkDir -or ($normMainRepo -and $gitRoot -eq $normMainRepo)))) {
                                     return $cid
                                 }
                             }
@@ -265,7 +305,7 @@ function Get-TargetConversationId {
                         if ($meta.workspaceUris) {
                             foreach ($u in $meta.workspaceUris) {
                                 $normUri = Normalize-WorkspacePath $u
-                                if ($normUri -and $normUri -eq $normWorkDir) {
+                                if ($normUri -and ($normUri -eq $normWorkDir -or ($normMainRepo -and $normUri -eq $normMainRepo))) {
                                     return $cid
                                 }
                             }
@@ -380,16 +420,21 @@ switch ($Action) {
             Write-Error "Prompt is required for -Action new"
             exit 1
         }
+        $effProjectId = Resolve-EffectiveProjectId
+        if ($effProjectId) {
+            $env:ANTIGRAVITY_PROJECT_ID = $effProjectId
+        }
         $procRes = Invoke-AgentApi -SubArgs @("new-conversation", "--model=$Model", "--title=$Title", $Prompt)
         $newOut = Assert-AgentApiSuccess -Result $procRes -Context "new-conversation"
         if ($newOut) {
             Write-Output $newOut
         }
+        $newCid = $null
+        if ($newOut -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
+            $newCid = $Matches[1]
+            Write-Output "CONVERSATION_ID: $newCid"
+        }
         if (-not $NoWait) {
-            $newCid = $null
-            if ($newOut -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
-                $newCid = $Matches[1]
-            }
             if (-not $newCid) {
                 Write-Error "new-conversation did not return a valid Conversation UUID; refusing to wait on an unrelated conversation."
                 exit 1

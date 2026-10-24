@@ -1,7 +1,9 @@
 BeforeAll {
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
     $script:CommonScript = Join-Path $script:RepoRoot "antigravity\skills\claude-leader\scripts\lib\maw-common.ps1"
+    $script:HooksScript  = Join-Path $script:RepoRoot "antigravity\skills\claude-leader\scripts\lib\maw-hooks.ps1"
     . $script:CommonScript
+    . $script:HooksScript
 }
 
 Describe "ConvertTo-NativeArgument & Invoke-NativeProcess" {
@@ -291,6 +293,124 @@ Describe "Evaluate-TranscriptTurn & Read-TranscriptTurnIncremental (R3)" {
             $state.Steps[0].content | Should -BeExactly $vnContent
         } finally {
             Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe "F0 Script Hooks (Invoke-MawHooks) & Antigravity Parallel Conversation ProjectId Resolution" {
+    It "executes hooks in name order, catches hook errors without crashing, and returns the first blocking hook" {
+        $tmpHooksRoot = Join-Path $env:TEMP ("maw_hooks_unit_" + [guid]::NewGuid().ToString("N"))
+        $evtDir = Join-Path $tmpHooksRoot "before-agent"
+        New-Item -ItemType Directory -Path $evtDir -Force | Out-Null
+        try {
+            $utf8 = New-Object System.Text.UTF8Encoding($false)
+            # 10-ok.ps1: non-blocking
+            [System.IO.File]::WriteAllText((Join-Path $evtDir "10-ok.ps1"), '@{ Block = $false }', $utf8)
+            # 20-throw.ps1: throws an exception that must be caught and logged
+            [System.IO.File]::WriteAllText((Join-Path $evtDir "20-throw.ps1"), 'throw "Simulated hook error in 20-throw"', $utf8)
+
+            $resPass = @(Invoke-MawHooks -Event "before-agent" -Context @{ agent = "claude"; role = "backend" } -HooksRoot $tmpHooksRoot)
+            $finalPass = $resPass[-1]
+            $finalPass.Block | Should -BeFalse
+            ($resPass -join "`n") | Should -Match "Simulated hook error in 20-throw"
+
+            # Add 30-block.ps1 and 40-never-reached.ps1
+            $markerFile = Join-Path $tmpHooksRoot "40-ran.txt"
+            [System.IO.File]::WriteAllText((Join-Path $evtDir "30-block.ps1"), '@{ Block = $true; Reason = "Blocked by policy for agent=" + $Context.agent }', $utf8)
+            [System.IO.File]::WriteAllText((Join-Path $evtDir "40-after.ps1"), "[System.IO.File]::WriteAllText('$($markerFile.Replace("'", "''"))', 'ran'); @{ Block = `$false }", $utf8)
+
+            $resBlock = @(Invoke-MawHooks -Event "before-agent" -Context @{ agent = "codex"; role = "reviewer" } -HooksRoot $tmpHooksRoot)
+            $finalBlock = $resBlock[-1]
+            $finalBlock.Block | Should -BeTrue
+            $finalBlock.Reason | Should -Be "Blocked by policy for agent=codex"
+            (Test-Path -LiteralPath $markerFile) | Should -BeFalse
+        } finally {
+            Remove-Item -LiteralPath $tmpHooksRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "resolves Antigravity projectId from mocked metadata JSON for exact workspace, percent-encoded URI, parent repo, and git worktree" {
+        $meta1 = (@{
+            response = @{
+                conversationMetadata = @{
+                    metadata = @{
+                        projectId     = "11111111-2222-3333-4444-555555555555"
+                        workspaces    = @(
+                            @{
+                                workspaceFolderAbsoluteUri = "file:///c:/laragon/www/other-project"
+                                gitRootAbsoluteUri         = "file:///c:/laragon/www/other-project"
+                            }
+                        )
+                        workspaceUris = @("file:///c%3A/laragon/www/other-project")
+                    }
+                }
+            }
+        } | ConvertTo-Json -Depth 8 -Compress)
+
+        $meta2 = (@{
+            response = @{
+                conversationMetadata = @{
+                    metadata = @{
+                        projectId     = "e8902b50-543f-4bb1-9525-8bf93a1f06be"
+                        workspaces    = @(
+                            @{
+                                workspaceFolderAbsoluteUri = "file:///c:/laragon/www/multi-ai-workflow"
+                                gitRootAbsoluteUri         = "file:///c:/laragon/www/multi-ai-workflow"
+                            }
+                        )
+                        workspaceUris = @("file:///c%3A/laragon/www/multi-ai-workflow")
+                    }
+                }
+            }
+        } | ConvertTo-Json -Depth 8 -Compress)
+
+        $metas = @($meta1, $meta2)
+
+        # 1. Exact workspace match
+        $pidExact = Resolve-AntigravityProjectIdFromMetas -WorkDir "C:\laragon\www\multi-ai-workflow" -MetadataList $metas
+        $pidExact | Should -Be "e8902b50-543f-4bb1-9525-8bf93a1f06be"
+
+        # 2. Subdirectory / parent repo match
+        $pidSub = Resolve-AntigravityProjectIdFromMetas -WorkDir "C:\laragon\www\multi-ai-workflow\server\features" -MetadataList $metas
+        $pidSub | Should -Be "e8902b50-543f-4bb1-9525-8bf93a1f06be"
+
+        # 3. Git worktree resolution via git rev-parse --git-common-dir
+        $tmpBase = Join-Path $env:TEMP ("maw_wt_test_" + [guid]::NewGuid().ToString("N"))
+        $mainRepo = Join-Path $tmpBase "main-repo"
+        $linkedWt = Join-Path $tmpBase "wt-stream-1"
+        New-Item -ItemType Directory -Path $mainRepo -Force | Out-Null
+        try {
+            & git -C $mainRepo init 2>$null | Out-Null
+            & git -C $mainRepo config user.email "test@example.com"
+            & git -C $mainRepo config user.name "Test"
+            [System.IO.File]::WriteAllText((Join-Path $mainRepo "README.md"), "# test`n")
+            & git -C $mainRepo add README.md
+            & git -C $mainRepo commit -m "init" 2>$null | Out-Null
+            & git -C $mainRepo worktree add -b feat/s1 $linkedWt 2>$null | Out-Null
+
+            $resolvedMain = Resolve-GitMainWorktreePath -WorkDir $linkedWt
+            (Normalize-MawWorkspacePath $resolvedMain) | Should -Be (Normalize-MawWorkspacePath $mainRepo)
+
+            $wtMeta = (@{
+                response = @{
+                    conversationMetadata = @{
+                        metadata = @{
+                            projectId  = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+                            workspaces = @(
+                                @{
+                                    workspaceFolderAbsoluteUri = "file:///" + ($mainRepo.Replace('\', '/'))
+                                    gitRootAbsoluteUri         = "file:///" + ($mainRepo.Replace('\', '/'))
+                                }
+                            )
+                        }
+                    }
+                }
+            } | ConvertTo-Json -Depth 8 -Compress)
+
+            $pidWt = Resolve-AntigravityProjectIdFromMetas -WorkDir $linkedWt -MetadataList @($meta1, $wtMeta)
+            $pidWt | Should -Be "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        } finally {
+            Remove-Item -LiteralPath $tmpBase -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }

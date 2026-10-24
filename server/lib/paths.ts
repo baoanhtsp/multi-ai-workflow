@@ -7,6 +7,7 @@ export interface ServerPaths {
   projectsRoot: string;
   dashboardDir: string;
   userProfile: string;
+  mawHome: string;
   antigravityDir: string;
   bridgeFile: string;
   auditFile: string;
@@ -16,7 +17,10 @@ export interface ServerPaths {
   tempDir: string;
   jobsDir: string;
   scriptsDir: string;
+  featureDataDir: (name: string) => string;
 }
+
+const FEATURE_NAME_REGEX = /^[a-z][a-z0-9-]{1,31}$/;
 
 export function getTempDir(): string {
   const raw = process.env.TEMP || process.env.TMP || os.tmpdir();
@@ -27,6 +31,7 @@ export function resolveServerPaths(options?: {
   repoRoot?: string;
   projectsRoot?: string;
   userProfile?: string;
+  mawHome?: string;
 }): ServerPaths {
   let repoRoot = options?.repoRoot ?? path.resolve(import.meta.dirname, '..', '..');
   try {
@@ -74,12 +79,30 @@ export function resolveServerPaths(options?: {
     : path.win32.join(repoRoot, 'antigravity', 'skills', 'claude-leader', 'scripts');
 
   const dashboardDir = path.win32.join(repoRoot, 'dashboard');
+  const mawHome =
+    (options?.mawHome ?? process.env.MAW_HOME ?? '').trim().replace(/[\\/]+$/, '') ||
+    path.win32.join(userProfile, '.maw');
+
+  const featureDataDir = (name: string): string => {
+    const trimmed = String(name ?? '').trim();
+    if (!FEATURE_NAME_REGEX.test(trimmed)) {
+      throw new Error(
+        `Invalid feature name '${trimmed}' for featureDataDir (must match ^[a-z][a-z0-9-]{1,31}$).`
+      );
+    }
+    const dir = path.win32.join(mawHome, 'data', trimmed);
+    if (!isDirectorySafe(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    return dir;
+  };
 
   return {
     repoRoot,
     projectsRoot,
     dashboardDir,
     userProfile,
+    mawHome,
     antigravityDir,
     bridgeFile,
     auditFile,
@@ -89,6 +112,7 @@ export function resolveServerPaths(options?: {
     tempDir,
     jobsDir,
     scriptsDir,
+    featureDataDir,
   };
 }
 

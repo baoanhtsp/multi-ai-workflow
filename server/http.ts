@@ -10,6 +10,15 @@ import { handleJobStream } from './actions/jobStream.ts';
 import { handleSaveNotify, handleTestNotify } from './actions/notify.ts';
 import { handleSpecGuard } from './actions/specGuard.ts';
 import { handleStatus } from './actions/status.ts';
+import {
+  BUILTIN_GET_ACTIONS,
+  BUILTIN_POST_ACTIONS,
+  createFeatureContext,
+  loadServerFeatures,
+  type LoadedServerFeatures,
+  type MawFeature,
+  type MawFeatureRequest,
+} from './lib/feature.ts';
 import { isFileSafe, resolveServerPaths, type ServerPaths } from './lib/paths.ts';
 import { ApiValidationError } from './lib/validate.ts';
 
@@ -199,13 +208,23 @@ export interface MawServerOptions {
   repoRoot?: string;
   projectsRoot?: string;
   userProfile?: string;
+  mawHome?: string;
+  featuresDir?: string;
+  extraFeatures?: MawFeature[];
 }
 
 export function createMawHttpServer(options?: MawServerOptions): {
   server: http.Server;
   getPaths: () => ServerPaths;
+  loadedFeatures: LoadedServerFeatures;
 } {
   const getPaths = (): ServerPaths => resolveServerPaths(options);
+  const initialPaths = getPaths();
+  const loadedFeatures = loadServerFeatures({
+    repoRoot: initialPaths.repoRoot,
+    featuresDir: options?.featuresDir,
+    extraFeatures: options?.extraFeatures,
+  });
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -273,24 +292,21 @@ export function createMawHttpServer(options?: MawServerOptions): {
       // 6. API Endpoint: /api (or /dashboard/api)
       if (decodedPathname === '/api' || decodedPathname === '/dashboard/api') {
         const action = (url.searchParams.get('action') ?? 'status').trim();
+        const featRoute = loadedFeatures.routes.get(action);
 
-        const getActions = new Set(['status', 'git_info', 'job_status', 'job_stream']);
-        const postActions = new Set([
-          'spec_guard',
-          'init_spec',
-          'dispatch',
-          'run_job',
-          'cancel_job',
-          'save_notify',
-          'test_notify',
-        ]);
-
-        if (!getActions.has(action) && !postActions.has(action)) {
+        if (
+          !BUILTIN_GET_ACTIONS.has(action) &&
+          !BUILTIN_POST_ACTIONS.has(action) &&
+          !featRoute
+        ) {
           sendJson(res, { ok: false, error: `Unsupported action: ${action}` }, 400);
           return;
         }
 
-        if (getActions.has(action) && method !== 'GET') {
+        if (
+          (BUILTIN_GET_ACTIONS.has(action) || featRoute?.method === 'GET') &&
+          method !== 'GET'
+        ) {
           sendJson(
             res,
             { ok: false, error: `Method Not Allowed: Use GET for ${action}.` },
@@ -299,7 +315,10 @@ export function createMawHttpServer(options?: MawServerOptions): {
           return;
         }
 
-        if (postActions.has(action) && method !== 'POST') {
+        if (
+          (BUILTIN_POST_ACTIONS.has(action) || featRoute?.method === 'POST') &&
+          method !== 'POST'
+        ) {
           sendJson(
             res,
             { ok: false, error: `Method Not Allowed: Use POST for ${action}.` },
@@ -308,8 +327,27 @@ export function createMawHttpServer(options?: MawServerOptions): {
           return;
         }
 
+        if (featRoute) {
+          const body = featRoute.method === 'POST' ? await readJsonBody(req) : {};
+          const baseCtx = createFeatureContext(paths);
+          const reqCtx: MawFeatureRequest = {
+            ...baseCtx,
+            url,
+            query: url.searchParams,
+            body,
+            req,
+            res,
+            ctx: baseCtx,
+          };
+          const payload = await featRoute.handler(reqCtx, reqCtx);
+          if (payload !== undefined && !res.headersSent && !res.writableEnded) {
+            sendJson(res, payload, 200);
+          }
+          return;
+        }
+
         if (action === 'status') {
-          const payload = await handleStatus(paths);
+          const payload = await handleStatus(paths, loadedFeatures.features);
           sendJson(res, payload, 200);
           return;
         }
@@ -450,5 +488,5 @@ export function createMawHttpServer(options?: MawServerOptions): {
     }
   });
 
-  return { server, getPaths };
+  return { server, getPaths, loadedFeatures };
 }

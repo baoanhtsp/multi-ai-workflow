@@ -127,6 +127,7 @@ Describe "invoke-agent.ps1 Unified Role Dispatcher (SPEC section 5)" {
             Copy-Item -LiteralPath (Join-Path $script:repoRoot "antigravity\skills\claude-leader\agents.json") -Destination (Join-Path $tmpSkill "agents.json") -Force
             Copy-Item -LiteralPath (Join-Path $script:repoRoot "antigravity\skills\claude-leader\scripts\lib\maw-common.ps1") -Destination (Join-Path $tmpLib "maw-common.ps1") -Force
             Copy-Item -LiteralPath (Join-Path $script:repoRoot "antigravity\skills\claude-leader\scripts\lib\maw-registry.ps1") -Destination (Join-Path $tmpLib "maw-registry.ps1") -Force
+            Copy-Item -LiteralPath (Join-Path $script:repoRoot "antigravity\skills\claude-leader\scripts\lib\maw-hooks.ps1") -Destination (Join-Path $tmpLib "maw-hooks.ps1") -Force
             Copy-Item -LiteralPath (Join-Path $script:repoRoot "antigravity\skills\claude-leader\templates\roles\reviewer.md") -Destination (Join-Path $tmpRoles "reviewer.md") -Force
 
             $fakeCodex = @'
@@ -378,6 +379,130 @@ Describe "v4.0 Agent Registry (lib/maw-registry.ps1) & CLI Adapter (invoke-cli-a
         } finally {
             $env:MAW_HOME = $prevMaw
             Remove-Item -LiteralPath $tmpMaw -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "prevents cmd.exe metacharacter injection on .cmd shims: refuses prompt_via=arg and escapes metacharacters on stdin/file_arg" {
+        $tmpMaw = Join-Path $env:TEMP ("maw_cmd_inj_" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $tmpMaw -Force | Out-Null
+        $prevMaw = $env:MAW_HOME
+        try {
+            $env:MAW_HOME = $tmpMaw
+            $fakeCmdPath = Join-Path $tmpMaw "fake-cli.cmd"
+            $pwnedFile   = Join-Path $tmpMaw "pwned.txt"
+            [System.IO.File]::WriteAllText($fakeCmdPath, "@echo off`r`necho FAKE_CMD_OK`r`n", [System.Text.Encoding]::ASCII)
+
+            $injJson = @{
+                version = 1
+                agents  = @(
+                    @{
+                        id           = "cmd-arg-ai"
+                        label        = "Cmd Arg AI"
+                        color        = "#ff0000"
+                        enabled      = $true
+                        adapter      = "cli"
+                        detect       = @{ command = $fakeCmdPath; version_args = @() }
+                        models       = @("auto")
+                        efforts      = @()
+                        capabilities = @{ write = $true; review = $true; new_session = $false; sessions = $false; ide_send = $false }
+                        cli          = @{
+                            command     = $fakeCmdPath
+                            prompt_via  = "arg"
+                            args        = @("-p", "{prompt}")
+                            role_args   = @{}
+                            model_args  = @()
+                            effort_args = @()
+                            output      = "text"
+                        }
+                    },
+                    @{
+                        id           = "cmd-stdin-ai"
+                        label        = "Cmd Stdin AI"
+                        color        = "#00aa00"
+                        enabled      = $true
+                        adapter      = "cli"
+                        detect       = @{ command = $fakeCmdPath; version_args = @() }
+                        models       = @("auto")
+                        efforts      = @()
+                        capabilities = @{ write = $true; review = $true; new_session = $false; sessions = $false; ide_send = $false }
+                        cli          = @{
+                            command     = $fakeCmdPath
+                            prompt_via  = "stdin"
+                            args        = @("--tag", "safe&echo PWNED > `"$pwnedFile`"")
+                            role_args   = @{}
+                            model_args  = @()
+                            effort_args = @()
+                            output      = "text"
+                        }
+                    }
+                )
+            } | ConvertTo-Json -Depth 8
+            [System.IO.File]::WriteAllText((Join-Path $tmpMaw "agents.json"), $injJson, (New-Object System.Text.UTF8Encoding($false)))
+
+            # 1. prompt_via: "arg" with .cmd shim -> refused with exit 1, pwned.txt NOT created
+            $maliciousPrompt = "hello & echo PWNED > `"$pwnedFile`""
+            $outArg = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:invokeCliPath `
+                -AgentId "cmd-arg-ai" `
+                -Role "backend" `
+                -WorkDir $tmpMaw `
+                -Prompt $maliciousPrompt 2>&1
+            $LASTEXITCODE | Should -Be 1
+            ($outArg | Out-String) | Should -Match "Refusing to execute \.cmd/\.bat shim"
+            (Test-Path -LiteralPath $pwnedFile) | Should -BeFalse
+
+            # 2. prompt_via: "stdin" with .cmd shim and metacharacters in args -> escaped, pwned.txt NOT created
+            $outStdin = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:invokeCliPath `
+                -AgentId "cmd-stdin-ai" `
+                -Role "backend" `
+                -WorkDir $tmpMaw `
+                -Prompt $maliciousPrompt 2>&1
+            $LASTEXITCODE | Should -Be 0
+            ($outStdin | Out-String) | Should -Match "FAKE_CMD_OK"
+            (Test-Path -LiteralPath $pwnedFile) | Should -BeFalse
+        } finally {
+            $env:MAW_HOME = $prevMaw
+            Remove-Item -LiteralPath $tmpMaw -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "exits 5 in invoke-agent.ps1 when a before-agent hook blocks and exits 4 in invoke-auto-gate.ps1 when a round-start hook blocks" {
+        $tmpHooks = Join-Path $env:TEMP ("maw_hooks_int_" + [guid]::NewGuid().ToString("N"))
+        $beforeAgentDir = Join-Path $tmpHooks "before-agent"
+        $roundStartDir  = Join-Path $tmpHooks "round-start"
+        New-Item -ItemType Directory -Path $beforeAgentDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $roundStartDir -Force | Out-Null
+        $prevHooksDir = $env:MAW_HOOKS_DIR
+        try {
+            $utf8 = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText((Join-Path $beforeAgentDir "10-deny.ps1"), '@{ Block = $true; Reason = "Budget exceeded for " + $Context.agent }', $utf8)
+            [System.IO.File]::WriteAllText((Join-Path $roundStartDir "10-deny-gate.ps1"), '@{ Block = $true; Reason = "Auto-Gate blocked in round " + $Context.round }', $utf8)
+
+            $env:MAW_HOOKS_DIR = $tmpHooks
+
+            # 1. invoke-agent.ps1 exits 5
+            $outAgent = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:invokeAgentPath `
+                -Agent claude `
+                -Role backend `
+                -WorkDir $script:repoRoot `
+                -Prompt "Test hook block" `
+                -DryRun 2>&1
+            $LASTEXITCODE | Should -Be 5
+            ($outAgent | Out-String) | Should -Match "Budget exceeded for claude"
+
+            # 2. invoke-auto-gate.ps1 exits 4
+            $autoGateScript = Join-Path $script:scriptsDir "invoke-auto-gate.ps1"
+            $outGate = & powershell -NoProfile -ExecutionPolicy Bypass -File $autoGateScript `
+                -WorkDir $script:repoRoot `
+                -SkipInitialImplement 2>&1
+            $LASTEXITCODE | Should -Be 4
+            ($outGate | Out-String) | Should -Match "Auto-Gate blocked in round 1"
+        } finally {
+            if ($null -eq $prevHooksDir) {
+                Remove-Item Env:\MAW_HOOKS_DIR -ErrorAction SilentlyContinue
+            } else {
+                $env:MAW_HOOKS_DIR = $prevHooksDir
+            }
+            Remove-Item -LiteralPath $tmpHooks -Recurse -Force -ErrorAction SilentlyContinue
         }
     }
 }

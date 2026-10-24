@@ -64,15 +64,21 @@ function findClaudeExecutables(claudeBase: string): string[] {
 
 export async function getDetectedToolVersions(userProfile: string): Promise<DetectedToolVersions> {
   const nodeVer = process.version;
-  const cacheFile = path.win32.join(getTempDir(), 'maw_tool_versions_cache_v2.json');
+  const cacheFile = path.win32.join(getTempDir(), 'maw_tool_versions_cache_v4.json');
   try {
     const st = fs.statSync(cacheFile);
     if (Date.now() - st.mtimeMs < 3600_000) {
       const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8')) as Record<string, unknown>;
-      if (cached && 'claude' in cached && 'codex' in cached) {
+      if (
+        cached &&
+        typeof cached.claude === 'string' &&
+        cached.claude.trim() !== '' &&
+        typeof cached.codex === 'string' &&
+        cached.codex.trim() !== ''
+      ) {
         return {
-          claude: typeof cached.claude === 'string' ? cached.claude : null,
-          codex: typeof cached.codex === 'string' ? cached.codex : null,
+          claude: cached.claude,
+          codex: cached.codex,
           node: nodeVer,
         };
       }
@@ -81,55 +87,77 @@ export async function getDetectedToolVersions(userProfile: string): Promise<Dete
     // Cache miss or expired
   }
 
+  const roamingDirs = [path.win32.join(userProfile, 'AppData', 'Roaming')];
+  const envAppData = (process.env.APPDATA ?? '').trim();
+  if (envAppData && !roamingDirs.some((d) => d.toLowerCase() === envAppData.toLowerCase())) {
+    roamingDirs.push(envAppData);
+  }
+  const envUserProf = (process.env.USERPROFILE ?? '').trim();
+  if (envUserProf) {
+    const envRoaming = path.win32.join(envUserProf, 'AppData', 'Roaming');
+    if (!roamingDirs.some((d) => d.toLowerCase() === envRoaming.toLowerCase())) {
+      roamingDirs.push(envRoaming);
+    }
+  }
+
   let claudeVer: string | null = null;
   const claudeTry = await runCommand('claude.exe', ['--version'], { timeoutMs: 4000 });
   claudeVer = extractSemver(claudeTry.stdout || claudeTry.stderr);
   if (!claudeVer) {
-    const claudeBase = path.win32.join(userProfile, 'AppData', 'Roaming', 'Claude', 'claude-code');
-    const exes = findClaudeExecutables(claudeBase);
-    if (exes.length > 0) {
-      const r = await runCommand(exes[0]!, ['--version'], { timeoutMs: 4000 });
-      claudeVer = extractSemver(r.stdout || r.stderr);
+    for (const roam of roamingDirs) {
+      const claudeBase = path.win32.join(roam, 'Claude', 'claude-code');
+      const exes = findClaudeExecutables(claudeBase);
+      if (exes.length > 0) {
+        const r = await runCommand(exes[0]!, ['--version'], { timeoutMs: 4000 });
+        claudeVer = extractSemver(r.stdout || r.stderr);
+        if (claudeVer) break;
+      }
     }
   }
 
   let codexVer: string | null = null;
-  const codexJs = path.win32.join(
-    userProfile,
-    'AppData',
-    'Roaming',
-    'npm',
-    'node_modules',
-    '@openai',
-    'codex',
-    'bin',
-    'codex.js'
-  );
-  if (isFileSafe(codexJs)) {
-    const r = await runCommand(process.execPath, [codexJs, '--version'], { timeoutMs: 4000 });
-    codexVer = extractSemver(r.stdout || r.stderr);
+  for (const roam of roamingDirs) {
+    const codexJs = path.win32.join(
+      roam,
+      'npm',
+      'node_modules',
+      '@openai',
+      'codex',
+      'bin',
+      'codex.js'
+    );
+    if (isFileSafe(codexJs)) {
+      const r = await runCommand(process.execPath, [codexJs, '--version'], { timeoutMs: 4000 });
+      codexVer = extractSemver(r.stdout || r.stderr);
+      if (codexVer) break;
+    }
   }
   if (!codexVer) {
     const r = await runCommand('codex.exe', ['--version'], { timeoutMs: 4000 });
     codexVer = extractSemver(r.stdout || r.stderr);
   }
   if (!codexVer) {
-    const ps1 = path.win32.join(userProfile, 'AppData', 'Roaming', 'npm', 'codex.ps1');
-    if (isFileSafe(ps1)) {
-      const r = await runCommand(
-        'powershell.exe',
-        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1, '--version'],
-        { timeoutMs: 5000 }
-      );
-      codexVer = extractSemver(r.stdout || r.stderr);
+    for (const roam of roamingDirs) {
+      const ps1 = path.win32.join(roam, 'npm', 'codex.ps1');
+      if (isFileSafe(ps1)) {
+        const r = await runCommand(
+          'powershell.exe',
+          ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ps1, '--version'],
+          { timeoutMs: 5000 }
+        );
+        codexVer = extractSemver(r.stdout || r.stderr);
+        if (codexVer) break;
+      }
     }
   }
 
-  const payload = { claude: claudeVer, codex: codexVer };
-  try {
-    fs.writeFileSync(cacheFile, JSON.stringify(payload), 'utf8');
-  } catch {
-    // Ignore cache write errors
+  if (claudeVer || codexVer) {
+    const payload = { claude: claudeVer, codex: codexVer };
+    try {
+      fs.writeFileSync(cacheFile, JSON.stringify(payload), 'utf8');
+    } catch {
+      // Ignore cache write errors
+    }
   }
 
   return {
