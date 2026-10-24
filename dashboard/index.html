@@ -66,27 +66,31 @@ tailwind.config = {
       </div>
       <div>
         <h1 class="font-extrabold tracking-tight text-lg leading-none">MULTI-AI <span class="text-transparent bg-clip-text bg-gradient-to-r from-ag to-cl">MISSION CONTROL</span></h1>
-        <p class="text-[11px] text-slate-400 mt-1">Trung tâm điều phối Claude · Antigravity · Codex</p>
+        <p class="text-[11px] text-slate-400 mt-1" data-i18n="subtitle"></p>
       </div>
     </div>
     <div class="flex-1"></div>
     <div id="modeBadge" class="hidden px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30 items-center gap-1.5">
-      <i data-lucide="flask-conical" class="w-3.5 h-3.5"></i> DEMO DATA
+      <i data-lucide="flask-conical" class="w-3.5 h-3.5"></i> <span data-i18n="demoBadge"></span>
     </div>
     <div id="bridgeBadge" class="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-mono bg-slate-800/70 border border-slate-600/40">
       <span class="w-2 h-2 rounded-full bg-slate-500" id="bridgeDot"></span>
-      <span id="bridgeText">Bridge: đang kiểm tra…</span>
+      <span id="bridgeText" data-i18n="bridgeChecking"></span>
     </div>
     <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
-      <span>Auto-Refresh 10s</span>
+      <span data-i18n="autoRefresh"></span>
       <span class="relative inline-block w-10 h-5">
         <input type="checkbox" id="autoToggle" class="peer sr-only" checked>
         <span class="absolute inset-0 rounded-full bg-slate-700 peer-checked:bg-ag transition"></span>
         <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition peer-checked:translate-x-5"></span>
       </span>
     </label>
+    <div class="flex items-center rounded-lg border border-slate-600/40 bg-slate-800/70 p-0.5 text-xs font-semibold" role="group" aria-label="Language">
+      <button id="langVi" type="button" class="btn px-2.5 py-1 rounded-md" onclick="setLang('vi')">🇻🇳 VI</button>
+      <button id="langEn" type="button" class="btn px-2.5 py-1 rounded-md" onclick="setLang('en')">🇬🇧 EN</button>
+    </div>
     <button id="refreshBtn" class="btn flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-ag/15 text-ag border border-ag/40 hover:bg-ag/25">
-      <i data-lucide="refresh-cw" class="w-3.5 h-3.5" id="refreshIcon"></i> Refresh Now
+      <i data-lucide="refresh-cw" class="w-3.5 h-3.5" id="refreshIcon"></i> <span data-i18n="refreshNow"></span>
     </button>
   </div>
 </header>
@@ -97,11 +101,11 @@ tailwind.config = {
   <section class="glass p-5 sm:p-6 overflow-hidden">
     <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
       <div>
-        <h2 class="font-bold text-base flex items-center gap-2"><i data-lucide="triangle" class="w-4 h-4 text-ag"></i> 3-Way Omni-Directional Orchestration</h2>
-        <p class="text-xs text-slate-400">Bất kỳ đỉnh nào cũng có thể làm Leader và ủy quyền cho 2 đỉnh còn lại.</p>
+        <h2 class="font-bold text-base flex items-center gap-2"><i data-lucide="triangle" class="w-4 h-4 text-ag"></i> <span data-i18n="heroTitle"></span></h2>
+        <p class="text-xs text-slate-400" data-i18n="heroSub"></p>
       </div>
       <div class="px-3 py-1.5 rounded-full text-xs font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5">
-        <i data-lucide="zap" class="w-3.5 h-3.5"></i> ~80% Claude Tokens Saved
+        <i data-lucide="zap" class="w-3.5 h-3.5"></i> <span data-i18n="heroSaved"></span>
       </div>
     </div>
     <div class="grid lg:grid-cols-5 gap-4 items-center">
@@ -120,7 +124,7 @@ tailwind.config = {
           </g>
           <g id="triCenter">
             <circle cx="340" cy="238" r="46" fill="#0b1220" stroke="#334155"/>
-            <text x="340" y="233" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Inter">TOTAL CALLS</text>
+            <text x="340" y="233" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Inter" data-i18n="totalCallsLbl"></text>
             <text id="triTotal" x="340" y="256" text-anchor="middle" fill="#fff" font-size="22" font-weight="800" font-family="Inter">0</text>
           </g>
           <!-- Claude (Top) -->
@@ -166,64 +170,72 @@ tailwind.config = {
   <section class="glass p-5 sm:p-6">
     <div class="flex items-center gap-2 mb-4">
       <i data-lucide="terminal-square" class="w-5 h-5 text-cla"></i>
-      <h2 class="font-bold text-base">Command Dispatcher &amp; SPEC.md Generator</h2>
+      <h2 class="font-bold text-base" data-i18n="dispTitle"></h2>
+      <button id="guideBtn" type="button" class="btn ml-auto px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-slate-800/70 border border-slate-600/40 text-slate-300 hover:bg-slate-700" data-i18n="guideBtn" aria-expanded="true" aria-controls="guideBox"></button>
+    </div>
+    <div id="guideBox" class="grid sm:grid-cols-2 xl:grid-cols-4 gap-2.5 mb-5">
+      <div class="rounded-lg p-3 bg-slate-800/50 border border-slate-700/50"><div class="text-[11px] font-bold text-cx mb-1" data-i18n="g1t"></div><div class="text-[11px] text-slate-300 leading-relaxed" data-i18n-html="g1d"></div></div>
+      <div class="rounded-lg p-3 bg-slate-800/50 border border-slate-700/50"><div class="text-[11px] font-bold text-ag mb-1" data-i18n="g2t"></div><div class="text-[11px] text-slate-300 leading-relaxed" data-i18n-html="g2d"></div></div>
+      <div class="rounded-lg p-3 bg-slate-800/50 border border-slate-700/50"><div class="text-[11px] font-bold text-cla mb-1" data-i18n="g3t"></div><div class="text-[11px] text-slate-300 leading-relaxed" data-i18n-html="g3d"></div></div>
+      <div class="rounded-lg p-3 bg-slate-800/50 border border-slate-700/50"><div class="text-[11px] font-bold text-cl mb-1" data-i18n="g4t"></div><div class="text-[11px] text-slate-300 leading-relaxed" data-i18n-html="g4d"></div></div>
     </div>
     <div class="grid lg:grid-cols-2 gap-6">
       <!-- left -->
       <div class="space-y-4">
         <div>
-          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Dự án (Project) trong C:\laragon\www</label>
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="lblProject"></label>
           <div class="flex gap-2 mt-1.5">
             <select id="projectSel" class="flex-1 px-3 py-2 text-sm"></select>
             <button id="initSpecBtn" class="btn flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold bg-cx/15 text-cx border border-cx/40 hover:bg-cx/25 whitespace-nowrap">
-              <i data-lucide="file-plus-2" class="w-4 h-4"></i> Init SPEC.md
+              <i data-lucide="file-plus-2" class="w-4 h-4"></i> <span data-i18n="initSpec"></span>
             </button>
           </div>
           <div id="projMeta" class="flex flex-wrap gap-2 mt-2 text-[11px]"></div>
         </div>
         <div>
-          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Orchestration Mode</label>
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="lblMode"></label>
           <div class="grid grid-cols-4 gap-2 mt-1.5" id="modeBtns"></div>
         </div>
         <div class="grid sm:grid-cols-3 gap-3">
           <div>
-            <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Role</label>
+            <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="lblRole"></label>
             <select id="roleSel" class="w-full px-3 py-2 text-sm mt-1.5"></select>
           </div>
           <div>
-            <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Model Override</label>
+            <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="lblModel"></label>
             <select id="modelSel" class="w-full px-3 py-2 text-sm mt-1.5 disabled:opacity-40" onchange="resetCmd()"></select>
           </div>
           <div>
-            <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Reasoning Effort</label>
+            <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="lblEffort"></label>
             <select id="effortSel" class="w-full px-3 py-2 text-sm mt-1.5 disabled:opacity-40" onchange="resetCmd()"></select>
           </div>
         </div>
+        <div id="roleHint" class="text-xs px-3 py-2 rounded-lg bg-slate-800/60 border border-slate-700/50 text-slate-300"></div>
         <div>
-          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Prompt / Mô tả tác vụ</label>
-          <textarea id="promptTxt" rows="5" maxlength="4000" class="w-full px-3 py-2 text-sm mt-1.5 scroll resize-y" placeholder="Ví dụ: Đọc SPEC.md và triển khai phần Backend + chạy test…"></textarea>
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="lblPrompt"></label>
+          <textarea id="promptTxt" rows="5" maxlength="4000" class="w-full px-3 py-2 text-sm mt-1.5 scroll resize-y" data-i18n-ph="phPrompt"></textarea>
           <div id="charCnt" class="text-[11px] text-slate-500 text-right mt-1">0 / 4000 chars</div>
         </div>
       </div>
       <!-- right -->
       <div class="space-y-4 flex flex-col">
         <div class="flex items-center justify-between">
-          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">PowerShell Command Preview</label>
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider" data-i18n="lblPreview"></label>
           <span id="cmdState" class="text-[11px] text-slate-500"></span>
         </div>
-        <pre id="cmdOut" class="flex-1 min-h-[180px] max-h-[300px] overflow-auto scroll p-4 rounded-xl bg-black/50 border border-slate-700/60 text-[12px] font-mono text-emerald-300 whitespace-pre-wrap break-all">Nhấn "Generate Command" để tạo lệnh…</pre>
+        <pre id="cmdOut" class="flex-1 min-h-[180px] max-h-[300px] overflow-auto scroll p-4 rounded-xl bg-black/50 border border-slate-700/60 text-[12px] font-mono text-emerald-300 whitespace-pre-wrap break-all"></pre>
         <div class="flex flex-wrap gap-2">
           <button id="genBtn" class="btn flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-cl to-cla text-black hover:brightness-110">
-            <i data-lucide="wand-2" class="w-4 h-4"></i> Generate Command
+            <i data-lucide="wand-2" class="w-4 h-4"></i> <span data-i18n="genBtn"></span>
           </button>
           <button id="copyBtn" class="btn flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-slate-700/60 border border-slate-500/40 hover:bg-slate-700">
-            <i data-lucide="copy" class="w-4 h-4"></i> Copy PowerShell
+            <i data-lucide="copy" class="w-4 h-4"></i> <span data-i18n="copyBtn"></span>
           </button>
           <button id="sendBtn" class="btn flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-ag to-agb text-white hover:brightness-110">
-            <i data-lucide="send" class="w-4 h-4"></i> Send Directly to Antigravity IDE
+            <i data-lucide="send" class="w-4 h-4"></i> <span data-i18n="sendBtn"></span>
           </button>
         </div>
-        <p class="text-[11px] text-slate-500">"Send Directly" chỉ hoạt động với mode <span class="font-mono text-ag">antigravity</span> — gửi tác vụ vào cửa sổ Antigravity đang mở (<span class="font-mono">-NoWait</span>).</p>
+        <p class="text-[11px] text-slate-500" data-i18n-html="sendNote"></p>
         <pre id="dispOut" class="hidden max-h-32 overflow-auto scroll p-3 rounded-lg bg-slate-900/80 border border-slate-700/60 text-[11px] font-mono text-slate-300 whitespace-pre-wrap"></pre>
       </div>
     </div>
@@ -234,7 +246,7 @@ tailwind.config = {
     <div class="glass p-5 xl:col-span-2">
       <div class="flex items-center gap-2 mb-3">
         <i data-lucide="activity" class="w-5 h-5 text-ag"></i>
-        <h2 class="font-bold text-base">Antigravity Sessions</h2>
+        <h2 class="font-bold text-base" data-i18n="sessTitle"></h2>
         <span id="sessCount" class="ml-auto text-[11px] text-slate-400"></span>
       </div>
       <div id="sessList" class="space-y-3 max-h-[460px] overflow-y-auto scroll pr-1"></div>
@@ -242,15 +254,15 @@ tailwind.config = {
     <div class="glass p-5 xl:col-span-3">
       <div class="flex items-center gap-2 mb-3">
         <i data-lucide="scroll-text" class="w-5 h-5 text-cla"></i>
-        <h2 class="font-bold text-base">Audit Log <span class="text-slate-500 font-mono text-xs">multi-ai-audit.jsonl</span></h2>
+        <h2 class="font-bold text-base"><span data-i18n="auditTitle"></span> <span class="text-slate-500 font-mono text-xs">multi-ai-audit.jsonl</span></h2>
         <span id="auditCount" class="ml-auto text-[11px] text-slate-400"></span>
       </div>
       <div class="overflow-auto scroll max-h-[460px] rounded-lg">
         <table class="w-full text-xs">
           <thead class="sticky top-0 bg-card2 text-slate-400 uppercase text-[10px] tracking-wider">
             <tr>
-              <th class="text-left p-2.5">Timestamp</th><th class="text-left p-2.5">Tool</th><th class="text-left p-2.5">Role</th>
-              <th class="text-left p-2.5">Model</th><th class="text-right p-2.5">Chars</th><th class="text-center p-2.5">Score</th><th class="text-left p-2.5">Verdict</th>
+              <th class="text-left p-2.5" data-i18n="thTime"></th><th class="text-left p-2.5" data-i18n="thTool"></th><th class="text-left p-2.5" data-i18n="thRole"></th>
+              <th class="text-left p-2.5" data-i18n="thModel"></th><th class="text-right p-2.5" data-i18n="thChars"></th><th class="text-center p-2.5" data-i18n="thScore"></th><th class="text-left p-2.5" data-i18n="thVerdict"></th>
             </tr>
           </thead>
           <tbody id="auditBody" class="divide-y divide-slate-700/40"></tbody>
@@ -273,6 +285,229 @@ const IS_FILE = location.protocol === 'file:';
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const fmt = n => Number(n || 0).toLocaleString('en-US');
+
+const I18N = {
+  vi: {
+    subtitle: 'Trung tâm điều phối Claude · Antigravity · Codex',
+    demoBadge: 'DỮ LIỆU DEMO',
+    bridgeChecking: 'Bridge: đang kiểm tra…',
+    bridgeOnline: 'Bridge ĐANG CHẠY · {addr}',
+    bridgeOffline: 'Bridge NGOẠI TUYẾN',
+    autoRefresh: 'Tự động làm mới 10s',
+    refreshNow: 'Làm mới ngay',
+    heroTitle: 'Điều phối 3 chiều đa hướng',
+    heroSub: 'Bất kỳ đỉnh nào cũng có thể làm Leader và ủy quyền cho 2 đỉnh còn lại.',
+    heroSaved: '~80% Token Claude được tiết kiệm',
+    totalCallsLbl: 'TỔNG LƯỢT GỌI',
+    dispTitle: 'Trạm Điều Phối Lệnh & Khởi tạo SPEC.md',
+    guideBtn: '? Hướng dẫn',
+    g1t: 'Bước 1 · Init SPEC.md',
+    g1d: 'Chọn dự án trong <span class="font-mono">C:\\laragon\\www</span>. Nếu chưa có <b>SPEC.md</b>, bấm <b>Init SPEC.md</b> để tạo file hợp đồng kiến trúc chuẩn.',
+    g2t: 'Bước 2 · Mode & Role',
+    g2d: 'Chọn AI giao việc: <b>Antigravity</b> làm Backend/Test, <b>Claude</b> làm Kiến trúc/Frontend/Review, <b>Codex</b> kiểm tra bảo mật/viết thuật toán, <b>Council</b> chạy hội đồng chấm điểm song song.',
+    g3t: 'Bước 3 · Model & Effort',
+    g3d: 'Để <b>Auto</b> (khuyên dùng, chuẩn tiết kiệm 80% token) hoặc chọn ép mô hình / mức suy luận cụ thể.',
+    g4t: 'Bước 4 · Tạo / Sao chép / Gửi',
+    g4d: 'Nhập yêu cầu → bấm <b>Gửi thẳng vào Antigravity IDE</b> (nếu giao cho Antigravity đang mở) hoặc <b>Tạo lệnh / Sao chép lệnh</b> để dán vào Terminal.',
+    lblProject: '1. Chọn Dự Án (trong C:\\laragon\\www)',
+    initSpec: 'Init SPEC.md',
+    lblMode: '2. Chọn Chế Độ Điều Phối (AI nhận việc)',
+    lblRole: '3. Vai trò (Role)',
+    lblModel: 'Ép dùng Mô hình (Model)',
+    lblEffort: 'Mức suy luận (Effort)',
+    lblPrompt: '4. Nội dung giao việc (Prompt)',
+    phPrompt: 'Ví dụ: Đọc SPEC.md và triển khai phần Backend + chạy test…',
+    chars: '{n} / 4000 ký tự',
+    lblPreview: 'Xem trước lệnh PowerShell',
+    cmdPlaceholder: 'Nhấn "Tạo lệnh PowerShell" để tạo lệnh…',
+    genBtn: 'Tạo lệnh PowerShell',
+    copyBtn: 'Sao chép lệnh',
+    sendBtn: 'Gửi thẳng vào Antigravity IDE',
+    sendNote: '"Gửi thẳng" chỉ hoạt động với mode <span class="font-mono text-ag">antigravity</span> — gửi tác vụ vào cửa sổ Antigravity đang mở (<span class="font-mono">-NoWait</span>).',
+    autoModel: 'Tự động (mặc định theo Role)',
+    autoEffort: 'Tự động (mặc định)',
+    sessTitle: 'Phiên Antigravity',
+    auditTitle: 'Nhật ký Audit',
+    thTime: 'Thời gian', thTool: 'Công cụ', thRole: 'Role', thModel: 'Model', thChars: 'Ký tự', thScore: 'Điểm', thVerdict: 'Kết luận',
+    sessCount: '{n} phiên',
+    noPreview: '(không có bản xem trước)',
+    steps: '{n} bước',
+    noSess: 'Chưa có phiên Antigravity nào.',
+    auditCount: '{n} bản ghi gần nhất',
+    noAudit: 'Chưa có bản ghi audit.',
+    byRole: 'Lượt gọi theo Role',
+    byTool: 'Lượt gọi theo Công cụ',
+    updated: 'Cập nhật: ',
+    demoSuffix: ' (demo)',
+    kTotal: 'Tổng lượt gọi AI',
+    kTotalSub: '{n} ký tự prompt',
+    kSaved: 'Token Claude tiết kiệm',
+    kSavedSub: 'Nhờ ủy quyền cho Antigravity / Codex',
+    kRate: 'Tỷ lệ duyệt (Approved)',
+    kActive: 'Phiên đang mở',
+    kActiveSub: '{n} hội thoại gần đây',
+    installed: 'ĐÃ CÀI', missing: 'THIẾU',
+    apiLost: 'Mất kết nối tạm thời tới api.php: {msg}',
+    fileDemo: 'Mở qua file:// — dùng dữ liệu demo. Hãy chạy qua Laragon để xem dữ liệu thật.',
+    noApi: 'Không kết nối được api.php — dùng dữ liệu demo.',
+    pickProj: 'Hãy chọn dự án trước.',
+    emptyPrompt: 'Nội dung giao việc đang trống.',
+    dispatched: '✔ đã gửi',
+    cmdOnly: 'chỉ tạo lệnh',
+    noOutput: '(không có kết quả)',
+    noDirect: 'Không thể gửi trực tiếp (backend không khả dụng).',
+    offlineCmd: 'ngoại tuyến · lệnh dựng cục bộ',
+    cmdOk: 'Đã tạo lệnh PowerShell.',
+    copyOk: 'Đã sao chép lệnh PowerShell!',
+    switchedAg: 'Đã chuyển sang mode Antigravity (send-latest). Bấm Gửi lần nữa để xác nhận.',
+    sentOk: 'Đã gửi tác vụ tới Antigravity IDE!',
+    notDisp: 'Backend đã tạo lệnh nhưng chưa gửi đi.',
+    specCreated: 'Đã tạo SPEC.md cho {name}',
+    specExists: 'SPEC.md đã tồn tại.',
+    demoSpec: '[Demo] Giả lập tạo SPEC.md cho {name}',
+    hints: {
+      'antigravity:send-latest': 'Gửi thẳng yêu cầu vào cửa sổ Antigravity IDE đang mở của dự án này để làm Backend/Core/Test.',
+      'antigravity:new': 'Mở một phiên hội thoại Antigravity mới tinh cho dự án và giao việc.',
+      'antigravity:status': 'Kiểm tra trạng thái kết nối Live Self-Healing Bridge và tiến trình Antigravity.',
+      'antigravity:wait': 'Chờ phiên Antigravity hiện tại hoàn tất (DONE) và lấy toàn bộ phản hồi.',
+      'claude:architect': 'Claude Opus (High Effort): Thiết kế kiến trúc, chốt SPEC.md và chia việc Backend.',
+      'claude:frontend': 'Claude Sonnet: Viết 100% code Giao diện (HTML/CSS/JS/React/Vue/Tailwind).',
+      'claude:reviewer': 'Claude Sonnet: Chấm điểm (X/10) bản git diff hiện tại cho đến khi đạt APPROVED.',
+      'claude:ui-tweak': 'Claude Haiku (Low Effort): Tinh chỉnh nhanh CSS, bố cục hoặc sửa lỗi hiển thị nhỏ.',
+      'codex:review-diff': 'OpenAI Codex: Kiểm tra độc lập git diff, bắt lỗi bảo mật, race-condition và logic.',
+      'codex:critic': 'OpenAI Codex: Phản biện thiết kế kiến trúc và tìm lỗ hổng tiềm ẩn.',
+      'codex:coder': 'OpenAI Codex: Viết thuật toán phức tạp hoặc Unit/Integration Test trên nhánh riêng.',
+      'council:reviewer': 'Hội đồng AI Song Song: Chạy đồng thời cả Claude Sonnet + OpenAI Codex để chấm điểm git diff nhanh gấp đôi.'
+    }
+  },
+  en: {
+    subtitle: 'Orchestration hub for Claude · Antigravity · Codex',
+    demoBadge: 'DEMO DATA',
+    bridgeChecking: 'Bridge: checking…',
+    bridgeOnline: 'Bridge ONLINE · {addr}',
+    bridgeOffline: 'Bridge OFFLINE',
+    autoRefresh: 'Auto-Refresh 10s',
+    refreshNow: 'Refresh Now',
+    heroTitle: '3-Way Omni-Directional Orchestration',
+    heroSub: 'Any vertex can act as Leader and delegate to the other two.',
+    heroSaved: '~80% Claude Tokens Saved',
+    totalCallsLbl: 'TOTAL CALLS',
+    dispTitle: 'Command Dispatcher & SPEC.md Generator',
+    guideBtn: '? How it works',
+    g1t: 'Step 1 · Init SPEC.md',
+    g1d: 'Pick a project in <span class="font-mono">C:\\laragon\\www</span>. If it has no <b>SPEC.md</b> yet, click <b>Init SPEC.md</b> to create the standard architecture contract.',
+    g2t: 'Step 2 · Mode & Role',
+    g2d: 'Choose which AI gets the task: <b>Antigravity</b> for Backend/Tests, <b>Claude</b> for Architecture/Frontend/Review, <b>Codex</b> for security checks/algorithms, <b>Council</b> for a parallel scoring panel.',
+    g3t: 'Step 3 · Model & Effort',
+    g3d: 'Keep <b>Auto</b> (recommended, the 80% token-saving standard) or force a specific model / reasoning effort.',
+    g4t: 'Step 4 · Generate / Copy / Send',
+    g4d: 'Enter your request → click <b>Send Directly to Antigravity IDE</b> (if Antigravity is open) or <b>Generate / Copy Command</b> and paste it into a Terminal.',
+    lblProject: '1. Project (in C:\\laragon\\www)',
+    initSpec: 'Init SPEC.md',
+    lblMode: '2. Orchestration Mode (which AI takes the task)',
+    lblRole: '3. Role',
+    lblModel: 'Model Override',
+    lblEffort: 'Reasoning Effort',
+    lblPrompt: '4. Task Prompt',
+    phPrompt: 'e.g. Read SPEC.md and implement the Backend + run tests…',
+    chars: '{n} / 4000 chars',
+    lblPreview: 'PowerShell Command Preview',
+    cmdPlaceholder: 'Click "Generate Command" to build the command…',
+    genBtn: 'Generate Command',
+    copyBtn: 'Copy Command',
+    sendBtn: 'Send Directly to Antigravity IDE',
+    sendNote: '"Send Directly" only works with mode <span class="font-mono text-ag">antigravity</span> — it sends the task into the open Antigravity window (<span class="font-mono">-NoWait</span>).',
+    autoModel: 'Auto (Default per Role)',
+    autoEffort: 'Auto (Default)',
+    sessTitle: 'Antigravity Sessions',
+    auditTitle: 'Audit Log',
+    thTime: 'Timestamp', thTool: 'Tool', thRole: 'Role', thModel: 'Model', thChars: 'Chars', thScore: 'Score', thVerdict: 'Verdict',
+    sessCount: '{n} sessions',
+    noPreview: '(no preview)',
+    steps: '{n} steps',
+    noSess: 'No Antigravity sessions yet.',
+    auditCount: '{n} most recent records',
+    noAudit: 'No audit records yet.',
+    byRole: 'Calls by Role',
+    byTool: 'Calls by Tool',
+    updated: 'Updated: ',
+    demoSuffix: ' (demo)',
+    kTotal: 'Total AI Calls',
+    kTotalSub: '{n} prompt chars',
+    kSaved: 'Est. Claude Tokens Saved',
+    kSavedSub: 'By delegating to Antigravity / Codex',
+    kRate: 'Approval Rate',
+    kActive: 'Active Sessions',
+    kActiveSub: '{n} recent conversations',
+    installed: 'INSTALLED', missing: 'MISSING',
+    apiLost: 'Temporarily lost connection to api.php: {msg}',
+    fileDemo: 'Opened via file:// — using demo data. Run through Laragon to see live data.',
+    noApi: 'Cannot reach api.php — using demo data.',
+    pickProj: 'Please select a project first.',
+    emptyPrompt: 'Task prompt is empty.',
+    dispatched: '✔ dispatched',
+    cmdOnly: 'command only',
+    noOutput: '(no output)',
+    noDirect: 'Cannot send directly (backend unavailable).',
+    offlineCmd: 'offline · command built locally',
+    cmdOk: 'PowerShell command generated.',
+    copyOk: 'PowerShell command copied!',
+    switchedAg: 'Switched to Antigravity mode (send-latest). Click Send again to confirm.',
+    sentOk: 'Task sent to Antigravity IDE!',
+    notDisp: 'Backend built the command but did not dispatch it.',
+    specCreated: 'SPEC.md created for {name}',
+    specExists: 'SPEC.md already exists.',
+    demoSpec: '[Demo] Simulated SPEC.md creation for {name}',
+    hints: {
+      'antigravity:send-latest': 'Send task directly into the active Antigravity IDE conversation for this project.',
+      'antigravity:new': 'Start a brand-new Antigravity conversation for this project and send the task.',
+      'antigravity:status': 'Check Live Self-Healing Bridge connection and Antigravity status.',
+      'antigravity:wait': 'Wait until the current Antigravity session reaches DONE and return full output.',
+      'claude:architect': 'Claude Opus (High Effort): Design architecture, finalize SPEC.md, and plan Backend tasks.',
+      'claude:frontend': 'Claude Sonnet: Write 100% of Frontend UI code (HTML/CSS/JS/React/Vue/Tailwind).',
+      'claude:reviewer': 'Claude Sonnet: Grade current git diff (X/10) until APPROVED.',
+      'claude:ui-tweak': 'Claude Haiku (Low Effort): Quick CSS, layout, or minor visual tweaks.',
+      'codex:review-diff': 'OpenAI Codex: Independently audit git diff for security bugs, race conditions, and logic.',
+      'codex:critic': 'OpenAI Codex: Critique system architecture and uncover edge-case vulnerabilities.',
+      'codex:coder': 'OpenAI Codex: Write complex algorithms or Unit/Integration tests in an isolated worktree.',
+      'council:reviewer': 'Parallel AI Council: Run both Claude Sonnet + OpenAI Codex simultaneously to review git diff 2x faster.'
+    }
+  }
+};
+let LANG = localStorage.getItem('maw_lang') === 'en' ? 'en' : 'vi';
+function t(key, vars) {
+  let s = I18N[LANG][key] ?? I18N.vi[key] ?? key;
+  if (vars) for (const k in vars) s = s.replaceAll('{' + k + '}', vars[k]);
+  return s;
+}
+function updateHint() {
+  const el = $('roleHint');
+  if (el) el.textContent = I18N[LANG].hints[state.mode + ':' + $('roleSel').value] || '';
+}
+function updateChars() {
+  const n = $('promptTxt').value.length;
+  const c = $('charCnt');
+  c.textContent = t('chars', { n });
+  c.classList.toggle('text-rose-400', n >= 4000);
+  c.classList.toggle('text-amber-400', n > 3500 && n < 4000);
+  c.classList.toggle('text-slate-500', n <= 3500);
+}
+function setLang(lang) {
+  LANG = lang === 'en' ? 'en' : 'vi';
+  localStorage.setItem('maw_lang', LANG);
+  document.documentElement.lang = LANG;
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-html]').forEach(el => { el.innerHTML = t(el.dataset.i18nHtml); });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
+  const on = 'bg-ag/25 text-ag', off = 'text-slate-400 hover:text-slate-200';
+  $('langVi').className = 'btn px-2.5 py-1 rounded-md ' + (LANG === 'vi' ? on : off);
+  $('langEn').className = 'btn px-2.5 py-1 rounded-md ' + (LANG === 'en' ? on : off);
+  updateChars();
+  updateHint();
+  populateOverrides();
+  if (!state.lastCmd) $('cmdOut').textContent = t('cmdPlaceholder');
+  if (state.data) render();
+}
 
 const ROLES = {
   antigravity: ['send-latest', 'new', 'status', 'wait'],
@@ -375,11 +610,11 @@ async function load(manual) {
     state.demo = false;
   } catch (e) {
     if (state.data && !state.demo && !IS_FILE) {
-      toast('Mất kết nối tạm thời tới api.php: ' + e.message, 'err');
+      toast(t('apiLost', { msg: e.message }), 'err');
     } else {
       state.data = demoData();
       state.demo = true;
-      if (manual || !state.warned) toast(IS_FILE ? 'Mở qua file:// — dùng demo data. Hãy chạy qua Laragon để xem live.' : 'Không kết nối được api.php — dùng demo data.', 'warn');
+      if (manual || !state.warned) toast(IS_FILE ? t('fileDemo') : t('noApi'), 'warn');
       state.warned = true;
     }
   } finally {
@@ -418,7 +653,7 @@ function render() {
   // bridge
   const b = d.bridge || {};
   $('bridgeDot').className = 'w-2 h-2 rounded-full pulse-dot ' + (b.online ? 'bg-emerald-400' : 'bg-red-500');
-  $('bridgeText').textContent = b.online ? `Bridge ONLINE · ${b.ls_address}` : 'Bridge OFFLINE';
+  $('bridgeText').textContent = b.online ? t('bridgeOnline', { addr: b.ls_address }) : t('bridgeOffline');
   $('bridgeBadge').title = `LS ${b.ls_version || '—'} · CSRF ${b.csrf_masked || '—'} · ${b.updated_at || ''}`;
 
   // triangle
@@ -443,7 +678,7 @@ function render() {
       <div class="w-10 h-10 rounded-lg grid place-items-center ${cls}"><i data-lucide="${icon}" class="w-5 h-5"></i></div>
       <div class="min-w-0 flex-1">
         <div class="flex items-center gap-2"><span class="font-bold text-sm">${name}</span>
-          ${inst ? badge('INSTALLED', 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40') : badge('MISSING', 'text-red-300 bg-red-500/10 border-red-500/40')}</div>
+          ${inst ? badge(t('installed'), 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40') : badge(t('missing'), 'text-red-300 bg-red-500/10 border-red-500/40')}</div>
         <div class="font-mono text-xs text-slate-300 mt-1">${esc(cmd)}</div>
         <div class="text-[11px] text-slate-400 mt-0.5 truncate">${esc(line1)}</div>
         <div class="text-[11px] text-slate-500 truncate">${esc(line2)}</div>
@@ -469,17 +704,17 @@ function render() {
       <div class="text-[11px] text-slate-500 mt-1">${sub}</div>
     </div>`;
   $('kpiRow').innerHTML =
-    kpi('Total AI Calls', fmt(a.total_calls), `${fmt(a.total_prompt_chars)} prompt chars`, 'phone-call', '#F59E0B') +
-    kpi('Est. Tokens Saved', fmt(a.estimated_tokens_saved), 'Nhờ ủy quyền cho Antigravity / Codex', 'piggy-bank', '#10B981') +
-    kpi('Approval Rate', rate + '%', `${v.APPROVED || 0} APPROVED · ${v.CHANGES_REQUESTED || 0} CHANGES_REQUESTED`, 'badge-check', '#06B6D4') +
-    kpi('Active Sessions', activeSess, `${(d.conversations || []).length} conversations gần đây`, 'radio-tower', '#3B82F6');
+    kpi(t('kTotal'), fmt(a.total_calls), t('kTotalSub', { n: fmt(a.total_prompt_chars) }), 'phone-call', '#F59E0B') +
+    kpi(t('kSaved'), fmt(a.estimated_tokens_saved), t('kSavedSub'), 'piggy-bank', '#10B981') +
+    kpi(t('kRate'), rate + '%', `${v.APPROVED || 0} APPROVED · ${v.CHANGES_REQUESTED || 0} CHANGES_REQUESTED`, 'badge-check', '#06B6D4') +
+    kpi(t('kActive'), activeSess, t('kActiveSub', { n: (d.conversations || []).length }), 'radio-tower', '#3B82F6');
 
   renderProjects();
   populateOverrides();
 
   // sessions
   const cv = d.conversations || [];
-  $('sessCount').textContent = `${cv.length} phiên`;
+  $('sessCount').textContent = t('sessCount', { n: cv.length });
   $('sessList').innerHTML = cv.length ? cv.map(c => `
     <div class="rounded-xl p-3.5 bg-card/70 border ${c.is_active ? 'border-ag/50 glow-ag' : 'border-slate-700/50'}">
       <div class="flex items-center gap-2">
@@ -487,16 +722,16 @@ function render() {
         <span class="font-mono text-[11px] text-slate-300" title="${esc(c.id)}">${esc(String(c.id).slice(0, 8))}…${esc(String(c.id).slice(-4))}</span>
         <span class="ml-auto">${statusBadge(c.last_status)}</span>
       </div>
-      <p class="text-xs text-slate-300 mt-2 line-clamp-2">${esc(c.last_preview || '(không có preview)')}</p>
+      <p class="text-xs text-slate-300 mt-2 line-clamp-2">${esc(c.last_preview || t('noPreview'))}</p>
       <div class="flex items-center gap-3 text-[11px] text-slate-500 mt-2">
-        <span class="flex items-center gap-1"><i data-lucide="footprints" class="w-3 h-3"></i> ${fmt(c.step_count)} steps</span>
+        <span class="flex items-center gap-1"><i data-lucide="footprints" class="w-3 h-3"></i> ${t('steps', { n: fmt(c.step_count) })}</span>
         <span class="flex items-center gap-1"><i data-lucide="clock" class="w-3 h-3"></i> ${esc(c.updated_at)}</span>
       </div>
-    </div>`).join('') : '<p class="text-xs text-slate-500 text-center py-8">Chưa có phiên Antigravity nào.</p>';
+    </div>`).join('') : `<p class="text-xs text-slate-500 text-center py-8">${t('noSess')}</p>`;
 
   // audit
   const logs = a.recent_logs || [];
-  $('auditCount').textContent = `${logs.length} bản ghi gần nhất`;
+  $('auditCount').textContent = t('auditCount', { n: logs.length });
   $('auditBody').innerHTML = logs.length ? logs.map(l => {
     const sc = l.Score ? `<span class="font-bold ${parseInt(l.Score) >= 8 ? 'text-emerald-300' : parseInt(l.Score) >= 6 ? 'text-amber-300' : 'text-red-300'}">${esc(l.Score)}</span>` : '<span class="text-slate-600">—</span>';
     return `<tr class="hover:bg-slate-800/40">
@@ -507,7 +742,7 @@ function render() {
       <td class="p-2.5 text-right font-mono">${fmt(l.PromptChars)}</td>
       <td class="p-2.5 text-center">${sc}</td>
       <td class="p-2.5">${verdictBadge(l.Verdict)}</td></tr>`;
-  }).join('') : '<tr><td colspan="7" class="p-8 text-center text-slate-500">Chưa có bản ghi audit.</td></tr>';
+  }).join('') : `<tr><td colspan="7" class="p-8 text-center text-slate-500">${t('noAudit')}</td></tr>`;
 
   // breakdown bars
   const bars = (title, obj, col) => {
@@ -518,9 +753,9 @@ function render() {
         <div class="flex-1 h-2 rounded-full bg-slate-800 overflow-hidden"><div class="h-full rounded-full" style="width:${n / max * 100}%;background:${col}"></div></div>
         <span class="w-6 text-right font-mono text-slate-400">${n}</span></div>`).join('') || '<p class="text-xs text-slate-600">—</p>') + '</div>';
   };
-  $('breakdown').innerHTML = bars('Calls by Role', a.by_role, 'linear-gradient(90deg,#D97757,#F59E0B)') + bars('Calls by Tool', a.by_tool, 'linear-gradient(90deg,#06B6D4,#10B981)');
+  $('breakdown').innerHTML = bars(t('byRole'), a.by_role, 'linear-gradient(90deg,#D97757,#F59E0B)') + bars(t('byTool'), a.by_tool, 'linear-gradient(90deg,#06B6D4,#10B981)');
 
-  $('lastUpdate').textContent = 'Cập nhật: ' + new Date().toLocaleTimeString('vi-VN') + (state.demo ? ' (demo)' : '');
+  $('lastUpdate').textContent = t('updated') + new Date().toLocaleTimeString(LANG === 'vi' ? 'vi-VN' : 'en-US') + (state.demo ? t('demoSuffix') : '');
   lucide.createIcons();
 }
 
@@ -545,11 +780,12 @@ function renderModes() {
       <i data-lucide="${m.icon}" class="w-4 h-4"></i>${m.label}</button>`).join('');
   document.querySelectorAll('#modeBtns button').forEach(b => b.onclick = () => pickMode(b.dataset.m));
   $('roleSel').innerHTML = ROLES[state.mode].map(r => `<option>${r}</option>`).join('');
+  updateHint();
   lucide.createIcons();
 }
 function resetCmd() {
   state.lastCmd = '';
-  $('cmdOut').textContent = 'Nhấn "Generate Command" để tạo lệnh…';
+  $('cmdOut').textContent = t('cmdPlaceholder');
   $('cmdState').textContent = '';
 }
 const MODELS = {
@@ -574,8 +810,8 @@ function populateOverrides() {
   const tool = state.data?.tools?.[state.mode];
   const models = (state.mode === 'claude' || state.mode === 'codex') && tool?.cli_models?.length ? tool.cli_models : MODELS[state.mode];
   const efforts = (state.mode === 'claude' || state.mode === 'codex') && tool?.efforts?.length ? tool.efforts : EFFORTS[state.mode];
-  fill('modelSel', 'Auto (Default theo Role)', models);
-  fill('effortSel', 'Auto (Default)', efforts);
+  fill('modelSel', t('autoModel'), models);
+  fill('effortSel', t('autoEffort'), efforts);
 }
 function pickMode(m) { state.mode = m; renderModes(); populateOverrides(); resetCmd(); }
 
@@ -611,18 +847,18 @@ function localCommand(p) {
 
 async function generate(exec) {
   const p = payload(exec);
-  if (!p.project_path) { toast('Hãy chọn project trước.', 'warn'); return null; }
+  if (!p.project_path) { toast(t('pickProj'), 'warn'); return null; }
   const needsPrompt = exec === true || p.mode === 'claude'
     || (p.mode === 'codex' && ['critic', 'coder'].includes(p.role))
     || (p.mode === 'antigravity' && ['send-latest', 'new'].includes(p.role));
-  if (needsPrompt && !p.prompt) { toast('Prompt đang trống.', 'warn'); return null; }
+  if (needsPrompt && !p.prompt) { toast(t('emptyPrompt'), 'warn'); return null; }
   setBusy(true);
   try {
     const r = await api('dispatch', p);
     state.lastCmd = r.command;
     $('cmdOut').textContent = r.command;
-    $('cmdState').textContent = r.dispatched ? '✔ đã dispatch' : 'chỉ tạo lệnh';
-    if (exec || r.output) { $('dispOut').classList.remove('hidden'); $('dispOut').textContent = r.output || '(không có output)'; }
+    $('cmdState').textContent = r.dispatched ? t('dispatched') : t('cmdOnly');
+    if (exec || r.output) { $('dispOut').classList.remove('hidden'); $('dispOut').textContent = r.output || t('noOutput'); }
     return r;
   } catch (e) {
     if (!e.offline) {
@@ -631,10 +867,10 @@ async function generate(exec) {
       $('cmdState').textContent = 'error · ' + e.message;
       return null;
     }
-    if (exec) { toast('Không thể gửi trực tiếp (backend không khả dụng).', 'err'); return null; }
+    if (exec) { toast(t('noDirect'), 'err'); return null; }
     state.lastCmd = localCommand(p);
     $('cmdOut').textContent = state.lastCmd;
-    $('cmdState').textContent = 'offline · lệnh dựng cục bộ';
+    $('cmdState').textContent = t('offlineCmd');
     return { ok: true, command: state.lastCmd, dispatched: false };
   } finally {
     setBusy(false);
@@ -646,48 +882,45 @@ function setBusy(busy) {
   $('genBtn').disabled = busy;
 }
 
-$('genBtn').onclick = async () => { const r = await generate(false); if (r) toast('Đã tạo lệnh PowerShell.', 'ok'); };
+$('genBtn').onclick = async () => { const r = await generate(false); if (r) toast(t('cmdOk'), 'ok'); };
 $('copyBtn').onclick = async () => {
   let txt = state.lastCmd;
   if (!txt) { const r = await generate(false); if (!r) return; txt = r.command; }
   try { await navigator.clipboard.writeText(txt); }
   catch { const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
-  toast('Đã copy lệnh PowerShell!', 'ok');
+  toast(t('copyOk'), 'ok');
 };
 $('sendBtn').onclick = async () => {
   if (state.mode !== 'antigravity' || !['send-latest', 'new'].includes($('roleSel').value)) {
     pickMode('antigravity');
-    toast('Đã chuyển sang mode Antigravity (send-latest). Bấm Send lần nữa để xác nhận gửi lệnh.', 'ok');
+    toast(t('switchedAg'), 'ok');
     return;
   }
-  if (!$('promptTxt').value.trim()) { toast('Prompt đang trống.', 'warn'); return; }
+  if (!$('promptTxt').value.trim()) { toast(t('emptyPrompt'), 'warn'); return; }
   const r = await generate(true);
-  if (r) { r.dispatched ? toast('Đã gửi tác vụ tới Antigravity IDE!', 'ok') : toast('Backend tạo lệnh nhưng chưa dispatch.', 'warn'); setTimeout(() => load(), 1500); }
+  if (r) { r.dispatched ? toast(t('sentOk'), 'ok') : toast(t('notDisp'), 'warn'); setTimeout(() => load(), 1500); }
 };
 $('initSpecBtn').onclick = async () => {
   const sel = $('projectSel');
-  if (!sel.value) return toast('Chưa chọn project.', 'warn');
+  if (!sel.value) return toast(t('pickProj'), 'warn');
   const name = sel.selectedOptions[0].dataset.name;
   try {
     const r = await api('init_spec', { project_path: sel.value, project_name: name });
-    toast(r.created ? `Đã tạo SPEC.md cho ${name}` : (r.message || 'SPEC.md đã tồn tại.'), r.created ? 'ok' : 'info');
+    toast(r.created ? t('specCreated', { name }) : (r.message || t('specExists')),r.created ? 'ok' : 'info');
     load();
   } catch (e) {
     if (!e.offline) { toast(e.message, 'err'); return; }
-    toast('[Demo] Giả lập tạo SPEC.md cho ' + name, 'warn');
+    toast(t('demoSpec', { name }), 'warn');
     const p = state.data.projects.find(x => x.path === sel.value); if (p) { p.has_spec = true; projMeta(); }
   }
 };
 $('projectSel').onchange = () => { projMeta(); resetCmd(); };
-$('roleSel').onchange = resetCmd;
-$('promptTxt').oninput = e => {
-  const n = e.target.value.length;
-  const c = $('charCnt');
-  c.textContent = `${n} / 4000 chars`;
-  c.classList.toggle('text-rose-400', n >= 4000);
-  c.classList.toggle('text-amber-400', n > 3500 && n < 4000);
-  c.classList.toggle('text-slate-500', n <= 3500);
-  resetCmd();
+$('roleSel').onchange = () => { resetCmd(); updateHint(); };
+$('promptTxt').oninput = () => { updateChars(); resetCmd(); };
+$('guideBtn').onclick = () => {
+  const box = $('guideBox');
+  const hidden = box.classList.toggle('hidden');
+  $('guideBtn').setAttribute('aria-expanded', String(!hidden));
 };
 $('refreshBtn').onclick = () => load(true);
 $('autoToggle').onchange = setAuto;
@@ -698,7 +931,7 @@ function setAuto() {
 }
 
 renderModes();
-populateOverrides();
+setLang(LANG);
 setAuto();
 load();
 </script>
