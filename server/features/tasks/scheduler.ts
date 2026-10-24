@@ -22,6 +22,7 @@ import {
   getCards,
   getConfig,
   getTasksFile,
+  isJobIdAttachedToAnyCard,
   patchCard,
   type Card,
   type TaskAttempt,
@@ -166,15 +167,35 @@ export function tryAcquireLeaderLock(ctx: MawFeatureContext): boolean {
 
     if (movedToken !== judgedStaleToken) {
       // We moved someone else's fresh lock! Put it back and stay passive
+      let restored = false;
       try {
         fs.linkSync(staleFile, lockFile);
-      } catch {
-        // If lockFile already exists, leave it
+        restored = true;
+      } catch (err: unknown) {
+        const code = (err as { code?: string })?.code;
+        if (code === 'EEXIST' || fs.existsSync(lockFile)) {
+          // If linkSync restore fails because a lock exists, unlink moved copy (someone holds the lock)
+          try {
+            fs.unlinkSync(staleFile);
+          } catch {}
+          return false;
+        }
+        // If it fails for any other reason, try renameSync(moved, lockFile) once and keep moved file if that fails too
+        try {
+          fs.renameSync(staleFile, lockFile);
+          restored = true;
+        } catch {
+          // Keep moved file if rename fails too
+        }
       }
-      try {
-        fs.unlinkSync(staleFile);
-      } catch {
-        // ignore
+
+      // Never delete the moved file unless the lock file exists again
+      if (restored && fs.existsSync(lockFile)) {
+        try {
+          if (fs.existsSync(staleFile)) {
+            fs.unlinkSync(staleFile);
+          }
+        } catch {}
       }
       return false;
     }
@@ -318,11 +339,14 @@ export async function reconcileStartingCard(
     }
   }
 
+  const expectedAt = card.starting?.at;
+  const expectedPromptSha = card.starting?.prompt_sha;
+  const startingAtTs = expectedAt ? Math.floor(Date.parse(expectedAt) / 1000) : 0;
+
   let bestMatch: { jobId: string; meta: JobMeta; startedTs: number } | null = null;
-  const startingAtTs = card.starting ? Math.floor(Date.parse(card.starting.at) / 1000) : 0;
 
   try {
-    if (fs.existsSync(ctx.paths.jobsDir)) {
+    if (fs.existsSync(ctx.paths.jobsDir) && expectedPromptSha) {
       const jobFiles = fs
         .readdirSync(ctx.paths.jobsDir)
         .filter((f) => f.startsWith('job_') && f.endsWith('.json'));
@@ -345,7 +369,7 @@ export async function reconcileStartingCard(
           if (projectMatches && metaStartedTs >= startingAtTs - 5) {
             let matched = false;
             const metaSha = (meta as unknown as Record<string, unknown>).prompt_sha256;
-            if (metaSha && metaSha === card.starting?.prompt_sha) {
+            if (metaSha && metaSha === expectedPromptSha) {
               matched = true;
             } else {
               const promptFile = path.win32.join(ctx.paths.jobsDir, `${meta.job_id}.prompt.txt`);
@@ -353,7 +377,7 @@ export async function reconcileStartingCard(
                 let promptContent = fs.readFileSync(promptFile, 'utf8');
                 if (promptContent.charCodeAt(0) === 0xfeff) promptContent = promptContent.slice(1);
                 const sha = crypto.createHash('sha256').update(promptContent).digest('hex');
-                if (sha === card.starting?.prompt_sha) {
+                if (sha === expectedPromptSha) {
                   matched = true;
                 }
               }
@@ -375,43 +399,67 @@ export async function reconcileStartingCard(
     // skip
   }
 
-  if (bestMatch) {
-    usedJobIds.add(bestMatch.jobId);
-    const kind =
-      card.pending_run?.kind || (card.attempts.length === 0 ? 'start' : 'retry');
-    const attempt: TaskAttempt = {
-      n: card.attempts.length + 1,
-      job_id: bestMatch.jobId,
-      agent: card.agent,
-      role: card.role,
-      mode: card.mode,
-      kind,
-      started_at: bestMatch.meta.started_at ?? new Date().toISOString(),
-      status: 'RUNNING',
-      exit_code: null,
-      prompt_chars: card.prompt.length,
-    };
+  let outcome: 'adopted' | 'failed' | 'aborted' = 'aborted';
+  const patched = await patchCard(ctx, card.id, (freshCard, freshAllTasks) => {
+    // Return false (no write) unless fresh card is still queued and starting equals expected
+    if (
+      freshCard.status !== 'queued' ||
+      !freshCard.starting ||
+      freshCard.starting.at !== expectedAt ||
+      freshCard.starting.prompt_sha !== expectedPromptSha
+    ) {
+      outcome = 'aborted';
+      return false;
+    }
 
-    const patched = await patchCard(ctx, card.id, (c) => {
-      c.status = 'running';
-      c.job_id = bestMatch!.jobId;
-      c.status_reason = '';
-      c.started_at = c.started_at ?? attempt.started_at;
-      c.pending_run = null;
-      c.starting = null;
-      c.attempts.push(attempt);
-      if (c.attempts.length > 20) c.attempts.shift();
-    });
-    return { adopted: true, card: patched };
-  } else {
-    const patched = await patchCard(ctx, card.id, (c) => {
-      c.status = 'failed';
-      c.status_reason =
+    // For adoption also re-check that no card holds that job id
+    const canAdopt =
+      bestMatch !== null && !isJobIdAttachedToAnyCard(freshAllTasks, bestMatch.jobId);
+
+    if (canAdopt && bestMatch) {
+      outcome = 'adopted';
+      const kind =
+        freshCard.pending_run?.kind || (freshCard.attempts.length === 0 ? 'start' : 'retry');
+      const attempt: TaskAttempt = {
+        n: freshCard.attempts.length + 1,
+        job_id: bestMatch.jobId,
+        agent: freshCard.agent,
+        role: freshCard.role,
+        mode: freshCard.mode,
+        kind,
+        started_at: bestMatch.meta.started_at ?? new Date().toISOString(),
+        status: 'RUNNING',
+        exit_code: null,
+        prompt_chars: freshCard.prompt.length,
+      };
+
+      freshCard.status = 'running';
+      freshCard.job_id = bestMatch.jobId;
+      freshCard.status_reason = '';
+      freshCard.started_at = freshCard.started_at ?? attempt.started_at;
+      freshCard.pending_run = null;
+      freshCard.starting = null;
+      freshCard.attempts.push(attempt);
+      if (freshCard.attempts.length > 20) freshCard.attempts.shift();
+    } else {
+      outcome = 'failed';
+      freshCard.status = 'failed';
+      freshCard.status_reason =
         'start interrupted (server stopped while starting); retry to run again';
-      c.starting = null;
-    });
-    return { adopted: false, card: patched };
+      freshCard.starting = null;
+    }
+  });
+
+  if (outcome === 'aborted') {
+    return { adopted: false, card: null };
   }
+  if (outcome === 'adopted') {
+    if (bestMatch && usedJobIds) {
+      usedJobIds.add(bestMatch.jobId);
+    }
+    return { adopted: true, card: patched };
+  }
+  return { adopted: false, card: patched };
 }
 
 export async function startCardJob(

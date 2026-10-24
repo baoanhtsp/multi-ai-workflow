@@ -963,10 +963,22 @@ export async function moveCard(
   });
 }
 
+export function isJobIdAttachedToAnyCard(tasks: Card[], jobId: string): boolean {
+  for (const t of tasks) {
+    if (t.job_id === jobId) return true;
+    if (Array.isArray(t.attempts)) {
+      for (const a of t.attempts) {
+        if (a.job_id === jobId) return true;
+      }
+    }
+  }
+  return false;
+}
+
 export async function patchCard(
   ctx: MawFeatureContext,
   id: string,
-  updater: (fresh: Card) => void | boolean | Promise<void | boolean>
+  updater: (fresh: Card, allTasks: Card[]) => void | boolean | Promise<void | boolean>
 ): Promise<Card | null> {
   const file = getTasksFile(ctx);
   return fileMutex.runExclusive(file, async () => {
@@ -976,7 +988,7 @@ export async function patchCard(
     if (!card) {
       return null;
     }
-    const res = await updater(card);
+    const res = await updater(card, data.tasks);
     if (res === false) {
       return card;
     }

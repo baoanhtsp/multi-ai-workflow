@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MawFeature } from '../../lib/feature.ts';
@@ -171,18 +172,31 @@ export const feature: MawFeature = {
 
         await ensureGhReady(projectPath, req.res);
 
+        const projectHash = crypto
+          .createHash('sha1')
+          .update(projectPath.toLowerCase())
+          .digest('hex')
+          .slice(0, 12);
         const procLockFile = path.win32.join(
           ctx.paths.featureDataDir('github'),
-          `import-${issueNumber}.lock`
+          `import-${projectHash}-${issueNumber}.lock`
         );
         fs.mkdirSync(path.dirname(procLockFile), { recursive: true });
 
+        const lockToken = crypto.randomUUID();
         const lockStart = Date.now();
         let acquiredProcLock = false;
         while (Date.now() - lockStart < 3000) {
           try {
             const fd = fs.openSync(procLockFile, 'wx');
-            fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() }));
+            fs.writeSync(
+              fd,
+              JSON.stringify({
+                token: lockToken,
+                pid: process.pid,
+                at: new Date().toISOString(),
+              })
+            );
             fs.closeSync(fd);
             acquiredProcLock = true;
             break;
@@ -191,7 +205,7 @@ export const feature: MawFeature = {
             if (code === 'EEXIST') {
               try {
                 const st = fs.statSync(procLockFile);
-                if (Date.now() - st.mtimeMs > 60000) {
+                if (Date.now() - st.mtimeMs > 120000) {
                   try {
                     fs.unlinkSync(procLockFile);
                   } catch {}
@@ -280,7 +294,18 @@ export const feature: MawFeature = {
           });
         } finally {
           try {
-            fs.unlinkSync(procLockFile);
+            if (fs.existsSync(procLockFile)) {
+              const content = fs.readFileSync(procLockFile, 'utf8');
+              let fileToken: string | null = null;
+              try {
+                fileToken = JSON.parse(content)?.token ?? content.trim();
+              } catch {
+                fileToken = content.trim();
+              }
+              if (fileToken === lockToken) {
+                fs.unlinkSync(procLockFile);
+              }
+            }
           } catch {}
         }
       },

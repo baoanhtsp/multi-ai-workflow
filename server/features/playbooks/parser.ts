@@ -153,8 +153,17 @@ export function tickBoxInFile(
   const lines = content.split(/\r?\n/);
 
   const firstTextLine = targetText.split('\n')[0]!.trim();
-  const isAlreadyChecked = (line: string) =>
-    /^\s*[-*]\s+\[[xX]\]/.test(line) && line.includes(firstTextLine);
+  const getCheckedItemText = (line: string): string | null => {
+    const m = /^\s*[-*]\s+\[[xX]\]\s*(.*)$/.exec(line);
+    return m ? m[1]!.trim() : null;
+  };
+  const isAlreadyChecked = (line: string) => getCheckedItemText(line) === firstTextLine;
+
+  const getUncheckedItemText = (line: string): string | null => {
+    const m = /^\s*[-*]\s+\[ \]\s*(.*)$/.exec(line);
+    return m ? m[1]!.trim() : null;
+  };
+  const isUncheckedTarget = (line: string) => getUncheckedItemText(line) === firstTextLine;
 
   // Try the targetLine first (1-based)
   const lineIdx = targetLine - 1;
@@ -170,17 +179,17 @@ export function tickBoxInFile(
   // Try the targetLine first (1-based)
   if (lineIdx >= 0 && lineIdx < lines.length) {
     const candidate = lines[lineIdx]!;
-    if (/^\s*[-*]\s+\[ \]/i.test(candidate) && candidate.includes(firstTextLine)) {
+    if (isUncheckedTarget(candidate)) {
       lines[lineIdx] = candidate.replace(/(\s*[-*]\s+)\[ \]/, '$1[x]');
       modified = true;
     }
   }
 
-  // If line moved, search for unchecked line containing firstTextLine
+  // If line moved, search for unchecked line matching firstTextLine
   if (!modified) {
     for (let j = 0; j < lines.length; j++) {
       const candidate = lines[j]!;
-      if (/^\s*[-*]\s+\[ \]/i.test(candidate) && candidate.includes(firstTextLine)) {
+      if (isUncheckedTarget(candidate)) {
         lines[j] = candidate.replace(/(\s*[-*]\s+)\[ \]/, '$1[x]');
         modified = true;
         break;

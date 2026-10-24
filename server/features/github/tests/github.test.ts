@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -843,10 +844,16 @@ test('github: cross-process issue-import lock handles stale lock and protects co
     const lockDir = ctx.paths.featureDataDir('github');
     fs.mkdirSync(lockDir, { recursive: true });
 
-    // 1. Stale lock (> 60s old) should be automatically cleared and import succeeds
-    const staleLock = path.join(lockDir, 'import-20.lock');
-    fs.writeFileSync(staleLock, JSON.stringify({ pid: 999999, at: 'old' }), 'utf8');
-    const oldTime = new Date(Date.now() - 70000);
+    const projectHash = crypto
+      .createHash('sha1')
+      .update(projectDir.toLowerCase())
+      .digest('hex')
+      .slice(0, 12);
+
+    // 1. Stale lock (> 120s old) should be automatically cleared and import succeeds
+    const staleLock = path.join(lockDir, `import-${projectHash}-20.lock`);
+    fs.writeFileSync(staleLock, JSON.stringify({ token: 'old-token', pid: 999999, at: 'old' }), 'utf8');
+    const oldTime = new Date(Date.now() - 130000);
     fs.utimesSync(staleLock, oldTime, oldTime);
 
     const res = await feature.routes.github_issue_import.handler(ctx as any, {
@@ -862,8 +869,8 @@ test('github: cross-process issue-import lock handles stale lock and protects co
     assert.equal(fs.existsSync(staleLock), false, 'Lock must be cleaned up in finally');
 
     // 2. Active lock held by another process causes timeout and 409
-    const activeLock = path.join(lockDir, 'import-21.lock');
-    fs.writeFileSync(activeLock, JSON.stringify({ pid: process.pid + 5, at: 'fresh' }), 'utf8');
+    const activeLock = path.join(lockDir, `import-${projectHash}-21.lock`);
+    fs.writeFileSync(activeLock, JSON.stringify({ token: 'fresh-token', pid: process.pid + 5, at: 'fresh' }), 'utf8');
 
     await assert.rejects(
       async () => {
@@ -886,6 +893,103 @@ test('github: cross-process issue-import lock handles stale lock and protects co
     // Clean up activeLock
     try {
       fs.unlinkSync(activeLock);
+    } catch {}
+  } finally {
+    cleanup();
+  }
+});
+
+test('github: import lock token guard preserves foreign lock in finally and keys lock per project', async () => {
+  const { ctx, projectDir, cleanup } = createGithubTestContext('token_guard_lock');
+  try {
+    clearGhStatusCache();
+
+    setGhRunner(async (args) => {
+      if (args[0] === '--version' || args[0] === 'version') {
+        return { code: 0, stdout: 'gh version 2.50.0', stderr: '' };
+      }
+      if (args[0] === 'auth' && args[1] === 'status') {
+        return { code: 0, stdout: 'Logged in as testuser', stderr: '' };
+      }
+      if (args[0] === 'issue' && args[1] === 'view') {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            number: 30,
+            title: 'Issue 30',
+            body: 'Body 30',
+            labels: [],
+            url: 'https://github.com/owner/repo/issues/30',
+          }),
+          stderr: '',
+        };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    });
+
+    const lockDir = ctx.paths.featureDataDir('github');
+    fs.mkdirSync(lockDir, { recursive: true });
+
+    const projectHash = crypto
+      .createHash('sha1')
+      .update(projectDir.toLowerCase())
+      .digest('hex')
+      .slice(0, 12);
+    const lockFile = path.join(lockDir, `import-${projectHash}-30.lock`);
+
+    // Verify keying: another project directory produces a different lock file path
+    const project2Dir = path.join(ctx.paths.projectsRoot, 'other_proj');
+    fs.mkdirSync(project2Dir, { recursive: true });
+    const project2Hash = crypto
+      .createHash('sha1')
+      .update(project2Dir.toLowerCase())
+      .digest('hex')
+      .slice(0, 12);
+    assert.notEqual(projectHash, project2Hash, 'Different projects must have different lock keys');
+
+    // Run import, but during execution overwrite the lock with a foreign token
+    // We intercept setGhRunner to simulate another process replacing the lock while gh is running
+    setGhRunner(async (args) => {
+      if (args[0] === 'issue' && args[1] === 'view') {
+        // Another process took over or replaced the lock
+        fs.writeFileSync(
+          lockFile,
+          JSON.stringify({ token: 'foreign-token-999', pid: 99999, at: new Date().toISOString() }),
+          'utf8'
+        );
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            number: 30,
+            title: 'Issue 30',
+            body: 'Body 30',
+            labels: [],
+            url: 'https://github.com/owner/repo/issues/30',
+          }),
+          stderr: '',
+        };
+      }
+      return { code: 0, stdout: 'gh version 2.50.0', stderr: '' };
+    });
+
+    const res = await feature.routes.github_issue_import.handler(ctx as any, {
+      body: {
+        project_path: projectDir,
+        number: 30,
+        agent: 'antigravity',
+        role: 'backend',
+      },
+    } as any);
+
+    assert.ok(res);
+    // Finally must NOT have unlinked the file because it held foreign-token-999
+    assert.ok(fs.existsSync(lockFile), 'Finally must not delete lock holding a foreign token');
+    const remaining = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+    assert.equal(remaining.token, 'foreign-token-999');
+
+    // Cleanup foreign lock
+    try {
+      fs.unlinkSync(lockFile);
     } catch {}
   } finally {
     cleanup();

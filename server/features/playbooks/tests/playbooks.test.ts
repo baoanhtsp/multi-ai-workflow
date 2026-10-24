@@ -469,3 +469,32 @@ test('playbooks: already-checked playbook item advances run without stalling or 
     cleanup();
   }
 });
+
+test('playbooks: tickBoxInFile returns already only on exact item text equality, rejecting substring match', () => {
+  const { projectDir, cleanup } = createPlaybookTestContext('exact_match_tick');
+  try {
+    const filePath = path.join(projectDir, 'exact_test.md');
+    fs.writeFileSync(
+      filePath,
+      '# Process\n- [x] Deploy to production environment\n- [ ] Deploy\n',
+      'utf8'
+    );
+
+    // 1. Ticking "- [ ] Deploy" at line 3 must NOT return 'already' just because line 2 has "Deploy" substring
+    const res1 = tickBoxInFile(filePath, 3, 'Deploy');
+    assert.equal(res1, 'ticked', 'Must tick unchecked Deploy, not treat as already from substring in line 2');
+
+    const contentAfterTick = fs.readFileSync(filePath, 'utf8');
+    assert.ok(contentAfterTick.includes('- [x] Deploy\n'));
+
+    // 2. Ticking line 3 now that it is checked returns 'already' because "- [x] Deploy" === "Deploy"
+    const res2 = tickBoxInFile(filePath, 3, 'Deploy');
+    assert.equal(res2, 'already');
+
+    // 3. Substring target "Deploy to" must return 'failed', not 'already', even though line 2 starts with "Deploy to production environment"
+    const res3 = tickBoxInFile(filePath, 99, 'Deploy to');
+    assert.equal(res3, 'failed', 'Must not match substring "Deploy to" against "Deploy to production environment"');
+  } finally {
+    cleanup();
+  }
+});

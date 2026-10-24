@@ -12,6 +12,7 @@ import {
   getAgentsUsedByCard,
   getSchedulerStatus,
   handleTaskRetry,
+  reconcileStartingCard,
   refreshLeaderHeartbeat,
   startCardJob,
   stopScheduler,
@@ -1317,8 +1318,16 @@ test('tasks: stale-lock takeover handles empty lockfile and race where fresh loc
 
     stopScheduler(ctx);
 
-    // 2. Race condition simulation:
-    // Setup a stale lock with dead PID
+    const lockDir = path.dirname(lockFile);
+    for (const f of fs.readdirSync(lockDir)) {
+      if (f.includes('.stale-')) {
+        try {
+          fs.unlinkSync(path.join(lockDir, f));
+        } catch {}
+      }
+    }
+
+    // 2. Race condition: drive tryAcquireLeaderLock itself through the race
     const staleData = {
       pid: 999999,
       token: 'stale-token-123',
@@ -1327,29 +1336,78 @@ test('tasks: stale-lock takeover handles empty lockfile and race where fresh loc
     };
     fs.writeFileSync(lockFile, JSON.stringify(staleData), 'utf8');
 
-    // Simulate process Y: it judges stale-token-123.
-    // But right when it renames lockFile, X has already written fresh-token-456.
-    // We simulate this by writing fresh-token-456 into lockFile right before Y's takeover logic.
-    // When Y's code detects movedToken ('fresh-token-456') !== judgedStaleToken ('stale-token-123'),
-    // it puts the fresh lock back via linkSync, unlinks stale file, and returns false.
-    const fakeStaleFile = `${lockFile}.stale-${process.pid}-${Date.now()}`;
+    // Intercept fs.renameSync: when tryAcquireLeaderLock renames lockFile,
+    // right before renaming, simulate process X writing fresh-token-456 into lockFile.
+    const origRenameSync = fs.renameSync;
+    const origLinkSync = fs.linkSync;
     const freshData = {
       pid: process.pid + 1,
       token: 'fresh-token-456',
       started_at: new Date().toISOString(),
       heartbeat_at: new Date().toISOString(),
     };
-    // Rename stale to fakeStaleFile, then write freshData to lockFile
-    fs.writeFileSync(fakeStaleFile, JSON.stringify(freshData), 'utf8');
-    fs.unlinkSync(lockFile);
 
-    // Now test that if moved file has freshData, linking it back restores lockFile
-    fs.linkSync(fakeStaleFile, lockFile);
-    fs.unlinkSync(fakeStaleFile);
+    let renameIntercepted = false;
+    fs.renameSync = function (oldPath: any, newPath: any) {
+      if (oldPath === lockFile) {
+        renameIntercepted = true;
+        fs.writeFileSync(lockFile, JSON.stringify(freshData), 'utf8');
+      }
+      return origRenameSync.apply(this, arguments as any);
+    };
 
-    assert.ok(fs.existsSync(lockFile));
-    const restored = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
-    assert.equal(restored.token, 'fresh-token-456');
+    try {
+      const acquired = tryAcquireLeaderLock(ctx);
+      // Because movedToken ('fresh-token-456') !== judgedStaleToken ('stale-token-123'),
+      // tryAcquireLeaderLock must restore lockFile via linkSync, stay passive, and return false
+      assert.equal(acquired, false, 'Leader lock acquisition must return false on token race');
+      assert.equal(renameIntercepted, true, 'fs.renameSync must have been intercepted');
+      assert.ok(fs.existsSync(lockFile), 'lockFile must be restored and exist');
+      const restored = JSON.parse(fs.readFileSync(lockFile, 'utf8'));
+      assert.equal(restored.token, 'fresh-token-456', 'Restored lock must retain the fresh token');
+
+      // Verify no dangling .stale-* file remains
+      const lockDir = path.dirname(lockFile);
+      const staleFiles = fs.readdirSync(lockDir).filter((f) => f.includes('.stale-'));
+      assert.equal(staleFiles.length, 0, 'Moved stale file must be unlinked once lockFile is restored');
+    } finally {
+      fs.renameSync = origRenameSync;
+    }
+
+    // 3. Test linkSync failure fallback when lock already exists:
+    // When linkSync throws EEXIST (someone holds lock), moved copy must be unlinked.
+    const staleData2 = {
+      pid: 999999,
+      token: 'stale-token-abc',
+      started_at: new Date(Date.now() - 80000).toISOString(),
+      heartbeat_at: new Date(Date.now() - 80000).toISOString(),
+    };
+    fs.writeFileSync(lockFile, JSON.stringify(staleData2), 'utf8');
+
+    let linkSyncAttempted = false;
+    fs.renameSync = function (oldPath: any, newPath: any) {
+      if (oldPath === lockFile) {
+        fs.writeFileSync(lockFile, JSON.stringify(freshData), 'utf8');
+      }
+      return origRenameSync.apply(this, arguments as any);
+    };
+    fs.linkSync = function (src: any, dst: any) {
+      linkSyncAttempted = true;
+      const err: any = new Error('File exists');
+      err.code = 'EEXIST';
+      throw err;
+    };
+
+    try {
+      const acquired = tryAcquireLeaderLock(ctx);
+      assert.equal(acquired, false);
+      assert.equal(linkSyncAttempted, true);
+      const staleFiles = fs.readdirSync(path.dirname(lockFile)).filter((f) => f.includes('.stale-'));
+      assert.equal(staleFiles.length, 0, 'Moved copy must be unlinked when lock exists');
+    } finally {
+      fs.renameSync = origRenameSync;
+      fs.linkSync = origLinkSync;
+    }
   } finally {
     stopScheduler(ctx);
     cleanup();
@@ -1573,6 +1631,94 @@ test('tasks: failed startJob launch clears starting intent in startCardJob and t
     assert.equal(card2AfterTick.status, 'failed');
     assert.equal(card2AfterTick.starting, null, 'starting intent must be cleared in tick failure patch');
     assert.ok(card2AfterTick.status_reason.includes('Simulation of startJob spawn failure'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('tasks: reconcileStartingCard aborts without write on starting mismatch and prevents duplicate job adoption', async () => {
+  const { ctx, testProjectDir, tempJobsDir, cleanup } = createTestContext('recon_atomicity_and_dedup');
+  try {
+    const crypto = await import('node:crypto');
+    const prompt = 'Prompt for recon atomicity';
+    const promptSha = crypto.createHash('sha256').update(prompt).digest('hex');
+
+    // 1. Starting info mismatch -> aborts without write
+    const card1 = await createCard(ctx, {
+      title: 'Mismatched starting card',
+      prompt,
+      project_path: testProjectDir,
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'queued',
+    });
+
+    const originalAt = new Date(Date.now() - 40000).toISOString();
+    await patchCard(ctx, card1.id, (c) => {
+      c.starting = {
+        at: originalAt,
+        prompt_sha: promptSha,
+      };
+    });
+
+    // Pass a card snapshot with a different starting timestamp
+    const staleSnapshot = {
+      ...card1,
+      starting: {
+        at: new Date(Date.now() - 50000).toISOString(), // different!
+        prompt_sha: promptSha,
+      },
+    };
+
+    const reconRes1 = await reconcileStartingCard(ctx, staleSnapshot, [card1]);
+    assert.equal(reconRes1.adopted, false);
+    assert.equal(reconRes1.card, null, 'Must abort without write when starting info mismatches');
+
+    // Verify card1 on disk is untouched (still queued, same starting)
+    const card1After = (await getCard(ctx, card1.id))!;
+    assert.equal(card1After.status, 'queued');
+    assert.equal(card1After.starting?.at, originalAt);
+
+    // 2. Duplicate job adoption prevention
+    // Job exists in tempJobsDir matching promptSha
+    const targetJobId = 'job_recon_dup_target';
+    const metaFile = path.join(tempJobsDir, `${targetJobId}.json`);
+    const promptFile = path.join(tempJobsDir, `${targetJobId}.prompt.txt`);
+    fs.writeFileSync(promptFile, prompt, 'utf8');
+    fs.writeFileSync(
+      metaFile,
+      JSON.stringify({
+        job_id: targetJobId,
+        project_path: testProjectDir,
+        started_at: originalAt,
+        started_ts: Math.floor(Date.parse(originalAt) / 1000),
+        status: 'RUNNING',
+      }),
+      'utf8'
+    );
+
+    // Another card is already attached to targetJobId in tasks data
+    const cardHoldingJob = await createCard(ctx, {
+      title: 'Holder card',
+      prompt: 'Holder',
+      project_path: testProjectDir,
+      agent: 'antigravity',
+      role: 'backend',
+      status: 'queued',
+    });
+    await patchCard(ctx, cardHoldingJob.id, (c) => {
+      c.status = 'running';
+      c.job_id = targetJobId;
+    });
+
+    // Now reconcile card1: since targetJobId is held by cardHoldingJob,
+    // reconcile must NOT adopt targetJobId; it must mark card1 as failed.
+    const reconRes2 = await reconcileStartingCard(ctx, card1After, [card1After, cardHoldingJob]);
+    assert.equal(reconRes2.adopted, false, 'Must not adopt job already held by another card');
+    assert.ok(reconRes2.card, 'Must return patched card');
+    assert.equal(reconRes2.card!.status, 'failed');
+    assert.equal(reconRes2.card!.starting, null);
+    assert.ok(reconRes2.card!.status_reason.includes('start interrupted'));
   } finally {
     cleanup();
   }
