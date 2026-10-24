@@ -12,7 +12,7 @@ Brief: `specs/streams/s1-isolation.md`. Rules: `specs/streams/README.md`, `SPEC.
 | `server/features/worktrees/index.ts` | Antigravity | feature `worktrees` (routes §2–§5) |
 | `server/features/worktrees/*.ts` | Antigravity | `store.ts` (records), `merge.ts`, `bestof.ts`, `gitActions.ts`, `isolate.ts` (exported `prepareIsolatedJob`) |
 | `server/tests/s1-*.test.ts` | Antigravity | node tests on real temp git repos (§8) |
-| `antigravity/skills/claude-leader/scripts/maw-worktree-checkpoint.ps1` | Antigravity | PowerShell library `New-MawCheckpoint` (same format as the TS one) |
+| `antigravity/skills/claude-leader/scripts/hooks/_shared/10-checkpoint-lib.ps1` | Antigravity | PowerShell library `New-MawCheckpoint` (same format as the TS one). Lives under `hooks/` so `install.ps1` already copies it; `_shared` never matches an event name, so it is never run as a hook |
 | `antigravity/skills/claude-leader/scripts/hooks/{job-start,round-start,before-agent}/10-checkpoint.ps1` | Antigravity | hook files (§1.2) |
 | `tests/S1Checkpoint.Tests.ps1` | Antigravity | Pester for the hook library |
 | `dashboard/feat-checkpoints.{js,css}`, `dashboard/feat-worktrees.{js,css}` | Claude | UI (§7) |
@@ -59,9 +59,9 @@ MAW-Workdir: <absolute normalised workdir>
 - A non-git project ⇒ hooks do nothing (one log line `[checkpoint] skipped: not a git repository`).
 
 ### 1.2 Hooks (PowerShell 5.1)
-`scripts/maw-worktree-checkpoint.ps1` defines `New-MawCheckpoint -WorkDir -JobKey -Event -Label [-Agent] [-Role] [-Round] [-Retention]` implementing §1.1 with `Invoke-NativeProcess`-style argument arrays (stdin closed; `$env:GIT_INDEX_FILE` set only for the child and restored in `finally`). It returns the checkpoint id or `$null`, and **never throws** (a failed checkpoint must not block the job; it writes `[checkpoint] failed: …`).
+`scripts/hooks/_shared/10-checkpoint-lib.ps1` defines `New-MawCheckpoint -WorkDir -JobKey -Event -Label [-Agent] [-Role] [-Round] [-Retention]` implementing §1.1 with `Invoke-NativeProcess`-style argument arrays (stdin closed; `$env:GIT_INDEX_FILE` set only for the child and restored in `finally`). It returns the checkpoint id or `$null`, and **never throws** (a failed checkpoint must not block the job; it writes `[checkpoint] failed: …`).
 
-Hook files (each is ~10 lines, dot-sources the library via `Join-Path (Split-Path (Split-Path $PSScriptRoot)) 'maw-worktree-checkpoint.ps1'`, never returns `Block`):
+Hook files (each is ~10 lines, dot-sources the library via `Join-Path (Split-Path $PSScriptRoot) '_shared-checkpoint-lib.ps1'`, never returns `Block`):
 - `hooks/job-start/10-checkpoint.ps1`: `JobKey = $Context.job_id`, `WorkDir = $Context.project`, label `before job <job_id> (<agent>/<role>)`. Writes `[checkpoint] <id>` (becomes a job-log line).
 - `hooks/round-start/10-checkpoint.ps1`: `JobKey = $env:MAW_JOB_ID` if valid else `autogate-<yyyyMMdd>`; label `before Auto-Gate round <round>`; `Round = $Context.round`.
 - `hooks/before-agent/10-checkpoint.ps1`: `JobKey = $env:MAW_JOB_ID` if valid else `agent-<yyyyMMdd>`; label `before <agent> as <role>`; `WorkDir = $Context.workdir`.
@@ -279,5 +279,5 @@ Both use only `window.MAW` (`api`, `t`, `toast`, `esc`, `badge`, `fmt`, `on`, `a
 - **R2 — job id for nested hooks**: the job runner should set `$env:MAW_JOB_ID = '<job_id>'` (and `$env:MAW_PROJECT`) before running the command, so `before-agent` and `round-start` checkpoints are attributed to the job (today they fall back to `agent-<date>` / `autogate-<date>` keys).
 - **R3 — `status.jobs[]` `project_path`**: rows carry only `project_name`; S1 reads the job meta by id instead, so this is nice-to-have.
 - **R4 — api-smoke**: add one smoke call each for `checkpoint_list`, `worktree_list`, `git_log` on a temp repo once the streams are merged.
-- **R5 — install.ps1** must copy `scripts/hooks/**` and `scripts/maw-worktree-checkpoint.ps1` to the installed scripts dir (the server prefers `~/.gemini/config/skills/claude-leader/scripts` when it exists, so hooks in the repo only run after install).
+- **R5 — install note**: the server prefers the installed scripts dir (`~/.gemini/config/skills/claude-leader/scripts`) when it exists, so the S1 hooks only run after `install.ps1` (which already copies `scripts/hooks/**` recursively). Please re-run it after merging.
 - **R6 — SPEC Guard `-DiffBase <ref>`** (optional): would replace the soft-reset trick in §2.5.
