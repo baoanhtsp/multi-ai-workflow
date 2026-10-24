@@ -3,8 +3,12 @@ param(
     [ValidateSet("architect", "frontend", "reviewer", "ui-tweak")]
     [string]$Role,
 
-    [Parameter(Mandatory=$true)]
-    [string]$Prompt,
+    [Parameter(Mandatory=$false)]
+    [string]$Prompt = "",
+
+    [string]$PromptFile = "",
+
+    [switch]$IncludeGitDiff,
 
     [string]$WorkDir = (Get-Location).Path,
 
@@ -21,6 +25,10 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 # Auto-sync Antigravity CSRF token & LS address to bridge file for 2-way communication
 if ($env:ANTIGRAVITY_CSRF_TOKEN -and $env:ANTIGRAVITY_LS_ADDRESS) {
     $bridgeFile = Join-Path $env:USERPROFILE ".gemini\antigravity\agentapi-bridge.json"
+    $bridgeDir = Split-Path -Parent $bridgeFile
+    if (-not (Test-Path $bridgeDir)) {
+        New-Item -ItemType Directory -Path $bridgeDir -Force | Out-Null
+    }
     @{
         ANTIGRAVITY_AGENT        = $env:ANTIGRAVITY_AGENT
         ANTIGRAVITY_AGENTAPI_EXE = $env:ANTIGRAVITY_AGENTAPI_EXE
@@ -30,6 +38,19 @@ if ($env:ANTIGRAVITY_CSRF_TOKEN -and $env:ANTIGRAVITY_LS_ADDRESS) {
         ANTIGRAVITY_LS_VERSION   = $env:ANTIGRAVITY_LS_VERSION
         UpdatedAt                = (Get-Date).ToString("o")
     } | ConvertTo-Json | Set-Content -Path $bridgeFile -Encoding UTF8 -ErrorAction SilentlyContinue
+}
+
+if ($PromptFile) {
+    if (-not (Test-Path $PromptFile)) {
+        Write-Error "PromptFile not found: $PromptFile"
+        exit 1
+    }
+    $fileContent = Get-Content -Path $PromptFile -Raw -Encoding UTF8
+    if ($Prompt) {
+        $Prompt = "$Prompt`n`n$fileContent"
+    } else {
+        $Prompt = $fileContent
+    }
 }
 
 # 1. Auto-discover latest claude.exe (handles auto-updates seamlessly)
@@ -82,6 +103,7 @@ switch ($Role) {
             "--model", $model,
             "--effort", $effort,
             "--tools", "Read,Edit,Write",
+            "--add-dir", $WorkDir,
             "--append-system-prompt", "CRITICAL: Only Read, Edit, and Write tools are enabled. Do NOT use Grep, Glob, or Bash. Work only on the exact file paths specified in the prompt.",
             "--permission-mode", "bypassPermissions",
             "--dangerously-skip-permissions",
@@ -108,6 +130,7 @@ switch ($Role) {
             "--model", $model,
             "--effort", $effort,
             "--tools", "Read,Edit,Write",
+            "--add-dir", $WorkDir,
             "--append-system-prompt", "CRITICAL: Only Read, Edit, and Write tools are enabled. Do NOT use Grep, Glob, or Bash. Work only on the exact file paths specified in the prompt.",
             "--permission-mode", "bypassPermissions",
             "--dangerously-skip-permissions",
@@ -118,6 +141,25 @@ switch ($Role) {
 
 Push-Location $WorkDir
 try {
+    if ($IncludeGitDiff) {
+        $gitStatus = (git status -s 2>$null) -join "`n"
+        $gitDiff = (git diff HEAD 2>$null) -join "`n"
+        if (-not $gitDiff) {
+            $gitDiff = (git diff 2>$null) -join "`n"
+        }
+        $diffSection = "## Git Status`n``````text`n$gitStatus`n```````n`n## Git Diff`n``````diff`n$gitDiff`n``````"
+        if ($Prompt) {
+            $Prompt = "$Prompt`n`n$diffSection"
+        } else {
+            $Prompt = $diffSection
+        }
+    }
+
+    if (-not $Prompt -or -not $Prompt.Trim()) {
+        Write-Error "Prompt cannot be empty. Provide -Prompt, -PromptFile, or -IncludeGitDiff."
+        exit 1
+    }
+
     $allArgs = $commonFlags + $roleFlags
     $Prompt | & $claudeExe @allArgs
 } finally {
