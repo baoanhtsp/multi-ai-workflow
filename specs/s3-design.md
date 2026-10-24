@@ -342,3 +342,8 @@ Actions:
 7. **Job actions refresh**: `renderJobActions()` only runs from `renderJobHead()`, so a job action whose `when(job)` depends on `feature_data` (S3 "Đăng nhập lại" / "Thử lại" use `feature_data.inbox.job_flags`) appears only on the next job-head render. Please call `renderJobActions()` after each status load (in `render()` or on `emit('data')`).
 8. **`MAW.openJob(jobId)`**: attach the live-log box to an existing job (read-only follow). S3 ships its own log overlay meanwhile (`MAW_S3.openLog`).
 9. **Shared jobs dir**: every server (main checkout, worktrees, api-smoke runs) writes to `%TEMP%\maw_jobs`, so test jobs (`fake-ai`, sandboxes under `%TEMP%`) show up in the inbox and the timeline. Consider giving api-smoke / test servers their own `TEMP` or jobs dir.
+10. **One server per `MAW_HOME` (decision needed)**:
+    - The inbox store and the retry / reply claims use lock files (`server/features/inbox/lockfile.ts`: `'wx'` locks, a `.recover` mutex, and a journal written before dispatch). They are safe inside one server process.
+    - The last Codex pass (on commit `5bb03fd`) still reports crash / race windows that need **two servers writing the same `MAW_HOME` at the same time**: two dead-owner recoveries racing on `.recover`, a claim removed between two reads, an empty claim file read in the instant after `'wx'`, and reply listeners seeing the item before it is stored.
+    - Proposal: `main.ts` takes a `MAW_HOME/server.lock` at start-up and refuses a second server on the same `MAW_HOME`. S3 can then drop cross-process recovery and keep only the in-process serialization.
+    - Until then, run one dashboard server per `MAW_HOME`; worktree test servers should set their own `MAW_HOME`.
