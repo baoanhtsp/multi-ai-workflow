@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { createFeatureContext, type MawFeatureRequest } from '../../../lib/feature.ts';
 import { resolveServerPaths } from '../../../lib/paths.ts';
+import { ApiValidationError } from '../../../lib/validate.ts';
 import { feature as agentsFeature } from '../../agents-ws/index.ts';
 import { feature } from '../index.ts';
 import { tick } from '../tick.ts';
@@ -438,3 +439,147 @@ test('chat: [concurrency] withS6State serializes concurrent operations', async (
   )) as any;
   assert.ok(getRes.ok);
 });
+
+test('chat: [Item 3] chat_stop handles cancellation success, 409 already terminated, and preserves tracking on unexpected error', async () => {
+  const { makeReq, testProj, paths } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: { name: 'StopTestBot', platform: 'claude', workdir: testProj },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const convReq = makeReq({ agent_id: agRes.agent.id });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // Path 1: start a turn, job meta exists in RUNNING state -> chat_stop succeeds and clears active_job_id
+  const sendRes = (await feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'Running task' }),
+    makeReq()
+  )) as any;
+  assert.ok(sendRes.job_id);
+
+  const stopReq = makeReq({ conversation_id: convId });
+  const stopRes = (await feature.routes['chat_stop']!.handler(stopReq, stopReq)) as any;
+  assert.equal(stopRes.ok, true);
+  assert.equal(stopRes.cancelled, sendRes.job_id);
+
+  const getRes1 = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.equal(getRes1.conversation.active_job_id, '', 'active_job_id cleared on successful cancel');
+
+  // Path 2: Job meta is already in terminal state (DONE). handleCancelJob throws 409 with status.
+  // chat_stop should safely clear active_job_id because job is no longer running.
+  const sendRes2 = (await feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'Second task' }),
+    makeReq()
+  )) as any;
+  const jobId2 = sendRes2.job_id;
+
+  // Manually update job meta to DONE on disk
+  const metaFile2 = path.win32.join(paths.jobsDir, `${jobId2}.json`);
+  fs.writeFileSync(metaFile2, JSON.stringify({ job_id: jobId2, status: 'DONE', exit_code: 0 }), 'utf8');
+
+  const stopRes2 = (await feature.routes['chat_stop']!.handler(stopReq, stopReq)) as any;
+  assert.equal(stopRes2.ok, true);
+  assert.equal(stopRes2.cancelled, jobId2);
+
+  const getRes2 = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.equal(getRes2.conversation.active_job_id, '', 'active_job_id cleared when job was already terminated');
+
+  // Path 3: Job meta file is missing (404) or unexpected failure where job may still run.
+  // chat_stop should re-throw and KEEP active_job_id tracked!
+  const sendRes3 = (await feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'Third task' }),
+    makeReq()
+  )) as any;
+  const jobId3 = sendRes3.job_id;
+
+  // Delete meta file to trigger 404
+  const metaFile3 = path.win32.join(paths.jobsDir, `${jobId3}.json`);
+  fs.unlinkSync(metaFile3);
+
+  await assert.rejects(
+    async () => {
+      await feature.routes['chat_stop']!.handler(stopReq, stopReq);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 404
+  );
+
+  const getRes3 = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.equal(getRes3.conversation.active_job_id, jobId3, 'active_job_id remains tracked on cancel failure');
+});
+
+test('chat: [Item 5] failed first send persists seq and subsequent send has strictly increasing seqs', async () => {
+  const { makeReq, testProj, baseCtx, setNextJobStatus } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: { name: 'SeqTestBot', platform: 'claude', workdir: testProj },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const convReq = makeReq({ agent_id: agRes.agent.id });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // Force startJob to throw on the first call
+  const originalStartJob = baseCtx.startJob;
+  let attempt = 0;
+  baseCtx.startJob = async (body: Record<string, unknown>) => {
+    attempt++;
+    if (attempt === 1) {
+      throw new Error('Fatal start error');
+    }
+    return originalStartJob(body);
+  };
+
+  // First send fails -> throws error
+  await assert.rejects(
+    async () => {
+      await feature.routes['chat_send']!.handler(
+        makeReq({ conversation_id: convId, text: 'First failing message' }),
+        makeReq()
+      );
+    },
+    /Fatal start error/
+  );
+
+  // Read conversation: seq was persisted to disk via finally
+  const getRes1 = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.equal(getRes1.conversation.seq, 1, 'conv.seq must be 1 after failed first send');
+  assert.equal(getRes1.messages.length, 1);
+  assert.equal(getRes1.messages[0].seq, 1);
+  assert.equal(getRes1.messages[0].status, 'failed');
+
+  // Second send succeeds -> conv.seq advances strictly
+  const sendRes2 = (await feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'Second successful message' }),
+    makeReq()
+  )) as any;
+  assert.ok(sendRes2.ok);
+  assert.equal(sendRes2.message.seq, 2, 'Second user message must have seq 2');
+
+  const getRes2 = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.ok(getRes2.conversation.seq >= 2, 'conv.seq must be at least 2');
+  assert.ok(getRes2.messages.length >= 2);
+  assert.equal(getRes2.messages[0].seq, 1);
+  assert.equal(getRes2.messages[1].seq, 2);
+  assert.ok(getRes2.messages[1].seq > getRes2.messages[0].seq, 'Seqs are strictly increasing');
+  if (getRes2.messages.length > 2) {
+    assert.equal(getRes2.messages[2].seq, 3);
+    assert.ok(getRes2.messages[2].seq > getRes2.messages[1].seq, 'Assistant seq is strictly increasing');
+  }
+});
+

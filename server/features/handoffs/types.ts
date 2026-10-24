@@ -37,4 +37,6 @@ export interface Handoff {
   parse_error: string;
   scope_violations: string[];
   attempts: number;
+  base_commit?: string;
+  lead_notified_at?: string;
 }

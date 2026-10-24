@@ -283,3 +283,65 @@ test('teams: [Item 3] save -> apply -> import(overwrite) -> apply preserves agen
     }
   }
 });
+
+test('teams: [Item 1] import with evil key or foreign workdir throws 400 and writes nothing', async () => {
+  const { makeReq, testProj } = setupTestContext();
+
+  const freshProj = path.join(path.dirname(testProj), 'fresh-secure-proj');
+  fs.mkdirSync(freshProj, { recursive: true });
+
+  // 1. Role key with traversal "../evil"
+  const evilKeyBundle = {
+    kind: 'maw-team',
+    version: 1,
+    team: {
+      name: 'Evil Key Team',
+      shared: { platform: 'claude', write_scope: ['**'] },
+      roles: [
+        { key: '../evil', name: 'Evil Role', exec_role: 'backend' },
+      ],
+    },
+    roles_md: {
+      '../evil': { responsibility: 'Hacked' },
+    },
+  };
+
+  await assert.rejects(
+    async () => {
+      const impReq = makeReq({ project_path: freshProj, bundle: evilKeyBundle });
+      await feature.routes['team_import']!.handler(impReq, impReq);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+
+  // Assert nothing was written to disk
+  assert.equal(fs.existsSync(path.join(freshProj, '.maw')), false, 'Nothing should be written on evil key rejection');
+
+  // 2. Foreign shared.workdir pointing to C:\Windows
+  const foreignWorkdirBundle = {
+    kind: 'maw-team',
+    version: 1,
+    team: {
+      name: 'Foreign Workdir Team',
+      shared: { platform: 'claude', workdir: 'C:\\Windows', write_scope: ['**'] },
+      roles: [
+        { key: 'worker', name: 'Worker', exec_role: 'backend' },
+      ],
+    },
+    roles_md: {
+      worker: { responsibility: 'Normal worker' },
+    },
+  };
+
+  await assert.rejects(
+    async () => {
+      const impReq = makeReq({ project_path: freshProj, bundle: foreignWorkdirBundle });
+      await feature.routes['team_import']!.handler(impReq, impReq);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+
+  // Assert still nothing was written
+  assert.equal(fs.existsSync(path.join(freshProj, '.maw')), false, 'Nothing should be written on foreign workdir rejection');
+});
+

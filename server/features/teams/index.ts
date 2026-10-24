@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { MawFeature } from '../../lib/feature.ts';
+import type { MawFeature, MawFeatureContext } from '../../lib/feature.ts';
 import { isFileSafe, resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import {
@@ -31,6 +31,243 @@ function getTeamFilePath(projectPath: string): string {
 
 function getRolesDir(projectPath: string): string {
   return path.win32.join(projectPath, '.maw', 'roles');
+}
+
+export function getSafeRoleFilePath(rolesDir: string, roleKey: string): string {
+  const normalizedRolesDir = path.resolve(rolesDir);
+  const rFile = path.resolve(normalizedRolesDir, `${roleKey}.md`);
+  if (!rFile.startsWith(normalizedRolesDir + path.sep)) {
+    throw new ApiValidationError(`Role path traversal detected for key '${roleKey}'.`, 400);
+  }
+  return rFile;
+}
+
+export function validateTeam(
+  raw: unknown,
+  ctx: MawFeatureContext,
+  options?: { isTemplate?: boolean; rolesMd?: Record<string, unknown> }
+): { team: Team; rolesMd?: Record<string, RoleSections> } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new ApiValidationError('Invalid team object.', 400);
+  }
+  const t = raw as Partial<Team>;
+
+  const name = String(t.name ?? '').trim();
+  if (!name || name.length > 60) {
+    throw new ApiValidationError('Team name must be between 1 and 60 characters.', 400);
+  }
+
+  const teamId = String(t.id ?? '').trim() || generateTeamId();
+  const template = String(t.template ?? 'full').trim();
+
+  const rawShared = t.shared ?? ({} as Partial<Team['shared']>);
+
+  const platform = String(rawShared.platform ?? 'claude').trim() || 'claude';
+  const regAgent = ctx.registry.agents.find((a) => a.id === platform.toLowerCase());
+  if (!regAgent) {
+    throw new ApiValidationError(`Invalid shared.platform '${platform}'. Must be an enabled registry agent.`, 400);
+  }
+
+  const model = String(rawShared.model ?? '').trim();
+  if (model && !regAgent.models.includes(model)) {
+    throw new ApiValidationError(`Invalid shared.model '${model}' for platform '${platform}'.`, 400);
+  }
+
+  const effort = String(rawShared.effort ?? '').trim();
+  if (effort && !regAgent.efforts.includes(effort)) {
+    throw new ApiValidationError(`Invalid shared.effort '${effort}' for platform '${platform}'.`, 400);
+  }
+
+  let sharedWorkdir = '';
+  const rawWorkdir = String(rawShared.workdir ?? '').trim();
+  if (rawWorkdir) {
+    const resolved = resolveProjectPath(rawWorkdir, ctx.paths.projectsRoot);
+    if (!resolved) {
+      throw new ApiValidationError(`Invalid shared.workdir '${rawWorkdir}'. Must be strictly inside projectsRoot.`, 400);
+    }
+    sharedWorkdir = resolved;
+  }
+
+  const validatedWritableDirs: string[] = [];
+  if (Array.isArray(rawShared.writable_dirs)) {
+    if (rawShared.writable_dirs.length > 10) {
+      throw new ApiValidationError('shared.writable_dirs cannot have more than 10 dirs.', 400);
+    }
+    for (const d of rawShared.writable_dirs) {
+      const dStr = String(d ?? '').trim();
+      if (!dStr) continue;
+      const resDir = resolveProjectPath(dStr, ctx.paths.projectsRoot);
+      if (!resDir) {
+        throw new ApiValidationError(`Invalid writable_dir '${dStr}'.`, 400);
+      }
+      validatedWritableDirs.push(resDir);
+    }
+  }
+
+  const validatedWriteScope: string[] = [];
+  if (Array.isArray(rawShared.write_scope)) {
+    if (rawShared.write_scope.length > 30) {
+      throw new ApiValidationError('shared.write_scope cannot have more than 30 globs.', 400);
+    }
+    for (const ws of rawShared.write_scope) {
+      const s = String(ws ?? '').trim();
+      if (!s) continue;
+      if (s.length > 200 || /[\0\r\n]/.test(s)) {
+        throw new ApiValidationError(`write_scope glob '${s}' exceeds 200 chars or contains invalid characters.`, 400);
+      }
+      validatedWriteScope.push(s);
+    }
+  } else {
+    validatedWriteScope.push('**');
+  }
+
+  const maxParallel = Math.max(1, Math.min(6, Number(rawShared.max_parallel) || 3));
+  const shared = {
+    workdir: sharedWorkdir,
+    platform,
+    model,
+    effort,
+    write_scope: validatedWriteScope,
+    writable_dirs: validatedWritableDirs,
+    isolate: rawShared.isolate !== false,
+    max_parallel: maxParallel,
+    auto_continue: rawShared.auto_continue !== false,
+  };
+
+  if (!Array.isArray(t.roles) || t.roles.length === 0) {
+    throw new ApiValidationError('Team must have at least one role.', 400);
+  }
+
+  const roles: TeamRole[] = [];
+  const seenKeys = new Set<string>();
+
+  for (let i = 0; i < t.roles.length; i++) {
+    const r = t.roles[i]!;
+    const key = String(r.key ?? '').trim().toLowerCase();
+    if (!ROLE_KEY_REGEX.test(key)) {
+      throw new ApiValidationError(`Invalid role key '${key}'. Must match ^[a-z][a-z0-9-]{1,23}$.`, 400);
+    }
+    if (seenKeys.has(key)) {
+      throw new ApiValidationError(`Duplicate role key '${key}'.`, 400);
+    }
+    seenKeys.add(key);
+
+    const rName = String(r.name ?? '').trim();
+    if (!rName || rName.length > 40) {
+      throw new ApiValidationError(`Role name for '${key}' must be 1-40 chars.`, 400);
+    }
+
+    const style = String(r.working_style ?? 'persistent').trim();
+    if (!ALLOWED_WORKING_STYLES.includes(style)) {
+      throw new ApiValidationError(`Invalid working_style '${style}' for role '${key}'.`, 400);
+    }
+
+    const execRole = String(r.exec_role ?? 'backend').trim().toLowerCase();
+    if (!ALLOWED_EXEC_ROLES.includes(execRole)) {
+      throw new ApiValidationError(`Invalid exec_role '${execRole}' for role '${key}'.`, 400);
+    }
+
+    let override: TeamRoleOverride | undefined;
+    if (r.override && typeof r.override === 'object') {
+      override = {};
+      if (r.override.workdir) {
+        const rawOvWorkdir = String(r.override.workdir).trim();
+        const ovWorkdir = resolveProjectPath(rawOvWorkdir, ctx.paths.projectsRoot);
+        if (!ovWorkdir) {
+          throw new ApiValidationError(`Invalid override.workdir '${rawOvWorkdir}' for role '${key}'.`, 400);
+        }
+        override.workdir = ovWorkdir;
+      }
+
+      let ovAgent = regAgent;
+      if (r.override.platform) {
+        const ovPlatform = String(r.override.platform).trim().toLowerCase();
+        const found = ctx.registry.agents.find((a) => a.id === ovPlatform);
+        if (!found) {
+          throw new ApiValidationError(`Invalid override.platform '${ovPlatform}' for role '${key}'.`, 400);
+        }
+        override.platform = ovPlatform;
+        ovAgent = found;
+      }
+
+      if (r.override.model) {
+        const ovModel = String(r.override.model).trim();
+        if (!ovAgent.models.includes(ovModel)) {
+          throw new ApiValidationError(`Invalid override.model '${ovModel}' for role '${key}'.`, 400);
+        }
+        override.model = ovModel;
+      }
+
+      if (r.override.effort) {
+        const ovEffort = String(r.override.effort).trim();
+        if (!ovAgent.efforts.includes(ovEffort)) {
+          throw new ApiValidationError(`Invalid override.effort '${ovEffort}' for role '${key}'.`, 400);
+        }
+        override.effort = ovEffort;
+      }
+
+      if (Array.isArray(r.override.write_scope)) {
+        override.write_scope = r.override.write_scope.map((ws) => {
+          const s = String(ws ?? '').trim();
+          if (s.length > 200 || /[\0\r\n]/.test(s)) {
+            throw new ApiValidationError(`override.write_scope glob exceeds 200 chars for role '${key}'.`, 400);
+          }
+          return s;
+        });
+      }
+    }
+
+    roles.push({
+      key,
+      name: rName,
+      enabled: r.enabled !== false,
+      working_style: style as TeamRole['working_style'],
+      persona: String(r.persona ?? '').trim().slice(0, 4000),
+      may_delegate: Boolean(r.may_delegate),
+      exec_role: execRole,
+      override,
+      agent_id: String(r.agent_id ?? '').trim(),
+    });
+  }
+
+  let validatedRolesMd: Record<string, RoleSections> | undefined;
+  if (options?.rolesMd && typeof options.rolesMd === 'object') {
+    validatedRolesMd = {};
+    for (const [rKey, rSec] of Object.entries(options.rolesMd)) {
+      const lowerKey = rKey.trim().toLowerCase();
+      if (!ROLE_KEY_REGEX.test(lowerKey)) {
+        throw new ApiValidationError(`Invalid role markdown key '${rKey}'. Must match ^[a-z][a-z0-9-]{1,23}$.`, 400);
+      }
+      if (rSec && typeof rSec === 'object') {
+        const secObj = rSec as Record<string, unknown>;
+        const secFields = ['responsibility', 'delegation', 'output', 'permissions', 'extra'] as const;
+        for (const f of secFields) {
+          const val = secObj[f];
+          if (typeof val === 'string' && val.length > 6000) {
+            throw new ApiValidationError(`Role markdown section '${f}' exceeds 6000 characters for role '${rKey}'.`, 400);
+          }
+        }
+        validatedRolesMd[lowerKey] = {
+          responsibility: String(secObj.responsibility ?? '').slice(0, 6000),
+          delegation: String(secObj.delegation ?? '').slice(0, 6000),
+          output: String(secObj.output ?? '').slice(0, 6000),
+          permissions: String(secObj.permissions ?? '').slice(0, 6000),
+          extra: typeof secObj.extra === 'string' ? secObj.extra.slice(0, 6000) : undefined,
+        };
+      }
+    }
+  }
+
+  const team: Team = {
+    version: 1,
+    id: teamId,
+    name,
+    template,
+    shared,
+    roles,
+  };
+
+  return { team, rolesMd: validatedRolesMd };
 }
 
 export const feature: MawFeature = {
@@ -75,15 +312,15 @@ export const feature: MawFeature = {
         const rolesDir = getRolesDir(validPath);
         if (Array.isArray(team.roles)) {
           for (const role of team.roles) {
-            const rFile = path.win32.join(rolesDir, `${role.key}.md`);
-            if (isFileSafe(rFile)) {
-              try {
+            try {
+              const rFile = getSafeRoleFilePath(rolesDir, role.key);
+              if (isFileSafe(rFile)) {
                 const parsed = parseRoleMarkdown(fs.readFileSync(rFile, 'utf8'));
                 rolesMd[role.key] = parsed.sections;
-              } catch {
+              } else {
                 rolesMd[role.key] = { responsibility: '', delegation: '', output: '', permissions: '' };
               }
-            } else {
+            } catch {
               rolesMd[role.key] = { responsibility: '', delegation: '', output: '', permissions: '' };
             }
           }
@@ -109,202 +346,11 @@ export const feature: MawFeature = {
             throw new ApiValidationError('Invalid or missing project_path.', 400);
           }
 
-          const rawTeam = body.team;
-          if (!rawTeam || typeof rawTeam !== 'object' || Array.isArray(rawTeam)) {
-            throw new ApiValidationError('Invalid team object.', 400);
-          }
-          const t = rawTeam as Partial<Team>;
-
-          const name = String(t.name ?? '').trim();
-          if (!name || name.length > 60) {
-            throw new ApiValidationError('Team name must be between 1 and 60 characters.', 400);
-          }
-
-          const teamId = String(t.id ?? '').trim() || generateTeamId();
-          const template = String(t.template ?? 'full').trim();
-
-          const rawShared = t.shared ?? ({} as Partial<Team['shared']>);
-
-          // Item 19: validate shared.platform / shared.model / shared.effort
-          const platform = String(rawShared.platform ?? 'claude').trim() || 'claude';
-          const regAgent = ctx.registry.agents.find((a) => a.id === platform.toLowerCase());
-          if (!regAgent) {
-            throw new ApiValidationError(`Invalid shared.platform '${platform}'. Must be an enabled registry agent.`, 400);
-          }
-
-          const model = String(rawShared.model ?? '').trim();
-          if (model && !regAgent.models.includes(model)) {
-            throw new ApiValidationError(`Invalid shared.model '${model}' for platform '${platform}'.`, 400);
-          }
-
-          const effort = String(rawShared.effort ?? '').trim();
-          if (effort && !regAgent.efforts.includes(effort)) {
-            throw new ApiValidationError(`Invalid shared.effort '${effort}' for platform '${platform}'.`, 400);
-          }
-
-          // Item 19: validate shared.workdir
-          let sharedWorkdir = '';
-          const rawWorkdir = String(rawShared.workdir ?? '').trim();
-          if (rawWorkdir) {
-            const resolved = resolveProjectPath(rawWorkdir, ctx.paths.projectsRoot);
-            if (!resolved) {
-              throw new ApiValidationError(`Invalid shared.workdir '${rawWorkdir}'. Must be strictly inside projectsRoot.`, 400);
-            }
-            sharedWorkdir = resolved;
-          }
-
-          // Item 19: validate shared.writable_dirs
-          const validatedWritableDirs: string[] = [];
-          if (Array.isArray(rawShared.writable_dirs)) {
-            if (rawShared.writable_dirs.length > 10) {
-              throw new ApiValidationError('shared.writable_dirs cannot have more than 10 dirs.', 400);
-            }
-            for (const d of rawShared.writable_dirs) {
-              const dStr = String(d ?? '').trim();
-              if (!dStr) continue;
-              const resDir = resolveProjectPath(dStr, ctx.paths.projectsRoot);
-              if (!resDir) {
-                throw new ApiValidationError(`Invalid writable_dir '${dStr}'.`, 400);
-              }
-              validatedWritableDirs.push(resDir);
-            }
-          }
-
-          // Item 19: validate write_scope (bounded <= 200 chars)
-          const validatedWriteScope: string[] = [];
-          if (Array.isArray(rawShared.write_scope)) {
-            if (rawShared.write_scope.length > 30) {
-              throw new ApiValidationError('shared.write_scope cannot have more than 30 globs.', 400);
-            }
-            for (const ws of rawShared.write_scope) {
-              const s = String(ws ?? '').trim();
-              if (!s) continue;
-              if (s.length > 200 || /[\0\r\n]/.test(s)) {
-                throw new ApiValidationError(`write_scope glob '${s}' exceeds 200 chars or contains invalid characters.`, 400);
-              }
-              validatedWriteScope.push(s);
-            }
-          } else {
-            validatedWriteScope.push('**');
-          }
-
-          const maxParallel = Math.max(1, Math.min(6, Number(rawShared.max_parallel) || 3));
-          const shared = {
-            workdir: sharedWorkdir,
-            platform,
-            model,
-            effort,
-            write_scope: validatedWriteScope,
-            writable_dirs: validatedWritableDirs,
-            isolate: rawShared.isolate !== false,
-            max_parallel: maxParallel,
-            auto_continue: rawShared.auto_continue !== false,
-          };
-
-          if (!Array.isArray(t.roles) || t.roles.length === 0) {
-            throw new ApiValidationError('Team must have at least one role.', 400);
-          }
-
-          const roles: TeamRole[] = [];
-          const seenKeys = new Set<string>();
-
-          for (let i = 0; i < t.roles.length; i++) {
-            const r = t.roles[i]!;
-            const key = String(r.key ?? '').trim().toLowerCase();
-            if (!ROLE_KEY_REGEX.test(key)) {
-              throw new ApiValidationError(`Invalid role key '${key}'. Must match ^[a-z][a-z0-9-]{1,23}$.`, 400);
-            }
-            if (seenKeys.has(key)) {
-              throw new ApiValidationError(`Duplicate role key '${key}'.`, 400);
-            }
-            seenKeys.add(key);
-
-            const rName = String(r.name ?? '').trim();
-            if (!rName || rName.length > 40) {
-              throw new ApiValidationError(`Role name for '${key}' must be 1-40 chars.`, 400);
-            }
-
-            const style = String(r.working_style ?? 'persistent').trim();
-            if (!ALLOWED_WORKING_STYLES.includes(style)) {
-              throw new ApiValidationError(`Invalid working_style '${style}' for role '${key}'.`, 400);
-            }
-
-            const execRole = String(r.exec_role ?? 'backend').trim().toLowerCase();
-            if (!ALLOWED_EXEC_ROLES.includes(execRole)) {
-              throw new ApiValidationError(`Invalid exec_role '${execRole}' for role '${key}'.`, 400);
-            }
-
-            // Item 19: validate role override
-            let override: TeamRoleOverride | undefined;
-            if (r.override && typeof r.override === 'object') {
-              override = {};
-              if (r.override.workdir) {
-                const ovWorkdir = resolveProjectPath(String(r.override.workdir).trim(), ctx.paths.projectsRoot);
-                if (!ovWorkdir) {
-                  throw new ApiValidationError(`Invalid override.workdir for role '${key}'.`, 400);
-                }
-                override.workdir = ovWorkdir;
-              }
-
-              let ovAgent = regAgent;
-              if (r.override.platform) {
-                const ovPlatform = String(r.override.platform).trim().toLowerCase();
-                const found = ctx.registry.agents.find((a) => a.id === ovPlatform);
-                if (!found) {
-                  throw new ApiValidationError(`Invalid override.platform '${ovPlatform}' for role '${key}'.`, 400);
-                }
-                override.platform = ovPlatform;
-                ovAgent = found;
-              }
-
-              if (r.override.model) {
-                const ovModel = String(r.override.model).trim();
-                if (!ovAgent.models.includes(ovModel)) {
-                  throw new ApiValidationError(`Invalid override.model '${ovModel}' for role '${key}'.`, 400);
-                }
-                override.model = ovModel;
-              }
-
-              if (r.override.effort) {
-                const ovEffort = String(r.override.effort).trim();
-                if (!ovAgent.efforts.includes(ovEffort)) {
-                  throw new ApiValidationError(`Invalid override.effort '${ovEffort}' for role '${key}'.`, 400);
-                }
-                override.effort = ovEffort;
-              }
-
-              if (Array.isArray(r.override.write_scope)) {
-                override.write_scope = r.override.write_scope.map((ws) => {
-                  const s = String(ws ?? '').trim();
-                  if (s.length > 200 || /[\0\r\n]/.test(s)) {
-                    throw new ApiValidationError(`override.write_scope glob exceeds 200 chars for role '${key}'.`, 400);
-                  }
-                  return s;
-                });
-              }
-            }
-
-            roles.push({
-              key,
-              name: rName,
-              enabled: r.enabled !== false,
-              working_style: style as TeamRole['working_style'],
-              persona: String(r.persona ?? '').trim().slice(0, 4000),
-              may_delegate: Boolean(r.may_delegate),
-              exec_role: execRole,
-              override,
-              agent_id: String(r.agent_id ?? '').trim(),
-            });
-          }
-
-          const team: Team = {
-            version: 1,
-            id: teamId,
-            name,
-            template,
-            shared,
-            roles,
-          };
+          const validated = validateTeam(body.team, ctx, {
+            rolesMd: body.roles_md as Record<string, unknown> | undefined,
+          });
+          const team = validated.team;
+          const rawRolesMd = validated.rolesMd ?? {};
 
           const teamFile = getTeamFilePath(validPath);
           const rolesDir = getRolesDir(validPath);
@@ -316,9 +362,8 @@ export const feature: MawFeature = {
           await writeJsonStore(teamFile, team);
 
           // Write roles_md and clean up removed roles
-          const rawRolesMd = (body.roles_md ?? {}) as Record<string, Partial<RoleSections>>;
           const currentFiles = fs.readdirSync(rolesDir).filter((f) => f.endsWith('.md'));
-          const activeFileNames = new Set(roles.map((r) => `${r.key}.md`));
+          const activeFileNames = new Set(team.roles.map((r) => `${r.key}.md`));
 
           for (const file of currentFiles) {
             if (!activeFileNames.has(file)) {
@@ -328,17 +373,15 @@ export const feature: MawFeature = {
             }
           }
 
-          for (const role of roles) {
-            const rFile = path.win32.join(rolesDir, `${role.key}.md`);
-            const sec = rawRolesMd[role.key] ?? {};
-            const fullSec: RoleSections = {
-              responsibility: String(sec.responsibility ?? '').slice(0, 6000),
-              delegation: String(sec.delegation ?? '').slice(0, 6000),
-              output: String(sec.output ?? '').slice(0, 6000),
-              permissions: String(sec.permissions ?? '').slice(0, 6000),
-              extra: typeof sec.extra === 'string' ? sec.extra.slice(0, 6000) : undefined,
+          for (const role of team.roles) {
+            const rFile = getSafeRoleFilePath(rolesDir, role.key);
+            const sec = rawRolesMd[role.key] ?? {
+              responsibility: '',
+              delegation: '',
+              output: '',
+              permissions: '',
             };
-            const mdContent = renderRoleMarkdown(role.name, fullSec);
+            const mdContent = renderRoleMarkdown(role.name, sec);
             fs.writeFileSync(rFile, mdContent, 'utf8');
           }
 
@@ -513,10 +556,12 @@ export const feature: MawFeature = {
         const rolesDir = getRolesDir(validPath);
         if (Array.isArray(team.roles)) {
           for (const role of team.roles) {
-            const rFile = path.win32.join(rolesDir, `${role.key}.md`);
-            if (isFileSafe(rFile)) {
-              rolesMd[role.key] = parseRoleMarkdown(fs.readFileSync(rFile, 'utf8')).sections;
-            }
+            try {
+              const rFile = getSafeRoleFilePath(rolesDir, role.key);
+              if (isFileSafe(rFile)) {
+                rolesMd[role.key] = parseRoleMarkdown(fs.readFileSync(rFile, 'utf8')).sections;
+              }
+            } catch {}
           }
         }
 
@@ -557,17 +602,15 @@ export const feature: MawFeature = {
             );
           }
 
-          const rawTeam = bundle.team as Team;
-          if (!rawTeam || typeof rawTeam !== 'object') {
-            throw new ApiValidationError('Bundle is missing team definition.', 400);
-          }
+          // Item 1: Validate bundle team and roles_md BEFORE creating directories or writing any files!
+          const validated = validateTeam(bundle.team, ctx, {
+            rolesMd: bundle.roles_md as Record<string, unknown> | undefined,
+          });
 
           const newTeam: Team = {
-            ...rawTeam,
+            ...validated.team,
             id: generateTeamId(),
-            roles: Array.isArray(rawTeam.roles)
-              ? rawTeam.roles.map((r) => ({ ...r, agent_id: '' }))
-              : [],
+            roles: validated.team.roles.map((r) => ({ ...r, agent_id: '' })),
           };
 
           const rolesDir = getRolesDir(validPath);
@@ -576,9 +619,9 @@ export const feature: MawFeature = {
           }
           await writeJsonStore(teamFile, newTeam);
 
-          const rolesMd = (bundle.roles_md ?? {}) as Record<string, RoleSections>;
+          const rolesMd = validated.rolesMd ?? {};
           for (const role of newTeam.roles) {
-            const rFile = path.win32.join(rolesDir, `${role.key}.md`);
+            const rFile = getSafeRoleFilePath(rolesDir, role.key);
             const sec = rolesMd[role.key] ?? { responsibility: '', delegation: '', output: '', permissions: '' };
             const mdContent = renderRoleMarkdown(role.name, sec);
             fs.writeFileSync(rFile, mdContent, 'utf8');
@@ -624,10 +667,10 @@ export const feature: MawFeature = {
             throw new ApiValidationError('Template name must be between 1 and 60 characters.', 400);
           }
 
-          const rawTeam = body.team as Team | undefined;
-          if (!rawTeam || typeof rawTeam !== 'object') {
-            throw new ApiValidationError('Template is missing team definition.', 400);
-          }
+          const validated = validateTeam(body.team, ctx, {
+            isTemplate: true,
+            rolesMd: body.roles_md as Record<string, unknown> | undefined,
+          });
 
           const tplFile = path.win32.join(ctx.paths.featureDataDir('teams'), 'templates.json');
           const data = await readJsonStore<{ version: number; templates: TeamTemplate[] }>(tplFile, {
@@ -639,18 +682,16 @@ export const feature: MawFeature = {
           const existingIdx = data.templates.findIndex((t) => t.id === targetId);
 
           const savedTeam = {
-            ...rawTeam,
+            ...validated.team,
             id: '',
-            roles: Array.isArray(rawTeam.roles)
-              ? rawTeam.roles.map((r) => ({ ...r, agent_id: '' }))
-              : [],
+            roles: validated.team.roles.map((r) => ({ ...r, agent_id: '' })),
           };
 
           const template: TeamTemplate = {
             id: targetId,
             name,
             team: savedTeam,
-            roles_md: (body.roles_md ?? {}) as Record<string, RoleSections>,
+            roles_md: (validated.rolesMd ?? {}) as Record<string, RoleSections>,
             updated_at: new Date().toISOString(),
           };
 

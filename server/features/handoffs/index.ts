@@ -266,6 +266,13 @@ export const feature: MawFeature = {
             throw new ApiValidationError(`Handoff '${id}' not found.`, 404);
           }
 
+          if (handoff.status !== 'started' && handoff.status !== 'running') {
+            throw new ApiValidationError(
+              `Cannot cancel handoff '${id}' in status '${handoff.status}'. Must be 'started' or 'running'.`,
+              409
+            );
+          }
+
           if (handoff.status === 'running' && handoff.job_id) {
             try {
               await handleCancelJob({ job_id: handoff.job_id }, ctx.paths);
@@ -324,6 +331,8 @@ export const feature: MawFeature = {
           handoff.result = null;
           handoff.parse_error = '';
           handoff.scope_violations = [];
+          handoff.base_commit = undefined;
+          handoff.lead_notified_at = undefined;
 
           await writeJsonStore(handoffsFile, handoffsData);
 

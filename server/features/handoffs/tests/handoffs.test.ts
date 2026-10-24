@@ -6,6 +6,9 @@ import path from 'node:path';
 import test from 'node:test';
 import { createFeatureContext, type MawFeatureRequest } from '../../../lib/feature.ts';
 import { resolveServerPaths } from '../../../lib/paths.ts';
+import { runCommand } from '../../../lib/proc.ts';
+import { ApiValidationError } from '../../../lib/validate.ts';
+import { getBaseCommit, getWorktreeChangedFiles } from '../../agents-ws/lib/git.ts';
 import { feature as chatFeature } from '../../chat/index.ts';
 import { tick } from '../../chat/tick.ts';
 import { BUILTIN_FULL_TEMPLATE } from '../../teams/defaults.ts';
@@ -492,3 +495,114 @@ test('handoffs: [Item 2] member resolution falls back to live agent with same wo
   assert.equal(targetHandoff.status, 'completed');
   assert.ok(targetHandoff.result.summary.includes('Worker resolved by workdir'));
 });
+
+test('handoffs: [Item 2] write-scope changed files reports two commits and untracked file in temp git repo', async () => {
+  const tempRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'maw git test repo '));
+  try {
+    // 1. Initialize git repo and make base commit
+    await runCommand('git.exe', ['-C', tempRepo, 'init'], { timeoutMs: 5000 });
+    await runCommand('git.exe', ['-C', tempRepo, 'config', 'user.name', 'Tester'], { timeoutMs: 5000 });
+    await runCommand('git.exe', ['-C', tempRepo, 'config', 'user.email', 'test@example.com'], { timeoutMs: 5000 });
+
+    fs.writeFileSync(path.join(tempRepo, 'init.txt'), 'initial commit\n', 'utf8');
+    await runCommand('git.exe', ['-C', tempRepo, 'add', 'init.txt'], { timeoutMs: 5000 });
+    await runCommand('git.exe', ['-C', tempRepo, 'commit', '-m', 'initial'], { timeoutMs: 5000 });
+
+    const baseCommit = await getBaseCommit(tempRepo);
+    assert.ok(baseCommit, 'Base commit must be resolved from git rev-parse HEAD');
+
+    // 2. Make commit 1
+    fs.writeFileSync(path.join(tempRepo, 'c1.txt'), 'commit 1\n', 'utf8');
+    await runCommand('git.exe', ['-C', tempRepo, 'add', 'c1.txt'], { timeoutMs: 5000 });
+    await runCommand('git.exe', ['-C', tempRepo, 'commit', '-m', 'c1'], { timeoutMs: 5000 });
+
+    // 3. Make commit 2
+    fs.writeFileSync(path.join(tempRepo, 'c2.txt'), 'commit 2\n', 'utf8');
+    await runCommand('git.exe', ['-C', tempRepo, 'add', 'c2.txt'], { timeoutMs: 5000 });
+    await runCommand('git.exe', ['-C', tempRepo, 'commit', '-m', 'c2'], { timeoutMs: 5000 });
+
+    // 4. Leave an untracked file
+    fs.writeFileSync(path.join(tempRepo, 'untracked.txt'), 'untracked content\n', 'utf8');
+
+    // 5. Query changed files
+    const res = await getWorktreeChangedFiles(tempRepo, baseCommit);
+    assert.equal(res.ok, true, 'getWorktreeChangedFiles should succeed');
+    assert.ok(res.files.includes('c1.txt'), 'c1.txt should be in changed files');
+    assert.ok(res.files.includes('c2.txt'), 'c2.txt should be in changed files');
+    assert.ok(res.files.includes('untracked.txt'), 'untracked.txt should be in changed files');
+
+    // 6. Test error path for invalid folder
+    const errRes = await getWorktreeChangedFiles('C:\\non_existent_maw_dir_12345');
+    assert.equal(errRes.ok, false);
+    assert.equal(errRes.error, 'could not list changed files');
+  } finally {
+    fs.rmSync(tempRepo, { recursive: true, force: true });
+  }
+});
+
+test('handoffs: [Item 4] terminal handoffs 409 guards and idempotent Lead notification', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  // 1. Dispatch handoff with invalid block -> reaches needs_review
+  setNextReply('Invalid json text here');
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Needs review task',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  const handoffId = dispRes.handoff.id;
+
+  await tick(baseCtx);
+
+  const getHandoffsReq = makeReq({}, { team_id: applyRes.team.id });
+  const listRes1 = (await feature.routes['handoff_list']!.handler(getHandoffsReq, getHandoffsReq)) as any;
+  const h1 = listRes1.handoffs.find((h: any) => h.id === handoffId);
+  assert.equal(h1.status, 'needs_review');
+
+  // 2. Accept handoff once -> 200 OK
+  const acceptReq1 = makeReq({ id: handoffId, note: 'Approved manually' });
+  const acceptRes1 = (await feature.routes['handoff_accept']!.handler(acceptReq1, acceptReq1)) as any;
+  assert.equal(acceptRes1.ok, true);
+  assert.equal(acceptRes1.handoff.status, 'completed');
+
+  // 3. Accept second time -> 409
+  await assert.rejects(
+    async () => {
+      const acceptReq2 = makeReq({ id: handoffId, note: 'Approved again' });
+      await feature.routes['handoff_accept']!.handler(acceptReq2, acceptReq2);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409
+  );
+
+  // 4. Cancel a completed handoff -> 409
+  await assert.rejects(
+    async () => {
+      const cancelReq = makeReq({ id: handoffId });
+      await feature.routes['handoff_cancel']!.handler(cancelReq, cancelReq);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409
+  );
+
+  // 5. Verify exactly ONE Lead message was appended for this terminal handoff
+  const getLeadReq = makeReq({}, { conversation_id: leadConvId });
+  const getLeadRes = (await chatFeature.routes['chat_get']!.handler(getLeadReq, getLeadReq)) as any;
+  const matchingLeadMsgs = getLeadRes.messages.filter((m: any) => m.handoff_id === handoffId);
+  assert.equal(matchingLeadMsgs.length, 1, 'Exactly one Lead message per terminal handoff');
+});
+

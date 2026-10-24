@@ -523,8 +523,12 @@ export const feature: MawFeature = {
             attachments: savedAttachments,
           };
 
-          await startTurnJob(ctx, conv, qItem, agent, chatDir);
-          await writeJsonStore(convsFile, convsData);
+          try {
+            await startTurnJob(ctx, conv, qItem, agent, chatDir);
+          } finally {
+            conv.updated_at = new Date().toISOString();
+            await writeJsonStore(convsFile, convsData);
+          }
 
           const allMsgs = readConversationMessages(chatDir, conv.id);
           const latestMsg = allMsgs[allMsgs.length - 1]!;
@@ -608,31 +612,44 @@ export const feature: MawFeature = {
           }
 
           const jobId = conv.active_job_id;
+          let cancelSucceeded = false;
           try {
             await handleCancelJob({ job_id: jobId }, ctx.paths);
-          } catch {
-            // Best-effort cancel
+            cancelSucceeded = true;
+          } catch (err: unknown) {
+            // Item 3: Only clear if handleCancelJob succeeded or reports job is no longer RUNNING (409 with terminal status)
+            if (
+              err instanceof ApiValidationError &&
+              err.statusCode === 409 &&
+              typeof (err as unknown as Record<string, unknown>).status === 'string'
+            ) {
+              cancelSucceeded = true;
+            } else {
+              throw err;
+            }
           }
 
-          // Mark running message cancelled
-          const msgs = readConversationMessages(chatDir, conv.id);
-          const runningMsg = msgs.find((m) => m.job_id === jobId);
-          if (runningMsg) {
-            runningMsg.status = 'cancelled';
-            updateConversationMessages(chatDir, conv.id, msgs);
+          if (cancelSucceeded) {
+            // Mark running message cancelled
+            const msgs = readConversationMessages(chatDir, conv.id);
+            const runningMsg = msgs.find((m) => m.job_id === jobId);
+            if (runningMsg) {
+              runningMsg.status = 'cancelled';
+              updateConversationMessages(chatDir, conv.id, msgs);
+            }
+
+            conv.active_job_id = '';
+            conv.active_kind = '';
+            conv.active_started_at = '';
+            conv.updated_at = new Date().toISOString();
+            await writeJsonStore(convsFile, convsData);
+
+            await appendAuditLog(chatDir, {
+              action: 'chat_stop',
+              target: convId,
+              detail: { cancelled_job_id: jobId },
+            });
           }
-
-          conv.active_job_id = '';
-          conv.active_kind = '';
-          conv.active_started_at = '';
-          conv.updated_at = new Date().toISOString();
-          await writeJsonStore(convsFile, convsData);
-
-          await appendAuditLog(chatDir, {
-            action: 'chat_stop',
-            target: convId,
-            detail: { cancelled_job_id: jobId },
-          });
 
           return {
             ok: true,

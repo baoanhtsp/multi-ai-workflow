@@ -4,7 +4,7 @@ import { handleCancelJob, refreshJobMetaStatus, type JobMeta } from '../../actio
 import { handleSpecGuard } from '../../actions/specGuard.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
 import { isFileSafe } from '../../lib/paths.ts';
-import { getWorktreeChangedFiles } from '../agents-ws/lib/git.ts';
+import { getBaseCommit, getWorktreeChangedFiles } from '../agents-ws/lib/git.ts';
 import { matchesAnyScope } from '../agents-ws/lib/glob.ts';
 import {
   parseHandoffDispatchBlock,
@@ -250,9 +250,11 @@ export async function finalizeHandoff(
     }
   }
 
-  // Append [Handoff ...] message to Lead conversation
+  // Append [Handoff ...] message to Lead conversation (idempotent: only if not already notified)
   const leadConv = convsData.conversations.find((c) => c.id === target.lead_conversation_id);
-  if (leadConv) {
+  if (leadConv && !target.lead_notified_at) {
+    target.lead_notified_at = new Date().toISOString();
+    h.lead_notified_at = target.lead_notified_at;
     leadConv.seq++;
     const memberAgent = agentsData.agents.find((a) => a.id === target.to);
     const memberName = memberAgent ? memberAgent.name : target.to_role;
@@ -791,54 +793,59 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       } else {
         h.result = parsedRes.result;
 
-        // Write scope check when isolated
+        // Write scope check when isolated in worktree
         let finalStatus: HandoffStatus = h.result.status;
-        if (h.isolated && h.worktree) {
-          const changedFiles = await getWorktreeChangedFiles(h.worktree);
-          const unionFiles = new Set([...changedFiles, ...h.result.files_changed]);
+        if (h.worktree) {
+          const changedRes = await getWorktreeChangedFiles(h.worktree, h.base_commit);
+          if (!changedRes.ok) {
+            h.parse_error = 'could not list changed files';
+            finalStatus = 'needs_review';
+          } else {
+            const unionFiles = new Set([...changedRes.files, ...h.result.files_changed]);
 
-          const targetAgent = agentsData.agents.find((a) => a.id === h.to);
-          let writeScope: string[] = ['**'];
-          if (targetAgent?.workdir) {
-            const teamFile = path.win32.join(targetAgent.workdir, '.maw', 'team.json');
-            if (isFileSafe(teamFile)) {
-              try {
-                const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
-                const role = team.roles.find((r) => r.key === h.to_role);
-                writeScope = role?.override?.write_scope ?? team.shared.write_scope ?? ['**'];
-              } catch {}
-            }
-          }
-
-          const violations: string[] = [];
-          for (const f of unionFiles) {
-            if (!matchesAnyScope(f, writeScope)) {
-              violations.push(f);
-            }
-          }
-
-          try {
-            const guardRes = await handleSpecGuard(
-              { project_path: h.worktree, owner: h.platform },
-              ctx.paths
-            );
-            if (guardRes && guardRes.verdict === 'FAIL') {
-              const guardViolations = Array.isArray(guardRes.violations)
-                ? (guardRes.violations as Array<{ path?: string }>)
-                    .map((v) => String(v.path ?? ''))
-                    .filter((p) => p.length > 0)
-                : [];
-              for (const gv of guardViolations) {
-                if (!violations.includes(gv)) {
-                  violations.push(gv);
-                }
+            const targetAgent = agentsData.agents.find((a) => a.id === h.to);
+            let writeScope: string[] = ['**'];
+            if (targetAgent?.workdir) {
+              const teamFile = path.win32.join(targetAgent.workdir, '.maw', 'team.json');
+              if (isFileSafe(teamFile)) {
+                try {
+                  const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
+                  const role = team.roles.find((r) => r.key === h.to_role);
+                  writeScope = role?.override?.write_scope ?? team.shared.write_scope ?? ['**'];
+                } catch {}
               }
             }
-          } catch {}
 
-          if (violations.length > 0) {
-            h.scope_violations = violations;
-            finalStatus = 'needs_review';
+            const violations: string[] = [];
+            for (const f of unionFiles) {
+              if (!matchesAnyScope(f, writeScope)) {
+                violations.push(f);
+              }
+            }
+
+            try {
+              const guardRes = await handleSpecGuard(
+                { project_path: h.worktree, owner: h.platform },
+                ctx.paths
+              );
+              if (guardRes && guardRes.verdict === 'FAIL') {
+                const guardViolations = Array.isArray(guardRes.violations)
+                  ? (guardRes.violations as Array<{ path?: string }>)
+                      .map((v) => String(v.path ?? ''))
+                      .filter((p) => p.length > 0)
+                  : [];
+                for (const gv of guardViolations) {
+                  if (!violations.includes(gv)) {
+                    violations.push(gv);
+                  }
+                }
+              }
+            } catch {}
+
+            if (violations.length > 0) {
+              h.scope_violations = violations;
+              finalStatus = 'needs_review';
+            }
           }
         }
 
@@ -1037,6 +1044,12 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       // Item 4: new_session true for new_session-capable platform (antigravity)
       const newSession = newSessionFor(ctx, memberAgent.platform);
 
+      // Record base_commit (git rev-parse HEAD of the member's workdir)
+      let baseCommit: string | null = null;
+      if (memberAgent.workdir) {
+        baseCommit = await getBaseCommit(memberAgent.workdir);
+      }
+
       try {
         const jobRes = await ctx.startJob({
           mode: 'task',
@@ -1053,6 +1066,9 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         h.status = 'running';
         h.job_id = String(jobRes.job_id ?? '');
         h.started_at = new Date().toISOString();
+        if (baseCommit) {
+          h.base_commit = baseCommit;
+        }
         runningCount++;
         handoffsDirty = true;
 
