@@ -43,7 +43,6 @@ Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-cla
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-codex.ps1" "$geminiScriptsDir\invoke-codex.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-antigravity.ps1" "$geminiScriptsDir\invoke-antigravity.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\save-agentapi-env.ps1" "$geminiScriptsDir\save-agentapi-env.ps1"
-Copy-WithUserPath "$repoRoot\antigravity\hooks.json" "$geminiConfigDir\hooks.json"
 
 # 4. Install Claude Code Global Memory & Slash Command (/antigravity)
 Copy-WithUserPath "$repoRoot\claude\CLAUDE.md" "$claudeDir\CLAUDE.md"
