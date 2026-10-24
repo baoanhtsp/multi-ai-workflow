@@ -490,7 +490,9 @@
     }
     syncParams();
     try {
-      const r = await api('review_hunk', body({ path, hunk_id: hunkId || null, action, confirm: action === 'reject' ? true : undefined }));
+      // Same diff options as the view, so the server finds the same hunk ids.
+      const r = await api('review_hunk', body({ path, hunk_id: hunkId || null, action, confirm: action === 'reject' ? true : undefined,
+        context: V.ctx, ignore_ws: V.ws }));
       const st = session().states[path] ||= { file: null, hunks: {} };
       st.hunks ||= {};
       const mark = action === 'accept' ? 'accepted' : 'rejected';
