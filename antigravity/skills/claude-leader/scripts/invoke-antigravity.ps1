@@ -21,10 +21,38 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 $agentApi = Join-Path $env:USERPROFILE ".gemini\antigravity\bin\agentapi.bat"
 $brainDir = Join-Path $env:USERPROFILE ".gemini\antigravity\brain"
 $presenceDir = Join-Path $env:USERPROFILE ".gemini\antigravity\presence"
+$bridgeFile = Join-Path $env:USERPROFILE ".gemini\antigravity\agentapi-bridge.json"
 
 if (-not (Test-Path $agentApi)) {
     Write-Error "Could not locate agentapi.bat at $agentApi"
     exit 1
+}
+
+# 1. Auto-inject Antigravity CSRF Token & Language Server Address when called from external terminals (e.g. Claude Code)
+if (Test-Path $bridgeFile) {
+    try {
+        $bridgeData = Get-Content -Path $bridgeFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $env:ANTIGRAVITY_CSRF_TOKEN -and $bridgeData.ANTIGRAVITY_CSRF_TOKEN) {
+            $env:ANTIGRAVITY_CSRF_TOKEN = $bridgeData.ANTIGRAVITY_CSRF_TOKEN
+        }
+        if (-not $env:ANTIGRAVITY_LS_ADDRESS -and $bridgeData.ANTIGRAVITY_LS_ADDRESS) {
+            $env:ANTIGRAVITY_LS_ADDRESS = $bridgeData.ANTIGRAVITY_LS_ADDRESS
+        }
+        if (-not $env:ANTIGRAVITY_LS_VERSION -and $bridgeData.ANTIGRAVITY_LS_VERSION) {
+            $env:ANTIGRAVITY_LS_VERSION = $bridgeData.ANTIGRAVITY_LS_VERSION
+        }
+        if (-not $env:ANTIGRAVITY_APP_DATA_DIR -and $bridgeData.ANTIGRAVITY_APP_DATA_DIR) {
+            $env:ANTIGRAVITY_APP_DATA_DIR = $bridgeData.ANTIGRAVITY_APP_DATA_DIR
+        }
+        if (-not $env:ANTIGRAVITY_AGENTAPI_EXE -and $bridgeData.ANTIGRAVITY_AGENTAPI_EXE) {
+            $env:ANTIGRAVITY_AGENTAPI_EXE = $bridgeData.ANTIGRAVITY_AGENTAPI_EXE
+        }
+        if (-not $env:ANTIGRAVITY_AGENT) {
+            $env:ANTIGRAVITY_AGENT = "1"
+        }
+    } catch {
+        Write-Warning "Failed to parse $bridgeFile : $_"
+    }
 }
 
 function Get-LatestConversationId {
