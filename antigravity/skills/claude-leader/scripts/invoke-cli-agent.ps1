@@ -261,9 +261,13 @@ try {
                 Write-Output "ERROR: Refusing to execute .cmd/.bat shim '$resolvedCmd' with prompt_via='arg' through cmd.exe (shell injection risk). Configure prompt_via='stdin' or 'file_arg' instead."
                 exit 1
             }
+            if ($resolvedCmd -match '["%!\r\n\0]') {
+                Write-Output "ERROR: Refusing to execute .cmd/.bat shim '$resolvedCmd' because its path contains forbidden cmd.exe characters (double-quote, %, !, CR, LF, or NUL)."
+                exit 1
+            }
             foreach ($ra in $renderedArgs) {
-                if ($ra -match "[\r\n\0]") {
-                    Write-Output "ERROR: Refusing to pass argument containing newline or NUL byte to .cmd/.bat shim '$resolvedCmd' through cmd.exe."
+                if ($ra -match '["%!\r\n\0]') {
+                    Write-Output "ERROR: Refusing to pass argument containing forbidden character (double-quote, %, !, CR, LF, or NUL) to .cmd/.bat shim '$resolvedCmd' through cmd.exe."
                     exit 1
                 }
             }

@@ -35,16 +35,15 @@ function ConvertTo-CmdSafeArgument {
         return '""'
     }
 
-    # Escape cmd.exe metacharacters (^ " & | < > ( ) % ! and whitespace) with ^ outside quotes
-    # so cmd.exe /d /s /c never enters quote-toggling mode and never interprets shell operators.
-    $sb = New-Object System.Text.StringBuilder
-    foreach ($ch in $Value.ToCharArray()) {
-        if ($ch -in @([char]'^', [char]'"', [char]'&', [char]'|', [char]'<', [char]'>', [char]'(', [char]')', [char]'%', [char]'!', [char]' ', [char]"`t")) {
-            [void]$sb.Append('^')
-        }
-        [void]$sb.Append($ch)
+    if ($Value -match '["%!\r\n\0]') {
+        throw "Argument for .cmd/.bat shim contains forbidden character (double-quote, %, !, CR, LF, or NUL)."
     }
-    return $sb.ToString()
+
+    # BatBadBut (CVE-2024-24576) mitigation:
+    # Wrap EVERY argument in double quotes (with no caret escaping) so that when the batch file
+    # expands %* on a second parse pass, the argument remains double-quoted and & | < > ^ ( ) and spaces stay literal.
+    $escaped = [regex]::Replace($Value, '(\\*)$', '$1$1')
+    return '"' + $escaped + '"'
 }
 
 function Normalize-MawWorkspacePath {

@@ -382,7 +382,7 @@ Describe "v4.0 Agent Registry (lib/maw-registry.ps1) & CLI Adapter (invoke-cli-a
         }
     }
 
-    It "prevents cmd.exe metacharacter injection on .cmd shims: refuses prompt_via=arg and escapes metacharacters on stdin/file_arg" {
+    It "prevents cmd.exe BatBadBut injection on .cmd shims by quoting all args across %* and refusing forbidden characters" {
         $tmpMaw = Join-Path $env:TEMP ("maw_cmd_inj_" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Path $tmpMaw -Force | Out-Null
         $prevMaw = $env:MAW_HOME
@@ -390,7 +390,11 @@ Describe "v4.0 Agent Registry (lib/maw-registry.ps1) & CLI Adapter (invoke-cli-a
             $env:MAW_HOME = $tmpMaw
             $fakeCmdPath = Join-Path $tmpMaw "fake-cli.cmd"
             $pwnedFile   = Join-Path $tmpMaw "pwned.txt"
-            [System.IO.File]::WriteAllText($fakeCmdPath, "@echo off`r`necho FAKE_CMD_OK`r`n", [System.Text.Encoding]::ASCII)
+            $pwnedFile2  = Join-Path $tmpMaw "pwned2.txt"
+            # Note: echo %* triggers cmd.exe's second parse pass on expanded arguments (CVE-2024-24576 / BatBadBut)
+            [System.IO.File]::WriteAllText($fakeCmdPath, "@echo off`r`necho %*`r`n", [System.Text.Encoding]::ASCII)
+
+            $specialLiteralArg = "R&D (v1) | a<b > $pwnedFile2 ^ space"
 
             $injJson = @{
                 version = 1
@@ -416,8 +420,8 @@ Describe "v4.0 Agent Registry (lib/maw-registry.ps1) & CLI Adapter (invoke-cli-a
                         }
                     },
                     @{
-                        id           = "cmd-stdin-ai"
-                        label        = "Cmd Stdin AI"
+                        id           = "cmd-filearg-ai"
+                        label        = "Cmd FileArg AI"
                         color        = "#00aa00"
                         enabled      = $true
                         adapter      = "cli"
@@ -427,8 +431,28 @@ Describe "v4.0 Agent Registry (lib/maw-registry.ps1) & CLI Adapter (invoke-cli-a
                         capabilities = @{ write = $true; review = $true; new_session = $false; sessions = $false; ide_send = $false }
                         cli          = @{
                             command     = $fakeCmdPath
+                            prompt_via  = "file_arg"
+                            args        = @("--message-file", "{prompt_file}", "--tag", $specialLiteralArg)
+                            role_args   = @{}
+                            model_args  = @("-m", "{model}")
+                            effort_args = @()
+                            output      = "text"
+                        }
+                    },
+                    @{
+                        id           = "cmd-percent-ai"
+                        label        = "Cmd Percent AI"
+                        color        = "#aa00aa"
+                        enabled      = $true
+                        adapter      = "cli"
+                        detect       = @{ command = $fakeCmdPath; version_args = @() }
+                        models       = @("auto")
+                        efforts      = @()
+                        capabilities = @{ write = $true; review = $true; new_session = $false; sessions = $false; ide_send = $false }
+                        cli          = @{
+                            command     = $fakeCmdPath
                             prompt_via  = "stdin"
-                            args        = @("--tag", "safe&echo PWNED > `"$pwnedFile`"")
+                            args        = @("--bad", "%PATH%")
                             role_args   = @{}
                             model_args  = @()
                             effort_args = @()
@@ -450,15 +474,25 @@ Describe "v4.0 Agent Registry (lib/maw-registry.ps1) & CLI Adapter (invoke-cli-a
             ($outArg | Out-String) | Should -Match "Refusing to execute \.cmd/\.bat shim"
             (Test-Path -LiteralPath $pwnedFile) | Should -BeFalse
 
-            # 2. prompt_via: "stdin" with .cmd shim and metacharacters in args -> escaped, pwned.txt NOT created
-            $outStdin = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:invokeCliPath `
-                -AgentId "cmd-stdin-ai" `
+            # 2. prompt_via: "file_arg" with fake-cli.cmd (echo %*) and args containing & | < > ( ) ^ and spaces -> arrives literally, pwned2.txt NOT created
+            $outFileArg = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:invokeCliPath `
+                -AgentId "cmd-filearg-ai" `
                 -Role "backend" `
                 -WorkDir $tmpMaw `
-                -Prompt $maliciousPrompt 2>&1
+                -Prompt "Normal prompt in file" 2>&1
             $LASTEXITCODE | Should -Be 0
-            ($outStdin | Out-String) | Should -Match "FAKE_CMD_OK"
-            (Test-Path -LiteralPath $pwnedFile) | Should -BeFalse
+            $outFileArgText = ($outFileArg | Out-String)
+            $outFileArgText | Should -Match ([regex]::Escape($specialLiteralArg))
+            (Test-Path -LiteralPath $pwnedFile2) | Should -BeFalse
+
+            # 3. Argument containing % is refused with exit 1
+            $outPct = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:invokeCliPath `
+                -AgentId "cmd-percent-ai" `
+                -Role "backend" `
+                -WorkDir $tmpMaw `
+                -Prompt "Test percent refusal" 2>&1
+            $LASTEXITCODE | Should -Be 1
+            ($outPct | Out-String) | Should -Match "forbidden character"
         } finally {
             $env:MAW_HOME = $prevMaw
             Remove-Item -LiteralPath $tmpMaw -Recurse -Force -ErrorAction SilentlyContinue
