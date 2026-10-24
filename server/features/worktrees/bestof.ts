@@ -9,7 +9,7 @@ import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { gitRun, snapshotTree } from '../checkpoints/snapshot.ts';
 import { createWorktreeRecord } from './isolate.ts';
-import { handleWorktreeDiscard, handleWorktreeMerge } from './merge.ts';
+import { handleWorktreeDiscard, handleWorktreeMerge, isJobStillRunning } from './merge.ts';
 import { loadWorktreesStore, withStoreLock } from './store.ts';
 
 export const BESTOF_ID_REGEX = /^bo\d{14}[0-9a-f]{2}$/i;
@@ -65,8 +65,8 @@ export interface BestOfRun {
   [key: string]: unknown;
 }
 
-const runLocks = new Map<string, Promise<void>>();
-const activeCheckRuns = new Set<string>();
+export const runLocks = new Map<string, Promise<void>>();
+export const activeCheckRuns = new Set<string>();
 
 export async function withRunLock<T>(runId: string, fn: () => Promise<T>): Promise<T> {
   const current = runLocks.get(runId) ?? Promise.resolve();
@@ -262,10 +262,15 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
     const needTests = run.judge === 'tests' || run.judge === 'both';
     const needCouncil = run.judge === 'council' || run.judge === 'both';
 
-    // 2a. Tests in background promise (N2)
+    // 2a. Tests in background promise (N2, R2-2, R2-3)
     if (needTests) {
       for (const c of run.candidates) {
-        if (!c.tests) {
+        const runKey = `${run.id}_${c.i}`;
+        // R2-2: Treat tests.status: 'running' but NOT in activeCheckRuns (server restarted) as "start again"
+        const shouldRunChecks =
+          !c.tests || (c.tests.status === 'running' && !activeCheckRuns.has(runKey));
+
+        if (shouldRunChecks) {
           const wtRec = store.worktrees.find((w) => w.id === c.worktree_id);
           const repo = run.project_path;
           const checksFile = path.win32.join(repo, '.maw', 'checks.json');
@@ -293,7 +298,6 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
               c.tests = { status: 'none', results: [] };
             } else {
               c.tests = { status: 'running', results: [] };
-              const runKey = `${run.id}_${c.i}`;
               if (!activeCheckRuns.has(runKey)) {
                 activeCheckRuns.add(runKey);
                 const wtPath = wtRec.worktree_path;
@@ -394,6 +398,35 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
                         }
                       }
                     });
+                  } catch (err) {
+                    // R2-3: Catch unhandled rejection and record tests.status: 'error' under withRunLock
+                    try {
+                      const msg = err instanceof Error ? err.message : String(err);
+                      await withRunLock(runId, async () => {
+                        const freshRun = loadBestOfRun(dataDir, runId);
+                        if (freshRun) {
+                          const targetCand = freshRun.candidates.find(
+                            (cand) => cand.i === candidateIndex
+                          );
+                          if (targetCand) {
+                            targetCand.tests = {
+                              status: 'error',
+                              results: [
+                                {
+                                  name: 'runner',
+                                  exit_code: null,
+                                  duration_s: 0,
+                                  tail: msg,
+                                },
+                              ],
+                            };
+                            saveBestOfRun(dataDir, freshRun);
+                          }
+                        }
+                      });
+                    } catch {
+                      // Swallow internal logger error
+                    }
                   } finally {
                     activeCheckRuns.delete(runKey);
                   }
@@ -714,12 +747,13 @@ export async function handleBestOfStatus(
   }
 
   const dataDir = ctx.paths.featureDataDir('worktrees');
-  const run = loadBestOfRun(dataDir, id);
-  if (!run) {
-    throw new ApiValidationError(`Best-of-N run '${id}' not found.`, 404);
-  }
 
+  // R2-1: Load the run file INSIDE withRunLock so concurrent background writes are never overwritten
   const updatedRun = await withRunLock(id, async () => {
+    const run = loadBestOfRun(dataDir, id);
+    if (!run) {
+      throw new ApiValidationError(`Best-of-N run '${id}' not found.`, 404);
+    }
     return await advanceBestOfRun(ctx, run);
   });
 
@@ -797,8 +831,8 @@ export async function handleBestOfPick(
       throw new ApiValidationError(`Candidate ${candIndex} not found in run '${id}'.`, 404);
     }
 
-    // N5: Refuse (409) if picked candidate is RUNNING
-    if (candidate.job_status === 'RUNNING') {
+    // N5, R2-6: Refuse (409) if picked candidate is RUNNING
+    if (candidate.job_status === 'RUNNING' || (await isJobStillRunning(ctx, candidate.job_id))) {
       throw new ApiValidationError('Candidate job is still running.', 409);
     }
 

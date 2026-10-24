@@ -5,10 +5,21 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { feature } from '../features/worktrees/index.ts';
-import { handleBestOfPick, handleBestOfStart, handleBestOfStatus, loadBestOfRun } from '../features/worktrees/bestof.ts';
+import {
+  activeCheckRuns,
+  handleBestOfPick,
+  handleBestOfStart,
+  handleBestOfStatus,
+  loadBestOfRun,
+  saveBestOfRun,
+} from '../features/worktrees/bestof.ts';
 import { createWorktreeRecord, handleWorktreeJob } from '../features/worktrees/isolate.ts';
 import { handleWorktreeDiscard, handleWorktreeFixConflicts, handleWorktreeMerge } from '../features/worktrees/merge.ts';
-import { loadWorktreesStore, type WorktreeRecord } from '../features/worktrees/store.ts';
+import {
+  loadWorktreesStore,
+  saveWorktreesStore,
+  type WorktreeRecord,
+} from '../features/worktrees/store.ts';
 import type { MawFeatureContext, MawFeatureRequest } from '../lib/feature.ts';
 import { resolveServerPaths, type ServerPaths } from '../lib/paths.ts';
 import { runCommand } from '../lib/proc.ts';
@@ -105,7 +116,19 @@ async function setupWorktreeEnv(): Promise<WorktreeTestEnv> {
       userPath: '',
       warnings: [],
     },
-    readJobs: async () => recordedJobs,
+    readJobs: async () => {
+      return recordedJobs.map((j) => {
+        const jobId = String(j.job_id ?? '');
+        const metaPath = path.win32.join(jobsDir, `${jobId}.json`);
+        if (fs.existsSync(metaPath)) {
+          try {
+            const disk = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
+            return { ...j, ...disk };
+          } catch {}
+        }
+        return j;
+      });
+    },
     startJob: async (body: Record<string, unknown>) => {
       const jobId = `job_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
       const rec = { job_id: jobId, pid: 9999, status: 'RUNNING', ...body };
@@ -731,6 +754,134 @@ test('S1 Worktrees: Best-of-N slow check returns immediately with tests.status r
     const cand1 = (updatedRun.candidates as Array<Record<string, unknown>>)[0]!;
     assert.ok(cand1.tests);
     assert.equal((cand1.tests as Record<string, unknown>).status, 'running');
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees R2-1: bestof_status loads run inside lock so concurrent background results survive', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    const startRes = await handleBestOfStart(env.ctx, {
+      project_path: env.repoDir,
+      prompt: 'Test R2-1 result survival',
+      role: 'backend',
+      candidates: [{ agent: 'antigravity' }, { agent: 'claude' }],
+      judge: 'tests',
+    });
+    const runId = String(startRes.id);
+    const dataDir = env.paths.featureDataDir('worktrees');
+
+    // Transition run to judging with tests: pass written by background runner
+    const run = loadBestOfRun(dataDir, runId)!;
+    run.state = 'judging';
+    run.candidates[0]!.tests = {
+      status: 'pass',
+      results: [{ name: 'unit', exit_code: 0, duration_s: 1, tail: 'all passed' }],
+    };
+    run.candidates[1]!.tests = {
+      status: 'pass',
+      results: [{ name: 'unit', exit_code: 0, duration_s: 1, tail: 'all passed' }],
+    };
+    saveBestOfRun(dataDir, run);
+
+    // Call handleBestOfStatus - must load fresh run inside withRunLock and not overwrite with 'running'
+    const statRes = await handleBestOfStatus(env.ctx, new URLSearchParams(`id=${runId}`));
+    assert.equal(statRes.ok, true);
+    const loaded = statRes.run as Record<string, unknown>;
+    const c0 = (loaded.candidates as Array<Record<string, unknown>>)[0]!;
+    assert.equal((c0.tests as Record<string, unknown>).status, 'pass');
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees R2-2: advanceBestOfRun restarts tests when candidate is running but not in activeCheckRuns', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    fs.mkdirSync(path.win32.join(env.repoDir, '.maw'), { recursive: true });
+    fs.writeFileSync(
+      path.win32.join(env.repoDir, '.maw', 'checks.json'),
+      JSON.stringify({
+        checks: [{ name: 'dummy', command: ['git', 'status'] }],
+      }),
+      'utf8'
+    );
+
+    const startRes = await handleBestOfStart(env.ctx, {
+      project_path: env.repoDir,
+      prompt: 'Test R2-2 recovery',
+      role: 'backend',
+      candidates: [{ agent: 'antigravity' }, { agent: 'claude' }],
+      judge: 'tests',
+    });
+    const runId = String(startRes.id);
+    const dataDir = env.paths.featureDataDir('worktrees');
+
+    // Simulate server crash while candidates were running
+    const run = loadBestOfRun(dataDir, runId)!;
+    run.state = 'judging';
+    run.candidates[0]!.tests = { status: 'running', results: [] };
+    run.candidates[1]!.tests = { status: 'none', results: [] };
+    saveBestOfRun(dataDir, run);
+
+    // activeCheckRuns does not have this run's key (simulating process restart)
+    activeCheckRuns.clear();
+    assert.equal(activeCheckRuns.has(`${runId}_1`), false);
+
+    // Calling status must detect candidate is 'running' but not in activeCheckRuns and restart it
+    const statRes = await handleBestOfStatus(env.ctx, new URLSearchParams(`id=${runId}`));
+    assert.equal(statRes.ok, true);
+    assert.equal(activeCheckRuns.has(`${runId}_1`), true, 'Check must be re-added to activeCheckRuns');
+  } finally {
+    activeCheckRuns.clear();
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees R2-5 & R2-6: merge falls back to job agent when owner is empty, and checks status via readJobs', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    // Create worktree with empty owner
+    const wtRes = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'r2-merge-test',
+      owner: undefined,
+      origin: 'job',
+    });
+
+    const fakeJobId = 'job_r2_done_123';
+    const dataDir = env.paths.featureDataDir('worktrees');
+    const store = await loadWorktreesStore(dataDir);
+    const rec = store.worktrees.find((w) => w.id === wtRes.worktree.id)!;
+    rec.job_id = fakeJobId;
+    rec.owner = ''; // explicitly empty string (R2-5)
+    await saveWorktreesStore(dataDir, store);
+
+    // Stale meta file on disk says RUNNING
+    fs.writeFileSync(
+      path.win32.join(env.jobsDir, `${fakeJobId}.json`),
+      JSON.stringify({ job_id: fakeJobId, status: 'RUNNING', agent: 'claude' }),
+      'utf8'
+    );
+
+    // But ctx.readJobs() returns DONE and agent: 'claude' (R2-6)
+    const activeCtx: MawFeatureContext = {
+      ...env.ctx,
+      readJobs: async () => [
+        { job_id: fakeJobId, status: 'DONE', agent: 'claude' },
+      ],
+    };
+
+    // Calling merge must succeed (not blocked by stale meta file) and fallback owner to 'claude'
+    const mergeRes = await handleWorktreeMerge(activeCtx, {
+      id: wtRes.worktree.id,
+      strategy: 'merge',
+      confirm: true,
+    });
+
+    assert.equal(mergeRes.ok, true);
+    assert.equal(mergeRes.merged, true);
   } finally {
     cleanupWorktreeEnv(env);
   }

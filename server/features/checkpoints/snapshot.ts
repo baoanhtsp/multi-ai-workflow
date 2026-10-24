@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { appendAuditEntry } from '../../lib/audit.ts';
 import { getTempDir, isDirectorySafe, isFileSafe } from '../../lib/paths.ts';
 import { runCommand, type RunCommandOptions, type RunCommandResult } from '../../lib/proc.ts';
@@ -142,6 +142,19 @@ export function gitRunWithStdin(
   }
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
+    let settled = false;
+    let timer: NodeJS.Timeout | null = null;
+
+    const safeResolve = (res: { code: number; stdout: string; stderr: string }) => {
+      if (settled) return;
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      resolve(res);
+    };
+
     const mergedEnv: NodeJS.ProcessEnv = {
       ...process.env,
       GIT_TERMINAL_PROMPT: '0',
@@ -149,41 +162,73 @@ export function gitRunWithStdin(
       ...options.env,
     };
 
-    const child = spawn('git', [...args], {
-      cwd: options.cwd,
-      env: mergedEnv,
-      shell: false,
-      windowsHide: true,
-    });
+    let child: ChildProcess;
+    try {
+      child = spawn('git', [...args], {
+        cwd: options.cwd,
+        env: mergedEnv,
+        shell: false,
+        windowsHide: true,
+      });
+    } catch (spawnErr) {
+      const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+      safeResolve({
+        code: 127,
+        stdout: '',
+        stderr: `Failed to spawn git: ${msg}`,
+      });
+      return;
+    }
 
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
 
-    const timeout = setTimeout(() => {
+    child.on('error', (err) => {
+      safeResolve({
+        code: 127,
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        stderr: (Buffer.concat(stderrChunks).toString('utf8') + `\n${err.message}`).trim(),
+      });
+    });
+
+    if (child.stdin) {
+      child.stdin.on('error', (err) => {
+        // EPIPE or write failure: guard against unhandled error crash
+        stderrChunks.push(Buffer.from(`\nstdin error: ${err.message}`));
+      });
+    }
+
+    timer = setTimeout(() => {
       try {
         child.kill();
       } catch {}
-      resolve({
+      safeResolve({
         code: 124,
         stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-        stderr: Buffer.concat(stderrChunks).toString('utf8') + '\nTimed out',
+        stderr: (Buffer.concat(stderrChunks).toString('utf8') + '\nTimed out').trim(),
       });
     }, options.timeoutMs ?? 30000);
 
-    child.stdout.on('data', (d: Buffer) => stdoutChunks.push(d));
-    child.stderr.on('data', (d: Buffer) => stderrChunks.push(d));
+    child.stdout?.on('data', (d: Buffer) => stdoutChunks.push(d));
+    child.stderr?.on('data', (d: Buffer) => stderrChunks.push(d));
 
     child.on('close', (code) => {
-      clearTimeout(timeout);
-      resolve({
+      safeResolve({
         code: typeof code === 'number' ? code : 1,
         stdout: Buffer.concat(stdoutChunks).toString('utf8'),
         stderr: Buffer.concat(stderrChunks).toString('utf8'),
       });
     });
 
-    child.stdin.write(stdinData);
-    child.stdin.end();
+    try {
+      if (child.stdin && !child.stdin.destroyed) {
+        child.stdin.write(stdinData);
+        child.stdin.end();
+      }
+    } catch (writeErr) {
+      const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
+      stderrChunks.push(Buffer.from(`\nstdin write error: ${msg}`));
+    }
   });
 }
 

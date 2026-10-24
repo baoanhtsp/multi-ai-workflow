@@ -13,6 +13,58 @@ import {
   type WorktreeRecord,
 } from './store.ts';
 
+export async function isJobStillRunning(
+  ctx: MawFeatureContext,
+  jobId?: string
+): Promise<boolean> {
+  if (!jobId) return false;
+  try {
+    const allJobs = await ctx.readJobs();
+    const target = allJobs.find((j) => String(j.id ?? j.job_id ?? '').trim() === jobId);
+    if (target && target.status !== undefined) {
+      return String(target.status).trim() === 'RUNNING';
+    }
+  } catch {
+    // fallback to meta file if readJobs throws
+  }
+
+  const metaFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.json`);
+  if (isFileSafe(metaFile)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { status?: string };
+      return meta && meta.status === 'RUNNING';
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+export async function getJobAgent(
+  ctx: MawFeatureContext,
+  jobId?: string
+): Promise<string> {
+  if (!jobId) return '';
+  try {
+    const allJobs = await ctx.readJobs();
+    const target = allJobs.find((j) => String(j.id ?? j.job_id ?? '').trim() === jobId);
+    if (target && typeof target.agent === 'string' && target.agent.trim()) {
+      return target.agent.trim();
+    }
+  } catch {}
+
+  const metaFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.json`);
+  if (isFileSafe(metaFile)) {
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { agent?: string };
+      if (meta && typeof meta.agent === 'string' && meta.agent.trim()) {
+        return meta.agent.trim();
+      }
+    } catch {}
+  }
+  return '';
+}
+
 export async function handleWorktreeMerge(
   ctx: MawFeatureContext,
   body: Record<string, unknown>
@@ -44,20 +96,9 @@ export async function handleWorktreeMerge(
       throw new ApiValidationError(`Worktree '${id}' is not active (status: ${record.status}).`, 409);
     }
 
-    let jobMeta: Record<string, unknown> | null = null;
-    // Check if associated job is still RUNNING
-    if (record.job_id) {
-      const metaFile = path.win32.join(ctx.paths.jobsDir, `${record.job_id}.json`);
-      if (isFileSafe(metaFile)) {
-        try {
-          jobMeta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as Record<string, unknown>;
-          if (jobMeta && jobMeta.status === 'RUNNING') {
-            throw new ApiValidationError('Job is still running.', 409);
-          }
-        } catch (err) {
-          if (err instanceof ApiValidationError) throw err;
-        }
-      }
+    // R2-6: Check if associated job is still RUNNING using ctx.readJobs()
+    if (record.job_id && (await isJobStillRunning(ctx, record.job_id))) {
+      throw new ApiValidationError('Job is still running.', 409);
     }
 
     const wtPath = record.worktree_path;
@@ -93,16 +134,18 @@ export async function handleWorktreeMerge(
       }
     }
 
-    // SPEC Guard verification on the branch diff (W5)
+    // SPEC Guard verification on the branch diff (W5, R2-5)
     let specGuardResult: Record<string, unknown> | null = null;
     const specFile = path.win32.join(repoPath, 'SPEC.md');
-    // Fallback order: owner = body.owner || record.owner || jobMeta?.agent || ''
-    const owner = String(
-      body.owner ??
-        record.owner ??
-        (jobMeta && typeof jobMeta.agent === 'string' ? jobMeta.agent : '') ??
-        ''
-    ).trim();
+    // R2-5: Fallback order with || so empty-string doesn't stop chain:
+    // owner = body.owner || record.owner || jobAgent || ''
+    const jobAgent = await getJobAgent(ctx, record.job_id);
+    const owner = (
+      String(body.owner ?? '').trim() ||
+      String(record.owner ?? '').trim() ||
+      jobAgent ||
+      ''
+    );
 
     if (isFileSafe(specFile) && owner) {
       const tipRes = await gitRun(['rev-parse', 'HEAD'], { cwd: wtPath });
@@ -373,19 +416,9 @@ export async function handleWorktreeFixConflicts(
       throw new ApiValidationError(`Worktree '${id}' is not active.`, 409);
     }
 
-    // W7: Refuse with 409 if record's job is RUNNING
-    if (record.job_id) {
-      const metaFile = path.win32.join(ctx.paths.jobsDir, `${record.job_id}.json`);
-      if (isFileSafe(metaFile)) {
-        try {
-          const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { status?: string };
-          if (meta && meta.status === 'RUNNING') {
-            throw new ApiValidationError('Job is still running.', 409);
-          }
-        } catch (err) {
-          if (err instanceof ApiValidationError) throw err;
-        }
-      }
+    // W7, R2-6: Refuse with 409 if record's job is RUNNING (via ctx.readJobs())
+    if (record.job_id && (await isJobStillRunning(ctx, record.job_id))) {
+      throw new ApiValidationError('Job is still running.', 409);
     }
 
     const wtPath = record.worktree_path;
@@ -477,19 +510,9 @@ export async function handleWorktreeDiscard(
       );
     }
 
-    // W8: Refuse with 409 if job is RUNNING
-    if (record.job_id) {
-      const metaFile = path.win32.join(ctx.paths.jobsDir, `${record.job_id}.json`);
-      if (isFileSafe(metaFile)) {
-        try {
-          const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { status?: string };
-          if (meta && meta.status === 'RUNNING') {
-            throw new ApiValidationError('Job is still running.', 409);
-          }
-        } catch (err) {
-          if (err instanceof ApiValidationError) throw err;
-        }
-      }
+    // W8, R2-6: Refuse with 409 if job is RUNNING (via ctx.readJobs())
+    if (record.job_id && (await isJobStillRunning(ctx, record.job_id))) {
+      throw new ApiValidationError('Job is still running.', 409);
     }
 
     const wtPath = record.worktree_path;
