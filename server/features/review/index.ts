@@ -213,10 +213,10 @@ export const feature: MawFeature = {
 
         let targetHunk: (typeof file.hunks)[number] | null = null;
         if (hunkId === null) {
-          if (action === 'reject' && !fileId) {
-            throw new ApiValidationError('file_id is required for whole-file reject.', 400);
+          if (!fileId) {
+            throw new ApiValidationError('file_id is required for whole-file actions.', 400);
           }
-          if (fileId && file.id !== fileId) {
+          if (file.id !== fileId) {
             throw new ApiValidationError('The diff changed; reload it.', 409);
           }
         } else {

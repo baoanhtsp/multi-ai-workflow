@@ -1657,7 +1657,111 @@ test('whole-file reject requires file_id, returns 409 if file diff changed, and 
         }
       );
     },
-    (err: any) => err instanceof ApiValidationError && err.statusCode === 400 && err.message.includes('file_id is required')
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400 && err.message === 'file_id is required for whole-file actions.'
+  );
+
+  // 2b. Accept whole file without file_id ⇒ 400, stale file_id ⇒ 409
+  await assert.rejects(
+    async () => {
+      await reviewFeature.routes.review_hunk.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=review_hunk'),
+          query: new URLSearchParams(),
+          body: {
+            project_path: projectDir,
+            source: 'worktree',
+            path: 'new-untracked.txt',
+            hunk_id: null,
+            action: 'accept',
+            confirm: true,
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400 && err.message === 'file_id is required for whole-file actions.'
+  );
+
+  await assert.rejects(
+    async () => {
+      await reviewFeature.routes.review_hunk.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=review_hunk'),
+          query: new URLSearchParams(),
+          body: {
+            project_path: projectDir,
+            source: 'worktree',
+            path: 'new-untracked.txt',
+            hunk_id: null,
+            file_id: 'deadbeef1234',
+            action: 'accept',
+            confirm: true,
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409 && err.message === 'The diff changed; reload it.'
+  );
+
+  // 2c. Reset whole file without file_id ⇒ 400, stale file_id ⇒ 409
+  await assert.rejects(
+    async () => {
+      await reviewFeature.routes.review_hunk.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=review_hunk'),
+          query: new URLSearchParams(),
+          body: {
+            project_path: projectDir,
+            source: 'worktree',
+            path: 'new-untracked.txt',
+            hunk_id: null,
+            action: 'reset',
+            confirm: true,
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400 && err.message === 'file_id is required for whole-file actions.'
+  );
+
+  await assert.rejects(
+    async () => {
+      await reviewFeature.routes.review_hunk.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=review_hunk'),
+          query: new URLSearchParams(),
+          body: {
+            project_path: projectDir,
+            source: 'worktree',
+            path: 'new-untracked.txt',
+            hunk_id: null,
+            file_id: 'deadbeef1234',
+            action: 'reset',
+            confirm: true,
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409 && err.message === 'The diff changed; reload it.'
   );
 
   // 3. Modify untracked file in worktree
@@ -2011,6 +2115,172 @@ test('review_comment op edit on sent comment clears sent_at', async () => {
   assert.ok(updatedComment);
   assert.equal(updatedComment.body, 'Updated comment text that should be sent again');
   assert.equal(updatedComment.sent_at, null, 'sent_at must be cleared on edit');
+
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('empty new untracked file reject deletes file after safety snapshot and leaves real index unchanged', async () => {
+  const tmpRoot = path.win32.join(os.tmpdir(), `maw_empty_reject_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const projectDir = path.win32.join(projectsRoot, 'empty-repo');
+  const mawHome = path.win32.join(tmpRoot, '.maw');
+  fs.mkdirSync(projectDir, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    repoRoot: projectDir,
+    mawHome,
+  });
+
+  await runCommand('git', ['-C', projectDir, 'init', '-b', 'main']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.name', 'Tester']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.email', 'tester@example.com']);
+
+  // Initial commit
+  fs.writeFileSync(path.win32.join(projectDir, 'tracked.txt'), 'tracked\n');
+  await runCommand('git', ['-C', projectDir, 'add', 'tracked.txt']);
+  await runCommand('git', ['-C', projectDir, 'commit', '-m', 'init']);
+
+  // Create empty untracked file
+  const emptyFilePath = path.win32.join(projectDir, 'empty-untracked.txt');
+  fs.writeFileSync(emptyFilePath, '');
+
+  const fakeCtx = {
+    paths,
+    registry: { agents: [] } as any,
+    readJobs: async () => [],
+    startJob: async () => ({ ok: true }),
+  };
+
+  // review_diff: check empty file appears with 0 hunks and valid id
+  const diffRes = (await reviewFeature.routes.review_diff.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_diff'),
+      query: new URLSearchParams({ project_path: projectDir, source: 'worktree' }),
+      body: {},
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  const emptyEntry = diffRes.files.find((f: any) => f.path === 'empty-untracked.txt');
+  assert.ok(emptyEntry, 'empty-untracked.txt should be in diff');
+  assert.equal(emptyEntry.hunks.length, 0);
+  assert.ok(emptyEntry.id);
+
+  // whole-file reject with its file_id
+  const rejectRes = (await reviewFeature.routes.review_hunk.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_hunk'),
+      query: new URLSearchParams(),
+      body: {
+        project_path: projectDir,
+        source: 'worktree',
+        path: 'empty-untracked.txt',
+        hunk_id: null,
+        file_id: emptyEntry.id,
+        action: 'reject',
+        confirm: true,
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(rejectRes.ok, true);
+  assert.equal(rejectRes.state, 'rejected');
+  assert.ok(rejectRes.snapshot_ref);
+  assert.ok(!fs.existsSync(emptyFilePath), 'empty file should be gone');
+
+  // Verify snapshot ref exists in git
+  const snapCheck = await runCommand('git', ['-C', projectDir, 'rev-parse', '--verify', rejectRes.snapshot_ref]);
+  assert.equal(snapCheck.code, 0);
+
+  // Real index unchanged
+  const cachedDiff = (await runCommand('git', ['-C', projectDir, 'diff', '--cached'])).stdout;
+  assert.equal(cachedDiff, '');
+
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('unborn repo creates snapshot without parent, and broken repo (corrupt HEAD) refuses reject with 409', async () => {
+  const tmpRoot = path.win32.join(os.tmpdir(), `maw_unborn_broken_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const projectDir = path.win32.join(projectsRoot, 'unborn-repo');
+  const mawHome = path.win32.join(tmpRoot, '.maw');
+  fs.mkdirSync(projectDir, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    repoRoot: projectDir,
+    mawHome,
+  });
+
+  // 1. Unborn repo: git init without any commits
+  await runCommand('git', ['-C', projectDir, 'init', '-b', 'main']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.name', 'Tester']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.email', 'tester@example.com']);
+
+  const testFile = path.win32.join(projectDir, 'init.txt');
+  fs.writeFileSync(testFile, 'unborn content\n');
+
+  // Safety snapshot on unborn repo works and creates commit without parent
+  const snapRef = await createSafetySnapshot(projectDir, paths);
+  assert.ok(snapRef.startsWith('refs/maw/checkpoints/review-'));
+  const catRes = await runCommand('git', ['-C', projectDir, 'cat-file', '-p', snapRef]);
+  assert.equal(catRes.code, 0);
+  assert.ok(!catRes.stdout.includes('parent '), 'Snapshot commit on unborn repo must not have a parent');
+
+  // 2. Broken repo: corrupt .git/HEAD with "garbage"
+  const gitHeadPath = path.win32.join(projectDir, '.git', 'HEAD');
+  fs.writeFileSync(gitHeadPath, 'garbage\n', 'utf8');
+
+  const fakeCtx = {
+    paths,
+    registry: { agents: [] } as any,
+    readJobs: async () => [],
+    startJob: async () => ({ ok: true }),
+  };
+
+  // Reject attempt must be refused with 409 and file left untouched
+  await assert.rejects(
+    async () => {
+      await reviewFeature.routes.review_hunk.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=review_hunk'),
+          query: new URLSearchParams(),
+          body: {
+            project_path: projectDir,
+            source: 'worktree',
+            path: 'init.txt',
+            hunk_id: null,
+            file_id: '123456789012',
+            action: 'reject',
+            confirm: true,
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409 && err.message.includes('Safety snapshot failed')
+  );
+
+  // File is untouched
+  assert.equal(fs.readFileSync(testFile, 'utf8'), 'unborn content\n');
 
   try {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
