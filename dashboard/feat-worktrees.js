@@ -18,7 +18,7 @@
     wtDiff: 'Diff', wtRunHere: 'Chạy job ở đây', wtMerge: 'Merge', wtDiscard: 'Huỷ bỏ', wtDiffTitle: 'Diff {branch} so với {base}',
     wtStrategy: 'Cách merge', wtMsg: 'Commit message (tuỳ chọn)', wtOwner: 'Chủ sở hữu (SPEC Guard)', wtOwnerAuto: 'tự động (agent của job)',
     wtRemove: 'Xoá worktree và nhánh sau khi merge', wtMergeNote: 'Thay đổi chưa commit trong worktree sẽ được commit trước. SPEC Guard kiểm tra diff của nhánh trước khi merge; một checkpoint an toàn được tạo cho thư mục chính.',
-    wtMerged: 'Đã merge {branch} ({commit}).', wtGuardBlock: 'SPEC Guard chặn merge: có tệp ngoài phạm vi của {owner}.', wtMergeAnyway: 'Vẫn merge',
+    wtMerged: 'Đã merge {branch} ({commit}).', wtGuardBlock: 'SPEC Guard chặn merge: có tệp ngoài phạm vi của {owner}.', wtMergeAnyway: 'Vẫn merge', wtGuardError: 'Không chạy được SPEC Guard nên merge bị chặn.',
     wtConflicts: 'Xung đột ở {n} tệp. Hai cây thư mục đã được trả về trạng thái sạch.', wtFixWith: 'Sửa xung đột bằng', wtFix: 'Giao agent sửa',
     wtFixStarted: 'Đã giao {agent} sửa xung đột (job {id}). Merge lại khi job xong.',
     wtDiscardQ: 'Huỷ worktree <b>{branch}</b>? Thư mục bị xoá; trạng thái cuối được giữ ở ref <code>refs/maw/discarded/{id}</code>.',
@@ -49,7 +49,7 @@
     wtDiff: 'Diff', wtRunHere: 'Run job here', wtMerge: 'Merge', wtDiscard: 'Discard', wtDiffTitle: 'Diff {branch} vs {base}',
     wtStrategy: 'Strategy', wtMsg: 'Commit message (optional)', wtOwner: 'Owner (SPEC Guard)', wtOwnerAuto: 'auto (the job\'s agent)',
     wtRemove: 'Remove the worktree and branch after merging', wtMergeNote: 'Uncommitted work in the worktree is committed first. SPEC Guard checks the branch diff before merging; a safety checkpoint of the main checkout is taken.',
-    wtMerged: 'Merged {branch} ({commit}).', wtGuardBlock: 'SPEC Guard blocked the merge: files outside {owner}\'s scope.', wtMergeAnyway: 'Merge anyway',
+    wtMerged: 'Merged {branch} ({commit}).', wtGuardBlock: 'SPEC Guard blocked the merge: files outside {owner}\'s scope.', wtMergeAnyway: 'Merge anyway', wtGuardError: 'SPEC Guard could not run, so the merge was blocked.',
     wtConflicts: 'Conflicts in {n} files. Both trees were returned to a clean state.', wtFixWith: 'Fix conflicts with', wtFix: 'Hand to agent',
     wtFixStarted: '{agent} is fixing the conflicts (job {id}). Merge again when it is done.',
     wtDiscardQ: 'Discard worktree <b>{branch}</b>? The folder is deleted; its final state is kept at <code>refs/maw/discarded/{id}</code>.',
@@ -463,7 +463,7 @@
     }
     if (r.blocked === 'spec_guard') {
       ctx.force = true;
-      box.innerHTML = `<div class="s1-errbox">${esc(t('wtGuardBlock', { owner: label(r.spec_guard?.owner || ctx.owner || '') || '?' }))}</div>${guardHtml(r.spec_guard)}`;
+      box.innerHTML = `<div class="s1-errbox">${esc(r.spec_guard?.error ? t('wtGuardError') : t('wtGuardBlock', { owner: label(r.spec_guard?.owner || ctx.owner || '') || '?' }))}</div>${guardHtml(r.spec_guard)}`;
       const btn = dlg.querySelector('[data-act="ok"]'); if (btn) btn.textContent = t('wtMergeAnyway');
       return false;
     }
