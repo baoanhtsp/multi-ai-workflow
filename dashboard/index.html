@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Multi-AI Mission Control</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://unpkg.com/lucide@latest"></script>
+<script src="https://unpkg.com/lucide@0.469.0/dist/umd/lucide.min.js"></script>
 <script>
 tailwind.config = {
   theme: {
@@ -39,6 +39,7 @@ tailwind.config = {
   .scroll::-webkit-scrollbar { width: 6px; height: 6px; }
   .scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 9px; }
   .pulse-dot { animation: pulse 1.6s cubic-bezier(.4,0,.6,1) infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .4; } }
   @keyframes flow { to { stroke-dashoffset: -24; } }
   .flow { stroke-dasharray: 6 6; animation: flow 1.2s linear infinite; }
   @keyframes floaty { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
@@ -109,7 +110,7 @@ tailwind.config = {
           <defs>
             <linearGradient id="gAC" x1="0" x2="1"><stop offset="0" stop-color="#06B6D4"/><stop offset="1" stop-color="#D97757"/></linearGradient>
             <linearGradient id="gCX" x1="0" x2="1"><stop offset="0" stop-color="#D97757"/><stop offset="1" stop-color="#10B981"/></linearGradient>
-            <linearGradient id="gXA" x1="0" x2="1"><stop offset="0" stop-color="#10B981"/><stop offset="1" stop-color="#06B6D4"/></linearGradient>
+            <linearGradient id="gXA" gradientUnits="userSpaceOnUse" x1="120" y1="210" x2="520" y2="210"><stop offset="0%" stop-color="#06B6D4"/><stop offset="100%" stop-color="#10B981"/></linearGradient>
           </defs>
           <!-- vertices: Claude top, Antigravity bottom-left, Codex bottom-right -->
           <g fill="none" stroke-width="2.5" opacity=".9">
@@ -123,7 +124,7 @@ tailwind.config = {
             <text id="triTotal" x="320" y="244" text-anchor="middle" fill="#fff" font-size="22" font-weight="800" font-family="Inter">0</text>
           </g>
           <!-- Claude -->
-          <g class="node" data-mode="claude" onclick="pickMode('claude')">
+          <g class="node vertex-node" data-mode="claude" tabindex="0" role="button" aria-label="Chọn mode Claude" onclick="pickMode('claude')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pickMode('claude')}">
             <circle cx="320" cy="80" r="52" fill="#1a1210" stroke="#D97757" stroke-width="2.5"/>
             <circle cx="320" cy="80" r="62" fill="none" stroke="#D97757" opacity=".25"/>
             <text x="320" y="76" text-anchor="middle" fill="#F59E0B" font-size="15" font-weight="800" font-family="Inter">CLAUDE</text>
@@ -131,7 +132,7 @@ tailwind.config = {
             <text x="320" y="20" text-anchor="middle" fill="#cbd5e1" font-size="11" font-family="JetBrains Mono">/antigravity</text>
           </g>
           <!-- Antigravity -->
-          <g class="node" style="animation-delay:-1.3s" data-mode="antigravity" onclick="pickMode('antigravity')">
+          <g class="node vertex-node" style="animation-delay:-1.3s" data-mode="antigravity" tabindex="0" role="button" aria-label="Chọn mode Antigravity" onclick="pickMode('antigravity')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pickMode('antigravity')}">
             <circle cx="120" cy="300" r="52" fill="#0a1620" stroke="#06B6D4" stroke-width="2.5"/>
             <circle cx="120" cy="300" r="62" fill="none" stroke="#06B6D4" opacity=".25"/>
             <text x="120" y="296" text-anchor="middle" fill="#06B6D4" font-size="13" font-weight="800" font-family="Inter">ANTIGRAVITY</text>
@@ -139,7 +140,7 @@ tailwind.config = {
             <text x="120" y="376" text-anchor="middle" fill="#cbd5e1" font-size="11" font-family="JetBrains Mono">/claude-leader</text>
           </g>
           <!-- Codex -->
-          <g class="node" style="animation-delay:-2.6s" data-mode="codex" onclick="pickMode('codex')">
+          <g class="node vertex-node" style="animation-delay:-2.6s" data-mode="codex" tabindex="0" role="button" aria-label="Chọn mode Codex" onclick="pickMode('codex')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pickMode('codex')}">
             <circle cx="520" cy="300" r="52" fill="#0a1713" stroke="#10B981" stroke-width="2.5"/>
             <circle cx="520" cy="300" r="62" fill="none" stroke="#10B981" opacity=".25"/>
             <text x="520" y="296" text-anchor="middle" fill="#10B981" font-size="15" font-weight="800" font-family="Inter">CODEX</text>
@@ -184,8 +185,8 @@ tailwind.config = {
         </div>
         <div>
           <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Prompt / Mô tả tác vụ</label>
-          <textarea id="promptTxt" rows="5" class="w-full px-3 py-2 text-sm mt-1.5 scroll resize-y" placeholder="Ví dụ: Đọc SPEC.md và triển khai phần Backend + chạy test…"></textarea>
-          <div class="text-[11px] text-slate-500 text-right mt-1"><span id="charCnt">0</span> ký tự</div>
+          <textarea id="promptTxt" rows="5" maxlength="4000" class="w-full px-3 py-2 text-sm mt-1.5 scroll resize-y" placeholder="Ví dụ: Đọc SPEC.md và triển khai phần Backend + chạy test…"></textarea>
+          <div id="charCnt" class="text-[11px] text-slate-500 text-right mt-1">0 / 4000 chars</div>
         </div>
       </div>
       <!-- right -->
@@ -258,10 +259,10 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const fmt = n => Number(n || 0).toLocaleString('en-US');
 
 const ROLES = {
-  antigravity: ['send-latest', 'architect', 'frontend', 'reviewer', 'ui-tweak'],
+  antigravity: ['send-latest', 'new', 'status', 'wait'],
   claude: ['architect', 'frontend', 'reviewer', 'ui-tweak'],
-  codex: ['reviewer', 'architect', 'frontend', 'ui-tweak'],
-  council: ['architect', 'reviewer', 'frontend', 'ui-tweak']
+  codex: ['review-diff', 'critic', 'coder'],
+  council: ['reviewer']
 };
 const MODES = {
   antigravity: { label: 'Antigravity', icon: 'rocket', c: 'text-ag border-ag/50 bg-ag/10' },
@@ -270,7 +271,7 @@ const MODES = {
   council: { label: 'Council', icon: 'users', c: 'text-violet-300 border-violet-400/50 bg-violet-400/10' }
 };
 
-let state = { data: null, mode: 'antigravity', timer: null, demo: false };
+let state = { data: null, mode: 'antigravity', timer: null, demo: false, lastCmd: '' };
 
 function demoData() {
   const now = new Date();
@@ -318,26 +319,43 @@ function toast(msg, type = 'info') {
 }
 
 async function api(action, body) {
-  if (IS_FILE) throw new Error('file://');
+  if (IS_FILE) throw Object.assign(new Error('file://'), { offline: true });
   const opt = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {};
-  const r = await fetch(`${API}?action=${action}`, opt);
-  if (!r.ok) throw new Error('HTTP ' + r.status);
-  return r.json();
+  let r;
+  try { r = await fetch(`${API}?action=${action}`, opt); }
+  catch (e) { e.offline = true; throw e; }
+  const data = await r.json().catch(() => null);
+  if (!r.ok || !data?.ok) {
+    const err = new Error(data?.error || data?.message || ('HTTP ' + r.status));
+    err.data = data;
+    err.status = r.status;
+    throw err;
+  }
+  return data;
 }
 
+let loadInFlight = false;
 async function load(manual) {
+  if (loadInFlight) return;
+  loadInFlight = true;
   const icon = $('refreshIcon');
   icon.classList.add('spin');
   try {
     state.data = await api('status');
     state.demo = false;
   } catch (e) {
-    state.data = demoData();
-    state.demo = true;
-    if (manual || !state.warned) toast(IS_FILE ? 'Mở qua file:// — dùng demo data. Hãy chạy qua Laragon để xem live.' : 'Không kết nối được api.php — dùng demo data.', 'warn');
-    state.warned = true;
+    if (state.data && !state.demo && !IS_FILE) {
+      toast('Mất kết nối tạm thời tới api.php: ' + e.message, 'err');
+    } else {
+      state.data = demoData();
+      state.demo = true;
+      if (manual || !state.warned) toast(IS_FILE ? 'Mở qua file:// — dùng demo data. Hãy chạy qua Laragon để xem live.' : 'Không kết nối được api.php — dùng demo data.', 'warn');
+      state.warned = true;
+    }
+  } finally {
+    loadInFlight = false;
+    icon.classList.remove('spin');
   }
-  icon.classList.remove('spin');
   render();
 }
 
@@ -488,7 +506,12 @@ function renderModes() {
   $('roleSel').innerHTML = ROLES[state.mode].map(r => `<option>${r}</option>`).join('');
   lucide.createIcons();
 }
-function pickMode(m) { state.mode = m; renderModes(); }
+function resetCmd() {
+  state.lastCmd = '';
+  $('cmdOut').textContent = 'Nhấn "Generate Command" để tạo lệnh…';
+  $('cmdState').textContent = '';
+}
+function pickMode(m) { state.mode = m; renderModes(); resetCmd(); }
 
 function payload(exec) {
   return {
@@ -499,49 +522,74 @@ function payload(exec) {
 }
 
 function localCommand(p) {
-  const base = 'C:\\Users\\Admin\\.gemini\\config\\skills\\claude-leader\\scripts';
-  const q = s => `"${String(s).replace(/"/g, '`"')}"`;
-  if (p.mode === 'antigravity')
-    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${base}\\invoke-antigravity.ps1" -Action send-latest -WorkDir ${q(p.project_path)} -Title "Task from Dashboard" -Prompt ${q(p.prompt)}`;
+  const profile = state.data?.user_profile || 'C:\\Users\\Admin';
+  const s = `${profile}\\.gemini\\config\\skills\\claude-leader\\scripts`;
+  const q = s => "'" + String(s).replace(/['‘-‛]/g, m => m + m) + "'";
+  const ps = 'powershell -NoProfile -ExecutionPolicy Bypass -File';
+  if (p.mode === 'antigravity') {
+    const action = ROLES.antigravity.includes(p.role) ? p.role : 'send-latest';
+    if (action === 'status' || action === 'wait')
+      return `${ps} ${q(s + '\\invoke-antigravity.ps1')} -Action ${action} -WorkDir ${q(p.project_path)}`;
+    return `${ps} ${q(s + '\\invoke-antigravity.ps1')} -Action ${action} -WorkDir ${q(p.project_path)} -Title ${q('Task from Dashboard')} -Prompt ${q(p.prompt)}`;
+  }
   if (p.mode === 'codex')
-    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${base}\\invoke-codex.ps1" -Role ${p.role === 'reviewer' ? 'review-diff' : p.role} -WorkDir ${q(p.project_path)} -Prompt ${q(p.prompt)}`;
+    return `${ps} ${q(s + '\\invoke-codex.ps1')} -Role ${p.role} -WorkDir ${q(p.project_path)}${p.prompt ? ` -Prompt ${q(p.prompt)}` : ''}`;
   if (p.mode === 'claude')
-    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${base}\\invoke-claude.ps1" -Role ${p.role} -WorkDir ${q(p.project_path)} -Prompt ${q(p.prompt)}`;
-  return `# Council: chạy lần lượt Claude (architect) → Antigravity (backend) → Codex (review-diff)\n` +
-    localCommand({ ...p, mode: 'claude', role: 'architect' }) + '\n' +
-    localCommand({ ...p, mode: 'antigravity' }) + '\n' +
-    localCommand({ ...p, mode: 'codex', role: 'review-diff' });
+    return `${ps} ${q(s + '\\invoke-claude.ps1')} -Role ${p.role} -WorkDir ${q(p.project_path)}${p.role === 'reviewer' ? ' -IncludeGitDiff' : ''} -Prompt ${q(p.prompt)}`;
+  return `${ps} ${q(s + '\\invoke-council-review.ps1')} -WorkDir ${q(p.project_path)} -Prompt ${q(p.prompt)}`;
 }
 
 async function generate(exec) {
   const p = payload(exec);
   if (!p.project_path) { toast('Hãy chọn project trước.', 'warn'); return null; }
-  if (!p.prompt) { toast('Prompt đang trống.', 'warn'); return null; }
+  const needsPrompt = exec === true || p.mode === 'claude'
+    || (p.mode === 'codex' && ['critic', 'coder'].includes(p.role))
+    || (p.mode === 'antigravity' && ['send-latest', 'new'].includes(p.role));
+  if (needsPrompt && !p.prompt) { toast('Prompt đang trống.', 'warn'); return null; }
+  setBusy(true);
   try {
     const r = await api('dispatch', p);
-    if (!r.ok) throw new Error(r.error || r.message || 'dispatch failed');
+    state.lastCmd = r.command;
     $('cmdOut').textContent = r.command;
     $('cmdState').textContent = r.dispatched ? '✔ đã dispatch' : 'chỉ tạo lệnh';
     if (exec || r.output) { $('dispOut').classList.remove('hidden'); $('dispOut').textContent = r.output || '(không có output)'; }
     return r;
   } catch (e) {
+    if (!e.offline) {
+      if (e.data?.output) { $('dispOut').classList.remove('hidden'); $('dispOut').textContent = e.data.output; }
+      toast(e.message, 'err');
+      $('cmdState').textContent = 'error · ' + e.message;
+      return null;
+    }
     if (exec) { toast('Không thể gửi trực tiếp (backend không khả dụng).', 'err'); return null; }
-    $('cmdOut').textContent = localCommand(p);
+    state.lastCmd = localCommand(p);
+    $('cmdOut').textContent = state.lastCmd;
     $('cmdState').textContent = 'offline · lệnh dựng cục bộ';
-    return { ok: true, command: $('cmdOut').textContent, dispatched: false };
+    return { ok: true, command: state.lastCmd, dispatched: false };
+  } finally {
+    setBusy(false);
   }
+}
+
+function setBusy(busy) {
+  $('sendBtn').disabled = busy;
+  $('genBtn').disabled = busy;
 }
 
 $('genBtn').onclick = async () => { const r = await generate(false); if (r) toast('Đã tạo lệnh PowerShell.', 'ok'); };
 $('copyBtn').onclick = async () => {
-  let txt = $('cmdOut').textContent;
-  if (!txt || txt.startsWith('Nhấn')) { const r = await generate(false); if (!r) return; txt = r.command; }
+  let txt = state.lastCmd;
+  if (!txt) { const r = await generate(false); if (!r) return; txt = r.command; }
   try { await navigator.clipboard.writeText(txt); }
   catch { const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
   toast('Đã copy lệnh PowerShell!', 'ok');
 };
 $('sendBtn').onclick = async () => {
-  if (state.mode !== 'antigravity') { pickMode('antigravity'); toast('Đã chuyển sang mode antigravity.', 'info'); }
+  if (state.mode !== 'antigravity' || !['send-latest', 'new'].includes($('roleSel').value)) {
+    pickMode('antigravity');
+    toast('Đã chuyển sang mode Antigravity (send-latest). Bấm Send lần nữa để xác nhận gửi lệnh.', 'ok');
+    return;
+  }
   if (!$('promptTxt').value.trim()) { toast('Prompt đang trống.', 'warn'); return; }
   const r = await generate(true);
   if (r) { r.dispatched ? toast('Đã gửi tác vụ tới Antigravity IDE!', 'ok') : toast('Backend tạo lệnh nhưng chưa dispatch.', 'warn'); setTimeout(() => load(), 1500); }
@@ -552,15 +600,25 @@ $('initSpecBtn').onclick = async () => {
   const name = sel.selectedOptions[0].dataset.name;
   try {
     const r = await api('init_spec', { project_path: sel.value, project_name: name });
-    r.ok ? toast(r.created ? `Đã tạo SPEC.md cho ${name}` : (r.message || 'SPEC.md đã tồn tại.'), r.created ? 'ok' : 'info') : toast(r.error || r.message || 'Lỗi init_spec', 'err');
+    toast(r.created ? `Đã tạo SPEC.md cho ${name}` : (r.message || 'SPEC.md đã tồn tại.'), r.created ? 'ok' : 'info');
     load();
   } catch (e) {
+    if (!e.offline) { toast(e.message, 'err'); return; }
     toast('[Demo] Giả lập tạo SPEC.md cho ' + name, 'warn');
     const p = state.data.projects.find(x => x.path === sel.value); if (p) { p.has_spec = true; projMeta(); }
   }
 };
-$('projectSel').onchange = projMeta;
-$('promptTxt').oninput = e => $('charCnt').textContent = e.target.value.length;
+$('projectSel').onchange = () => { projMeta(); resetCmd(); };
+$('roleSel').onchange = resetCmd;
+$('promptTxt').oninput = e => {
+  const n = e.target.value.length;
+  const c = $('charCnt');
+  c.textContent = `${n} / 4000 chars`;
+  c.classList.toggle('text-rose-400', n >= 4000);
+  c.classList.toggle('text-amber-400', n > 3500 && n < 4000);
+  c.classList.toggle('text-slate-500', n <= 3500);
+  resetCmd();
+};
 $('refreshBtn').onclick = () => load(true);
 $('autoToggle').onchange = setAuto;
 

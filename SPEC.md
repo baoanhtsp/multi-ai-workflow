@@ -93,12 +93,17 @@ Returns real-time system health, active Antigravity sessions, discovered project
   ```json
   {
     "mode": "antigravity" | "claude" | "codex" | "council",
-    "role": "architect" | "frontend" | "reviewer" | "ui-tweak" | "send-latest",
+    "role": "<mode-specific role below>",
     "project_path": "C:\\laragon\\www\\multi-ai-workflow",
-    "prompt": "Task description...",
+    "prompt": "Task description (max 4000 chars)...",
     "execute_antigravity": false
   }
   ```
+- **Allowed `role` values per `mode` (Strict Matrix)**:
+  - `claude`: `"architect"` | `"frontend"` | `"reviewer"` | `"ui-tweak"`
+  - `codex`: `"review-diff"` | `"critic"` | `"coder"`
+  - `antigravity`: `"send-latest"` | `"new"` | `"status"` | `"wait"` (note: `execute_antigravity: true` is only supported for `"send-latest"` and `"new"`)
+  - `council`: `"reviewer"` (or `""`)
 - **Behavior**: Generates the exact PowerShell command string for the selected orchestration mode. If `mode === "antigravity"` and `execute_antigravity === true`, invokes `invoke-antigravity.ps1 -Action send-latest -NoWait` in the background to send the task directly to the open Antigravity IDE window.
 - **Response JSON**: `{ "ok": true, "command": "powershell ...", "dispatched": false, "output": "..." }`
 

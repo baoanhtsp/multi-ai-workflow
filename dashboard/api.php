@@ -25,7 +25,8 @@ function respondJson(array $data, int $status = 200): void {
 }
 
 set_exception_handler(static function (Throwable $e): void {
-    respondJson(['ok' => false, 'error' => 'Internal server error: ' . $e->getMessage()], 500);
+    error_log('Dashboard API exception: ' . $e->getMessage());
+    respondJson(['ok' => false, 'error' => 'Internal server error while processing request.'], 500);
 });
 
 // 1. Loopback IP, Host & CSRF/Origin Security Guard
@@ -53,7 +54,12 @@ if (!$isCli) {
         if ($origin !== '') {
             $parsedOrigin = parse_url($origin);
             $originHost = strtolower((string)($parsedOrigin['host'] ?? ''));
-            if (!in_array($originHost, ['localhost', '127.0.0.1', '[::1]'], true)) {
+            $originPort = isset($parsedOrigin['port']) ? ':' . (int)$parsedOrigin['port'] : '';
+            $originAuthority = $originHost . $originPort;
+            if (
+                !in_array($originHost, ['localhost', '127.0.0.1', '[::1]'], true) ||
+                ($httpHost !== '' && $originAuthority !== $httpHost)
+            ) {
                 respondJson(['ok' => false, 'error' => 'Forbidden: Cross-origin request denied.'], 403);
             }
         }
@@ -63,6 +69,9 @@ if (!$isCli) {
 $action = (string)($_GET['action'] ?? 'status');
 $method = strtoupper((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 $userProfile = getenv('USERPROFILE') ?: 'C:\\Users\\Admin';
+if (stripos($userProfile, 'systemprofile') !== false && is_dir('C:\\Users\\Admin\\.gemini')) {
+    $userProfile = 'C:\\Users\\Admin';
+}
 $antigravityDir = $userProfile . '\\.gemini\\antigravity';
 $bridgeFile = $antigravityDir . '\\agentapi-bridge.json';
 $presenceDir = $antigravityDir . '\\presence';
@@ -95,7 +104,7 @@ function psq(string $s): string {
  * Validates that $projectPath is a real subdirectory strictly inside $laragonWww.
  */
 function resolveProjectPath(string $projectPath, string $laragonWww): ?string {
-    if ($projectPath === '') {
+    if ($projectPath === '' || preg_match('/[%!"]/', $projectPath)) {
         return null;
     }
     $realBase = realpath($laragonWww);
@@ -115,27 +124,55 @@ function resolveProjectPath(string $projectPath, string $laragonWww): ?string {
 }
 
 /**
- * Reads up to the last $maxBytes of a file and returns non-empty lines, plus estimated total line count.
+ * Lightweight file metadata cache (keyed by path + mtime + size) to avoid re-scanning unchanged transcripts on 10s polls.
  */
-function readTailLines(string $filePath, int $maxBytes = 65536): array {
+function loadLineCountCache(): array {
+    $cacheFile = sys_get_temp_dir() . '\\agy_dashboard_linecache.json';
+    if (!is_file($cacheFile)) {
+        return [];
+    }
+    $data = json_decode((string)@file_get_contents($cacheFile), true);
+    return is_array($data) ? $data : [];
+}
+
+function saveLineCountCache(array $cache): void {
+    $cacheFile = sys_get_temp_dir() . '\\agy_dashboard_linecache.json';
+    if (count($cache) > 64) {
+        $cache = array_slice($cache, -64, null, true);
+    }
+    @file_put_contents($cacheFile, json_encode($cache, JSON_UNESCAPED_SLASHES));
+}
+
+/**
+ * Reads up to the last $maxBytes of a file and returns non-empty tail lines, using cached total line counts.
+ */
+function readTailLines(string $filePath, array &$lineCache, int $maxBytes = 65536): array {
     if (!is_file($filePath)) {
         return ['total_lines' => 0, 'lines' => []];
     }
     $size = filesize($filePath);
+    $mtime = filemtime($filePath);
     if ($size === false || $size === 0) {
         return ['total_lines' => 0, 'lines' => []];
     }
+
+    $cacheKey = $filePath . '|' . (int)$mtime . '|' . $size;
     $fp = @fopen($filePath, 'rb');
     if (!is_resource($fp)) {
         return ['total_lines' => 0, 'lines' => []];
     }
 
-    $totalLines = 0;
-    while (!feof($fp)) {
-        $chunk = fread($fp, 65536);
-        if ($chunk !== false) {
-            $totalLines += substr_count($chunk, "\n");
+    if (isset($lineCache[$cacheKey]) && is_int($lineCache[$cacheKey])) {
+        $totalLines = $lineCache[$cacheKey];
+    } else {
+        $totalLines = 0;
+        while (!feof($fp)) {
+            $chunk = fread($fp, 65536);
+            if ($chunk !== false) {
+                $totalLines += substr_count($chunk, "\n");
+            }
         }
+        $lineCache[$cacheKey] = $totalLines;
     }
 
     $readLen = min($size, $maxBytes);
@@ -205,18 +242,20 @@ function getBridgeStatus(string $bridgeFile): array {
     ];
 }
 
-function getConversations(string $presenceDir, string $brainDir): array {
+function getConversations(string $presenceDir, string $brainDir, array &$lineCache): array {
     $activeLocks = [];
     $now = time();
     if (is_dir($presenceDir)) {
         foreach (glob($presenceDir . '\\*.lock') ?: [] as $lockFile) {
             $cid = pathinfo($lockFile, PATHINFO_FILENAME);
             $mtime = filemtime($lockFile) ?: 0;
-            if ($mtime > 0 && ($now - $mtime) < 86400) {
+            // Consider locks modified within the last 30 minutes as actively open
+            if ($mtime > 0 && ($now - $mtime) < 1800) {
                 $activeLocks[$cid] = $mtime;
             }
         }
     }
+    arsort($activeLocks);
 
     $candidates = [];
     foreach ($activeLocks as $cid => $mtime) {
@@ -248,8 +287,12 @@ function getConversations(string $presenceDir, string $brainDir): array {
         $mtime = $item['mtime'];
 
         if (is_file($transcript)) {
-            $mtime = max($mtime, filemtime($transcript) ?: 0);
-            $tailData = readTailLines($transcript, 65536);
+            $tMtime = filemtime($transcript) ?: 0;
+            $mtime = max($mtime, $tMtime);
+            if (($now - $tMtime) < 600) {
+                $item['is_active'] = true;
+            }
+            $tailData = readTailLines($transcript, $lineCache, 65536);
             $stepCount = $tailData['total_lines'];
             foreach (array_slice($tailData['lines'], -15) as $line) {
                 $obj = json_decode($line, true);
@@ -330,12 +373,18 @@ function getAuditStats(string $auditFile): array {
         return $stats;
     }
 
-    $tailData = readTailLines($auditFile, 262144);
-    $parsedLogs = [];
+    $fp = @fopen($auditFile, 'rb');
+    if (!is_resource($fp)) {
+        return $stats;
+    }
 
-    foreach ($tailData['lines'] as $line) {
-        $line = preg_replace('/^\xEF\xBB\xBF/', '', $line);
-        $entry = json_decode((string)$line, true);
+    $recentRing = [];
+    while (($line = fgets($fp)) !== false) {
+        $line = trim((string)preg_replace('/^\xEF\xBB\xBF/', '', $line));
+        if ($line === '') {
+            continue;
+        }
+        $entry = json_decode($line, true);
         if (!is_array($entry)) {
             continue;
         }
@@ -350,12 +399,18 @@ function getAuditStats(string $auditFile): array {
         $stats['by_tool'][$tool] = ($stats['by_tool'][$tool] ?? 0) + 1;
 
         $role = strtolower(trim((string)($entry['Role'] ?? 'unknown')));
+        if ($role === '') {
+            $role = 'unknown';
+        }
         $stats['by_role'][$role] = ($stats['by_role'][$role] ?? 0) + 1;
 
         $verdict = strtoupper(trim((string)($entry['Verdict'] ?? 'COMPLETED')));
+        if ($verdict === '') {
+            $verdict = 'COMPLETED';
+        }
         $stats['verdicts'][$verdict] = ($stats['verdicts'][$verdict] ?? 0) + 1;
 
-        $parsedLogs[] = [
+        $recentRing[] = [
             'Timestamp' => $entry['Timestamp'] ?? date('c'),
             'Tool' => $tool,
             'Role' => $role,
@@ -365,10 +420,14 @@ function getAuditStats(string $auditFile): array {
             'Score' => $entry['Score'] ?? '',
             'Verdict' => $verdict,
         ];
+        if (count($recentRing) > 15) {
+            array_shift($recentRing);
+        }
     }
+    fclose($fp);
 
     $stats['estimated_tokens_saved'] = $stats['total_calls'] * 15000;
-    $stats['recent_logs'] = array_reverse(array_slice($parsedLogs, -15));
+    $stats['recent_logs'] = array_reverse($recentRing);
 
     return $stats;
 }
@@ -378,7 +437,11 @@ if ($action === 'status') {
         respondJson(['ok' => false, 'error' => 'Method Not Allowed: Use GET for status.'], 405);
     }
 
+    $lineCache = loadLineCountCache();
     $bridge = getBridgeStatus($bridgeFile);
+    $conversations = getConversations($presenceDir, $brainDir, $lineCache);
+    saveLineCountCache($lineCache);
+
     $claudeInstalled = is_dir($userProfile . '\\.claude');
     $codexInstalled = is_dir($userProfile . '\\.codex');
     $agyInstalled = is_file($antigravityDir . '\\bin\\agentapi.bat');
@@ -410,7 +473,7 @@ if ($action === 'status') {
                 'role_summary' => 'Security/Logic Critic, Native Diff Reviewer & Algorithm Coder',
             ],
         ],
-        'conversations' => getConversations($presenceDir, $brainDir),
+        'conversations' => $conversations,
         'projects' => getLocalProjects($laragonWww),
         'audit' => getAuditStats($auditFile),
     ]);
@@ -433,7 +496,7 @@ if ($action === 'init_spec') {
     }
 
     $projectName = trim((string)($body['project_name'] ?? basename($realTarget)));
-    if ($projectName === '') {
+    if ($projectName === '' || mb_strlen($projectName, 'UTF-8') > 120) {
         $projectName = basename($realTarget);
     }
 
@@ -457,19 +520,24 @@ if ($action === 'init_spec') {
 
     $fp = @fopen($specDest, 'xb');
     if ($fp === false) {
-        respondJson([
-            'ok' => true,
-            'created' => false,
-            'spec_path' => $specDest,
-            'message' => 'SPEC.md already exists in ' . $projectName,
-        ]);
+        if (is_file($specDest)) {
+            respondJson([
+                'ok' => true,
+                'created' => false,
+                'spec_path' => $specDest,
+                'message' => 'SPEC.md already exists in ' . $projectName,
+            ]);
+        }
+        respondJson(['ok' => false, 'error' => 'Permission denied or unable to create SPEC.md in target folder.'], 500);
     }
+
+    $expectedLen = strlen($content);
     $written = fwrite($fp, $content);
     fclose($fp);
 
-    if ($written === false) {
+    if ($written === false || $written !== $expectedLen) {
         @unlink($specDest);
-        respondJson(['ok' => false, 'error' => 'Failed to write SPEC.md to disk.'], 500);
+        respondJson(['ok' => false, 'error' => 'Failed to write complete SPEC.md to disk.'], 500);
     }
 
     respondJson([
@@ -509,7 +577,7 @@ if ($action === 'dispatch') {
         'claude' => ['architect', 'frontend', 'reviewer', 'ui-tweak'],
         'codex' => ['review-diff', 'critic', 'coder'],
         'antigravity' => ['send-latest', 'new', 'status', 'wait'],
-        'council' => ['reviewer', 'review-diff', ''],
+        'council' => ['reviewer', ''],
     ];
 
     if ($mode === 'claude' && !in_array($role, $allowedRolesByMode['claude'], true)) {
@@ -531,15 +599,41 @@ if ($action === 'dispatch') {
             respondJson(['ok' => false, 'error' => 'Invalid role/action for antigravity. Allowed: send-latest, new, status, wait.'], 400);
         }
     }
+    if ($mode === 'council') {
+        if ($role === '') {
+            $role = 'reviewer';
+        }
+        if (!in_array($role, $allowedRolesByMode['council'], true)) {
+            respondJson(['ok' => false, 'error' => 'Invalid role for council. Allowed: reviewer.'], 400);
+        }
+    }
 
-    $prompt = trim((string)($body['prompt'] ?? ''));
+    $rawPrompt = $body['prompt'] ?? '';
+    if (!is_string($rawPrompt)) {
+        respondJson(['ok' => false, 'error' => 'Invalid prompt format: must be a string.'], 400);
+    }
+    $prompt = trim($rawPrompt);
     if (mb_strlen($prompt, 'UTF-8') > 4000) {
         respondJson(['ok' => false, 'error' => 'Prompt exceeds maximum inline length (4000 characters). Use -PromptFile for larger inputs.'], 400);
     }
 
+    $requiresPrompt = (
+        $mode === 'claude' ||
+        ($mode === 'codex' && in_array($role, ['critic', 'coder'], true)) ||
+        ($mode === 'antigravity' && in_array($role, ['send-latest', 'new'], true))
+    );
+    if ($requiresPrompt && $prompt === '') {
+        respondJson(['ok' => false, 'error' => 'Prompt is required for ' . $mode . ' (' . $role . ').'], 400);
+    }
+
     $executeAntigravity = ($body['execute_antigravity'] ?? false) === true;
-    if ($executeAntigravity && $prompt === '') {
-        respondJson(['ok' => false, 'error' => 'Prompt is required when execute_antigravity is true.'], 400);
+    if ($executeAntigravity) {
+        if ($mode !== 'antigravity' || !in_array($role, ['send-latest', 'new'], true)) {
+            respondJson(['ok' => false, 'error' => 'Live execution (execute_antigravity) is only supported for antigravity mode with send-latest or new.'], 400);
+        }
+        if ($prompt === '') {
+            respondJson(['ok' => false, 'error' => 'Prompt is required when execute_antigravity is true.'], 400);
+        }
     }
 
     $scriptsDir = $userProfile . '\\.gemini\\config\\skills\\claude-leader\\scripts';
@@ -555,12 +649,13 @@ if ($action === 'dispatch') {
             psq($prompt)
         );
     } elseif ($mode === 'codex') {
+        $promptArg = ($prompt !== '') ? (' -Prompt ' . psq($prompt)) : '';
         $cmd = sprintf(
-            'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Role %s -WorkDir %s -Prompt %s',
+            'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Role %s -WorkDir %s%s',
             psq($scriptsDir . '\\invoke-codex.ps1'),
             psq($role),
             psq($validatedProjectPath),
-            psq($prompt)
+            $promptArg
         );
     } elseif ($mode === 'council') {
         $effectivePrompt = $prompt !== '' ? $prompt : 'Review uncommitted changes against SPEC.md and score X/10.';
@@ -571,21 +666,30 @@ if ($action === 'dispatch') {
             psq($effectivePrompt)
         );
     } else {
-        $cmd = sprintf(
-            'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Action %s -WorkDir %s -Title %s -Prompt %s',
-            psq($scriptsDir . '\\invoke-antigravity.ps1'),
-            psq($role),
-            psq($validatedProjectPath),
-            psq('Task from Mission Control'),
-            psq($prompt)
-        );
+        if (in_array($role, ['status', 'wait'], true)) {
+            $cmd = sprintf(
+                'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Action %s -WorkDir %s',
+                psq($scriptsDir . '\\invoke-antigravity.ps1'),
+                psq($role),
+                psq($validatedProjectPath)
+            );
+        } else {
+            $cmd = sprintf(
+                'powershell -NoProfile -ExecutionPolicy Bypass -File %s -Action %s -WorkDir %s -Title %s -Prompt %s',
+                psq($scriptsDir . '\\invoke-antigravity.ps1'),
+                psq($role),
+                psq($validatedProjectPath),
+                psq('Task from Mission Control'),
+                psq($prompt)
+            );
+        }
     }
 
     $dispatched = false;
     $dispatchOutput = '';
 
     if ($mode === 'antigravity' && $executeAntigravity) {
-        // Sweep any stale temp files older than 5 minutes
+        set_time_limit(30);
         $tempDir = sys_get_temp_dir();
         foreach (glob($tempDir . '\\agy_dispatch_*.txt') ?: [] as $oldFile) {
             if ((time() - (filemtime($oldFile) ?: 0)) > 300) {
@@ -594,7 +698,8 @@ if ($action === 'dispatch') {
         }
 
         $tempPromptFile = $tempDir . '\\agy_dispatch_' . bin2hex(random_bytes(8)) . '.txt';
-        if (file_put_contents($tempPromptFile, $prompt) === false) {
+        // Write with UTF-8 BOM so Windows PowerShell 5.1 always reads UTF-8 accurately
+        if (file_put_contents($tempPromptFile, "\xEF\xBB\xBF" . $prompt) === false) {
             respondJson(['ok' => false, 'error' => 'Failed to create temporary prompt file.'], 500);
         }
 
