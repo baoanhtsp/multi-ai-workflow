@@ -5,6 +5,7 @@ import { appendAuditEntry } from '../../lib/audit.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
 import { getTempDir, isDirectorySafe, isFileSafe, resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
+import { loadCheckpointsConfig } from '../checkpoints/index.ts';
 import { gitRun, snapshotTree, validateRefName } from '../checkpoints/snapshot.ts';
 import { isJobStillRunning } from './merge.ts';
 import { loadWorktreesStore, saveWorktreesStore, withStoreLock, type WorktreeRecord } from './store.ts';
@@ -96,6 +97,21 @@ export function isBranchProtected(branchName: string): boolean {
   if (PROTECTED_BRANCHES.has(norm)) return true;
   if (/^release(\/.*)?$/i.test(norm)) return true;
   return false;
+}
+
+/**
+ * Normalises a path to lower-case with backslashes and realpath (K1).
+ */
+export function normalizePath(p: string): string {
+  const norm = p.replace(/\//g, '\\');
+  try {
+    if (fs.existsSync(norm)) {
+      return fs.realpathSync(norm).toLowerCase();
+    }
+  } catch {
+    // fallback
+  }
+  return path.win32.resolve(norm).toLowerCase();
 }
 
 export function loadCleanupConfig(ctx: MawFeatureContext): CleanupConfig {
@@ -247,9 +263,9 @@ export function isInsideMawWt(folderPath: string, repoPath: string): boolean {
     if (!fs.existsSync(expectedContainer) || !fs.existsSync(folderPath)) {
       return false;
     }
-    const realContainer = fs.realpathSync(expectedContainer).toLowerCase();
-    const realFolder = fs.realpathSync(folderPath).toLowerCase();
-    const realRepo = fs.realpathSync(repoPath).toLowerCase();
+    const realContainer = normalizePath(expectedContainer);
+    const realFolder = normalizePath(folderPath);
+    const realRepo = normalizePath(repoPath);
 
     if (realFolder === realRepo) {
       return false;
@@ -261,6 +277,22 @@ export function isInsideMawWt(folderPath: string, repoPath: string): boolean {
   }
 }
 
+/**
+ * Validates that folderPath is strictly under the .maw-wt/<repo> container (string check, K2).
+ */
+export function isUnderMawWtContainer(folderPath: string, repoPath: string): boolean {
+  const expectedContainer = path.win32.resolve(
+    path.dirname(repoPath),
+    '.maw-wt',
+    path.basename(repoPath)
+  );
+  const normContainer = normalizePath(expectedContainer);
+  const normFolder = normalizePath(folderPath);
+  const normRepo = normalizePath(repoPath);
+  if (normFolder === normRepo) return false;
+  return normFolder.startsWith(normContainer + '\\');
+}
+
 function formatTrashTimestamp(d = new Date()): string {
   const yyyy = String(d.getFullYear());
   const MM = String(d.getMonth() + 1).padStart(2, '0');
@@ -269,6 +301,15 @@ function formatTrashTimestamp(d = new Date()): string {
   const mm = String(d.getMinutes()).padStart(2, '0');
   const ss = String(d.getSeconds()).padStart(2, '0');
   return `${yyyy}${MM}${dd}${HH}${mm}${ss}`;
+}
+
+export function extractBranchFromTrashRef(ref: string): string {
+  const baseRefName = ref.replace(/^refs\/maw\/trash\//, '');
+  const withoutTs = baseRefName.replace(/-\d{14}$/, '');
+  if (withoutTs.startsWith('maw-')) {
+    return 'maw/' + withoutTs.slice(4);
+  }
+  return withoutTs.startsWith('maw/') ? withoutTs : `maw/${withoutTs}`;
 }
 
 export async function getCleanupCandidates(
@@ -285,13 +326,18 @@ export async function getCleanupCandidates(
   const store = await loadWorktreesStore(dataDir);
   const candidates: CleanupCandidate[] = [];
 
-  // 1. Get all checked-out branches in any worktree
+  // 1. Get all checked-out branches in any worktree (K1, K8)
   const wtListRes = await gitRun(['worktree', 'list', '--porcelain'], {
     cwd: repoPath,
     allowFailure: true,
   });
   const checkedOutBranches = new Set<string>();
-  const gitRegisteredWorktrees: Array<{ path: string; branch: string; prunable: boolean }> = [];
+  const gitRegisteredWorktrees: Array<{
+    path: string;
+    normPath: string;
+    branch: string;
+    prunable: boolean;
+  }> = [];
 
   if (wtListRes.code === 0 && wtListRes.stdout.trim()) {
     const lines = wtListRes.stdout.split(/\r?\n/);
@@ -305,6 +351,7 @@ export async function getCleanupCandidates(
         if (currentWtPath) {
           gitRegisteredWorktrees.push({
             path: currentWtPath,
+            normPath: normalizePath(currentWtPath),
             branch: currentBranch,
             prunable: currentPrunable,
           });
@@ -315,9 +362,8 @@ export async function getCleanupCandidates(
       } else if (trimmed.startsWith('branch refs/heads/')) {
         currentBranch = trimmed.slice('branch refs/heads/'.length).trim();
         checkedOutBranches.add(currentBranch);
-        checkedOutBranches.add(`maw/${currentBranch}`);
       } else if (trimmed.startsWith('branch ')) {
-        currentBranch = trimmed.slice('branch '.length).trim();
+        currentBranch = trimmed.slice('branch '.length).trim().replace(/^refs\/heads\//, '');
         checkedOutBranches.add(currentBranch);
       } else if (trimmed.startsWith('prunable')) {
         currentPrunable = true;
@@ -326,6 +372,7 @@ export async function getCleanupCandidates(
     if (currentWtPath) {
       gitRegisteredWorktrees.push({
         path: currentWtPath,
+        normPath: normalizePath(currentWtPath),
         branch: currentBranch,
         prunable: currentPrunable,
       });
@@ -342,7 +389,7 @@ export async function getCleanupCandidates(
     repoBase = headBranchRes.stdout.trim();
   }
 
-  // 2. Kind: merged_branch & stale_branch
+  // 2. Kind: merged_branch & stale_branch (K8)
   const branchListRes = await gitRun(
     ['for-each-ref', '--format=%(refname:short)%09%(creatordate:iso-strict)', 'refs/heads/maw/'],
     { cwd: repoPath, allowFailure: true }
@@ -362,12 +409,12 @@ export async function getCleanupCandidates(
   }
 
   const projectStoreRecords = store.worktrees.filter(
-    (w) => w.project_path.toLowerCase() === repoPath.toLowerCase()
+    (w) => normalizePath(w.project_path) === normalizePath(repoPath)
   );
 
   for (const b of localMawBranches) {
-    if (checkedOutBranches.has(b.name) || checkedOutBranches.has(b.name.replace(/^maw\//, ''))) {
-      continue; // Checked out in a worktree, never candidate
+    if (checkedOutBranches.has(b.name)) {
+      continue; // Checked out in a worktree, never candidate (K8)
     }
 
     const rec = projectStoreRecords.find((w) => w.branch === b.name);
@@ -415,7 +462,6 @@ export async function getCleanupCandidates(
       });
     } else {
       // Check if stale_branch
-      // Must not have an active worktree record
       const hasActiveWorktree = projectStoreRecords.some(
         (w) => w.branch === b.name && w.status === 'active'
       );
@@ -481,13 +527,11 @@ export async function getCleanupCandidates(
         });
       }
     } else if (rec.status === 'active') {
-      // Check if job is still running
       let isRunning = false;
       if (rec.job_id) {
         isRunning = await isJobStillRunning(ctx, rec.job_id);
       }
       if (!isRunning && fs.existsSync(rec.worktree_path)) {
-        // Check age of last commit or folder
         let lastCommitTime = 0;
         let lastCommitIso: string | null = null;
         const logRes = await gitRun(['log', '-1', '--format=%cI'], {
@@ -536,12 +580,14 @@ export async function getCleanupCandidates(
     }
   }
 
-  // 4. Kind: orphan_worktree
+  // 4. Kind: orphan_worktree (K1 path normalization)
   const mawWtContainer = path.win32.join(
     path.dirname(repoPath),
     '.maw-wt',
     path.basename(repoPath)
   );
+  const normContainer = normalizePath(mawWtContainer);
+
   if (isDirectorySafe(mawWtContainer)) {
     const existingSubFolders = new Set<string>();
     try {
@@ -558,8 +604,8 @@ export async function getCleanupCandidates(
     // (a) git-registered worktree under .maw-wt/<repo>/ whose folder is gone (prunable)
     for (const gwt of gitRegisteredWorktrees) {
       if (
-        gwt.path.toLowerCase().startsWith(mawWtContainer.toLowerCase()) &&
-        !fs.existsSync(gwt.path)
+        gwt.normPath.startsWith(normContainer + '\\') &&
+        (!fs.existsSync(gwt.path) || gwt.prunable)
       ) {
         const name = path.basename(gwt.path);
         candidates.push({
@@ -579,12 +625,11 @@ export async function getCleanupCandidates(
       }
     }
 
-    // (b) folder under .maw-wt/<repo>/ not registered in git
+    // (b) folder under .maw-wt/<repo>/ not registered in git (K1, K4)
     for (const folderName of existingSubFolders) {
       const fullPath = path.win32.join(mawWtContainer, folderName);
-      const isRegistered = gitRegisteredWorktrees.some(
-        (g) => g.path.toLowerCase() === fullPath.toLowerCase()
-      );
+      const normFullPath = normalizePath(fullPath);
+      const isRegistered = gitRegisteredWorktrees.some((g) => g.normPath === normFullPath);
       if (!isRegistered) {
         const sizeInfo = computeFolderSize(fullPath);
         let hasFiles = sizeInfo.size_bytes > 0;
@@ -599,32 +644,32 @@ export async function getCleanupCandidates(
           kind: 'orphan_worktree',
           name: folderName,
           path: fullPath,
-          reason: 'unregistered folder under .maw-wt',
+          reason: 'unregistered folder under .maw-wt (not a git worktree; cannot be backed up)',
           merged: false,
-          risky: hasFiles,
+          risky: true, // (b) with files is risky (K4)
           dirty: hasFiles,
           protected: false,
           last_commit_at: null,
           size_bytes: sizeInfo.size_bytes,
           size_approx: sizeInfo.size_approx,
-          default_selected: !hasFiles,
+          default_selected: false,
         });
       }
     }
 
-    // (c) registered worktree without S1 record
+    // (c) registered worktree without S1 record (K1)
     for (const gwt of gitRegisteredWorktrees) {
       if (
-        gwt.path.toLowerCase().startsWith(mawWtContainer.toLowerCase()) &&
+        gwt.normPath.startsWith(normContainer + '\\') &&
         fs.existsSync(gwt.path)
       ) {
         const folderName = path.basename(gwt.path);
         const hasRecord = projectStoreRecords.some(
           (w) =>
             w.id === folderName ||
-            w.worktree_path.toLowerCase() === gwt.path.toLowerCase()
+            normalizePath(w.worktree_path) === gwt.normPath
         );
-        if (!hasRecord && !candidates.some((c) => c.path === gwt.path)) {
+        if (!hasRecord && !candidates.some((c) => c.path && normalizePath(c.path) === gwt.normPath)) {
           const statusRes = await gitRun(['status', '--porcelain'], {
             cwd: gwt.path,
             allowFailure: true,
@@ -638,22 +683,22 @@ export async function getCleanupCandidates(
             path: gwt.path,
             reason: 'registered worktree without S1 record',
             merged: false,
-            risky: dirty,
+            risky: dirty || sizeInfo.size_bytes > 0,
             dirty,
             protected: false,
             last_commit_at: null,
             size_bytes: sizeInfo.size_bytes,
             size_approx: sizeInfo.size_approx,
-            default_selected: !dirty,
+            default_selected: !dirty && sizeInfo.size_bytes === 0,
           });
         }
       }
     }
   }
 
-  // 5. Kind: checkpoint_excess & checkpoint_orphan
+  // 5. Kind: checkpoint_excess & checkpoint_orphan (K5)
   const ckRefsRes = await gitRun(
-    ['for-each-ref', '--format=%(refname)', 'refs/maw/checkpoints/'],
+    ['for-each-ref', '--format=%(refname)%09%(creatordate:unix)%09%(creatordate:iso-strict)', 'refs/maw/checkpoints/'],
     { cwd: repoPath, allowFailure: true }
   );
 
@@ -664,17 +709,22 @@ export async function getCleanupCandidates(
       .filter(Boolean);
 
     // Group by workdir
-    const byWorkdir = new Map<string, Array<{ ref: string; date: string }>>();
+    const byWorkdir = new Map<string, Array<{ ref: string; unix: number; isoDate: string }>>();
     const orphanRefs: string[] = [];
 
-    for (const ref of rawRefs) {
-      const logRes = await gitRun(['log', '-1', '--format=%cI%x1f%B', ref], {
+    for (const line of rawRefs) {
+      const parts = line.split('\t');
+      const ref = parts[0] || '';
+      const unix = Number(parts[1]) || 0;
+      const isoDate = parts[2] || new Date().toISOString();
+      if (!ref) continue;
+
+      const logRes = await gitRun(['log', '-1', '--format=%B', ref], {
         cwd: repoPath,
         allowFailure: true,
       });
       if (logRes.code === 0 && logRes.stdout.trim()) {
-        const [cDate, ...rest] = logRes.stdout.split('\x1f');
-        const body = rest.join('\x1f');
+        const body = logRes.stdout;
         const match = body.match(/^MAW-Workdir:\s*(.+)$/m);
         const workdir = match ? match[1]!.trim() : '';
 
@@ -682,7 +732,7 @@ export async function getCleanupCandidates(
           orphanRefs.push(ref);
         } else {
           const arr = byWorkdir.get(workdir) || [];
-          arr.push({ ref, date: cDate || '' });
+          arr.push({ ref, unix, isoDate });
           byWorkdir.set(workdir, arr);
         }
       }
@@ -706,12 +756,15 @@ export async function getCleanupCandidates(
       });
     }
 
-    // checkpoint_excess: retention default 20
-    const retention = 20;
+    // checkpoint_excess: read retention from checkpoints config (default 50) (K5)
+    const cpDataDir = ctx.paths.featureDataDir('checkpoints');
+    const cpConfig = loadCheckpointsConfig(cpDataDir);
+    const retention = cpConfig.retention;
+
     for (const [workdir, arr] of byWorkdir.entries()) {
       if (arr.length > retention) {
-        // Sort oldest first
-        arr.sort((a, b) => a.date.localeCompare(b.date));
+        // Sort oldest first by unix timestamp (K5)
+        arr.sort((a, b) => a.unix - b.unix);
         const excess = arr.slice(0, arr.length - retention);
         for (const item of excess) {
           candidates.push({
@@ -724,7 +777,7 @@ export async function getCleanupCandidates(
             risky: false,
             dirty: false,
             protected: false,
-            last_commit_at: item.date,
+            last_commit_at: item.isoDate,
             size_bytes: null,
             default_selected: true,
           });
@@ -815,6 +868,32 @@ export async function applyCleanupCandidates(
     candMap.set(c.id, c);
   }
 
+  // Get current registered worktrees for K3/K4 checks
+  const currentWtRes = await gitRun(['worktree', 'list', '--porcelain'], {
+    cwd: repoPath,
+    allowFailure: true,
+  });
+  const gitRegisteredWorktrees: Array<{ normPath: string }> = [];
+  if (currentWtRes.code === 0 && currentWtRes.stdout.trim()) {
+    for (const line of currentWtRes.stdout.split(/\r?\n/)) {
+      const t = line.trim();
+      if (t.startsWith('worktree ')) {
+        const p = t.slice('worktree '.length).trim();
+        gitRegisteredWorktrees.push({ normPath: normalizePath(p) });
+      }
+    }
+  }
+
+  // Determine repository base branch (default 'main')
+  let repoBase = 'main';
+  const headBranchRes = await gitRun(['symbolic-ref', '--short', 'HEAD'], {
+    cwd: repoPath,
+    allowFailure: true,
+  });
+  if (headBranchRes.code === 0 && headBranchRes.stdout.trim()) {
+    repoBase = headBranchRes.stdout.trim();
+  }
+
   const deleted: Array<{ id: string; kind: string; name: string; backup_ref?: string }> = [];
   const skipped: Array<{ id: string; reason: string }> = [];
   let freedBytes = 0;
@@ -855,15 +934,23 @@ export async function applyCleanupCandidates(
           continue;
         }
 
-        // Refuse if checked out in ANY worktree
-        const wtCheckRes = await gitRun(['worktree', 'list', '--porcelain'], {
+        // K8: Refuse if checked out in ANY worktree using exact set of checked-out branches
+        const freshWtRes = await gitRun(['worktree', 'list', '--porcelain'], {
           cwd: repoPath,
           allowFailure: true,
         });
-        if (
-          wtCheckRes.stdout.includes(`refs/heads/${branchName}`) ||
-          wtCheckRes.stdout.includes(`refs/heads/${branchName.replace(/^maw\//, '')}`)
-        ) {
+        const freshCheckedOut = new Set<string>();
+        if (freshWtRes.code === 0 && freshWtRes.stdout.trim()) {
+          for (const line of freshWtRes.stdout.split(/\r?\n/)) {
+            const t = line.trim();
+            if (t.startsWith('branch refs/heads/')) {
+              freshCheckedOut.add(t.slice('branch refs/heads/'.length).trim());
+            } else if (t.startsWith('branch ')) {
+              freshCheckedOut.add(t.slice('branch '.length).trim().replace(/^refs\/heads\//, ''));
+            }
+          }
+        }
+        if (freshCheckedOut.has(branchName)) {
           skipped.push({ id, reason: 'branch checked out in a worktree' });
           continue;
         }
@@ -918,129 +1005,211 @@ export async function applyCleanupCandidates(
         cand.kind === 'stale_worktree'
       ) {
         const wtPath = cand.path;
-        if (!wtPath || !isInsideMawWt(wtPath, repoPath)) {
+        if (!wtPath) {
+          skipped.push({ id, reason: 'missing worktree path' });
+          continue;
+        }
+
+        // K2: Prunable worktree whose folder is missing
+        if (!fs.existsSync(wtPath)) {
+          if (!isUnderMawWtContainer(wtPath, repoPath)) {
+            skipped.push({ id, reason: 'path outside .maw-wt or invalid' });
+            continue;
+          }
+          await gitRun(['worktree', 'prune'], { cwd: repoPath, allowFailure: true });
+          const auditEntry = {
+            Timestamp: new Date().toISOString(),
+            Tool: 'maw-s1',
+            Action: 'cleanup_delete',
+            Project: repoPath,
+            Detail: `orphan_worktree ${cand.name} [pruned missing worktree]`,
+          };
+          appendAuditEntry(ctx.paths.auditFile, auditEntry);
+          appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+          deleted.push({ id, kind: cand.kind, name: cand.name });
+          continue;
+        }
+
+        if (!isInsideMawWt(wtPath, repoPath)) {
           skipped.push({ id, reason: 'path outside .maw-wt or invalid' });
           continue;
         }
 
+        // Check whether it is a registered worktree or an unregistered folder (K3, K4)
+        const isRegistered = gitRegisteredWorktrees.some(
+          (g) => g.normPath === normalizePath(wtPath)
+        );
+
+        if (!isRegistered) {
+          // (b) Unregistered folder (K4): no git backup; rmSync only
+          try {
+            fs.rmSync(wtPath, { recursive: true, force: true });
+          } catch (rmErr) {
+            skipped.push({
+              id,
+              reason: `rmSync failed: ${rmErr instanceof Error ? rmErr.message : String(rmErr)}`,
+            });
+            continue;
+          }
+
+          const auditEntry = {
+            Timestamp: new Date().toISOString(),
+            Tool: 'maw-s1',
+            Action: 'cleanup_delete',
+            Project: repoPath,
+            Detail: `orphan_worktree ${cand.name} [unregistered folder]`,
+          };
+          appendAuditEntry(ctx.paths.auditFile, auditEntry);
+          appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+
+          if (typeof cand.size_bytes === 'number') freedBytes += cand.size_bytes;
+          deleted.push({ id, kind: cand.kind, name: cand.name });
+          continue;
+        }
+
+        // Registered worktree:
         let backupRef: string | undefined;
+        let createdWorktreeBackup = false;
+
         if (cand.dirty || !cand.merged) {
-          // Create trash backup via snapshotTree
-          if (fs.existsSync(wtPath)) {
-            try {
-              let treeSha: string;
-              let parentSha: string | null = null;
+          try {
+            const treeSha = await snapshotTree(wtPath);
+            const headRes = await gitRun(['rev-parse', '--verify', '-q', 'HEAD'], {
+              cwd: wtPath,
+              allowFailure: true,
+            });
+            const parentSha =
+              headRes.code === 0 && headRes.stdout.trim() ? headRes.stdout.trim() : null;
 
-              if (fs.existsSync(path.win32.join(wtPath, '.git'))) {
-                treeSha = await snapshotTree(wtPath);
-                const headRes = await gitRun(['rev-parse', '--verify', '-q', 'HEAD'], {
-                  cwd: wtPath,
-                  allowFailure: true,
-                });
-                parentSha =
-                  headRes.code === 0 && headRes.stdout.trim() ? headRes.stdout.trim() : null;
-              } else {
-                // Unregistered folder without .git: snapshot files via main repo work-tree
-                const tempDir = getTempDir();
-                const rand = crypto.randomBytes(6).toString('hex');
-                const tmpIdx = path.win32.join(tempDir, `maw-orphan-${rand}.idx`);
-                try {
-                  await gitRun([`--work-tree=${wtPath}`, 'add', '-A'], {
-                    cwd: repoPath,
-                    env: { GIT_INDEX_FILE: tmpIdx },
-                  });
-                  const wtTreeRes = await gitRun(['write-tree'], {
-                    cwd: repoPath,
-                    env: { GIT_INDEX_FILE: tmpIdx },
-                  });
-                  treeSha = wtTreeRes.stdout.trim();
-                } finally {
-                  if (fs.existsSync(tmpIdx)) {
-                    try {
-                      fs.unlinkSync(tmpIdx);
-                    } catch {
-                      // ignore
-                    }
-                  }
-                }
+            const tempDir = getTempDir();
+            const msgFile = path.win32.join(tempDir, `maw-trash-msg-${Date.now()}.txt`);
+            fs.writeFileSync(msgFile, `maw cleanup trash: ${cand.name}\n`, 'utf8');
+
+            const commitArgs = parentSha
+              ? ['commit-tree', treeSha, '-p', parentSha, '-F', msgFile]
+              : ['commit-tree', treeSha, '-F', msgFile];
+
+            const commitRes = await gitRun(commitArgs, {
+              cwd: repoPath,
+              env: {
+                GIT_AUTHOR_NAME: 'MAW Cleanup',
+                GIT_AUTHOR_EMAIL: 'maw@localhost',
+                GIT_COMMITTER_NAME: 'MAW Cleanup',
+                GIT_COMMITTER_EMAIL: 'maw@localhost',
+              },
+            });
+
+            if (isFileSafe(msgFile)) {
+              try {
+                fs.unlinkSync(msgFile);
+              } catch {
+                // ignore
               }
+            }
 
-              const tempDir = getTempDir();
-              const msgFile = path.win32.join(tempDir, `maw-trash-msg-${Date.now()}.txt`);
-              fs.writeFileSync(msgFile, `maw cleanup trash: ${cand.name}\n`, 'utf8');
-
-              const commitArgs = parentSha
-                ? ['commit-tree', treeSha, '-p', parentSha, '-F', msgFile]
-                : ['commit-tree', treeSha, '-F', msgFile];
-
-              const commitRes = await gitRun(commitArgs, {
-                cwd: repoPath,
-                env: {
-                  GIT_AUTHOR_NAME: 'MAW Cleanup',
-                  GIT_AUTHOR_EMAIL: 'maw@localhost',
-                  GIT_COMMITTER_NAME: 'MAW Cleanup',
-                  GIT_COMMITTER_EMAIL: 'maw@localhost',
-                },
-              });
-
-              if (isFileSafe(msgFile)) {
-                try {
-                  fs.unlinkSync(msgFile);
-                } catch {
-                  // ignore
-                }
-              }
-
-              const commitSha = commitRes.stdout.trim();
-              const safeName = cand.name.replace(/[^a-zA-Z0-9._-]/g, '-');
-              backupRef = `refs/maw/trash/${safeName}-${formatTrashTimestamp()}`;
-              const updateRefRes = await gitRun(['update-ref', backupRef, commitSha], {
-                cwd: repoPath,
-              });
-              if (updateRefRes.code !== 0) {
-                skipped.push({ id, reason: 'failed to create trash backup' });
-                continue;
-              }
-            } catch (err) {
-              skipped.push({
-                id,
-                reason: `trash backup failed: ${err instanceof Error ? err.message : String(err)}`,
-              });
+            const commitSha = commitRes.stdout.trim();
+            const safeName = cand.name.replace(/[^a-zA-Z0-9._-]/g, '-');
+            backupRef = `refs/maw/trash/${safeName}-${formatTrashTimestamp()}`;
+            const updateRefRes = await gitRun(['update-ref', backupRef, commitSha], {
+              cwd: repoPath,
+            });
+            if (updateRefRes.code !== 0) {
+              skipped.push({ id, reason: 'failed to create trash backup' });
               continue;
             }
+            createdWorktreeBackup = true;
+          } catch (err) {
+            skipped.push({
+              id,
+              reason: `trash backup failed: ${err instanceof Error ? err.message : String(err)}`,
+            });
+            continue;
           }
         }
 
-        // Folder removal via git worktree remove or fs.rmSync
+        // K3: Git worktree remove ONLY. Never call fs.rmSync if git remove fails!
         const rmRes = await gitRun(['worktree', 'remove', '--force', wtPath], {
           cwd: repoPath,
           allowFailure: true,
         });
 
-        if (fs.existsSync(wtPath)) {
-          try {
-            fs.rmSync(wtPath, { recursive: true, force: true });
-          } catch {
-            // ignore
+        if (rmRes.code !== 0) {
+          skipped.push({
+            id,
+            reason: rmRes.stderr.trim() || 'git worktree remove --force failed',
+          });
+          continue;
+        }
+
+        // K7: Branch deletion after removing registered worktree
+        const storeS = await loadWorktreesStore(dataDir);
+        const record = storeS.worktrees.find(
+          (w) => w.id === cand.name || normalizePath(w.worktree_path) === normalizePath(wtPath)
+        );
+        const branchName = record ? record.branch : `maw/${cand.name}`;
+
+        if (MAW_BRANCH_REGEX.test(branchName) && !isBranchProtected(branchName)) {
+          // Check if checked out in any remaining worktree
+          const postRmList = await gitRun(['worktree', 'list', '--porcelain'], {
+            cwd: repoPath,
+            allowFailure: true,
+          });
+          const remainingBranches = new Set<string>();
+          if (postRmList.code === 0 && postRmList.stdout.trim()) {
+            for (const line of postRmList.stdout.split(/\r?\n/)) {
+              const t = line.trim();
+              if (t.startsWith('branch refs/heads/')) {
+                remainingBranches.add(t.slice('branch refs/heads/'.length).trim());
+              } else if (t.startsWith('branch ')) {
+                remainingBranches.add(t.slice('branch '.length).trim().replace(/^refs\/heads\//, ''));
+              }
+            }
+          }
+
+          if (!remainingBranches.has(branchName)) {
+            const branchExists = await gitRun(
+              ['show-ref', '--verify', '--quiet', `refs/heads/${branchName}`],
+              { cwd: repoPath, allowFailure: true }
+            );
+            if (branchExists.code === 0) {
+              const branchBase = record?.base || repoBase;
+              const ancRes = await gitRun(
+                ['merge-base', '--is-ancestor', branchName, branchBase],
+                { cwd: repoPath, allowFailure: true }
+              );
+              const isMerged = ancRes.code === 0;
+
+              // If unmerged and no snapshot backup was created, back up branch tip (K7)
+              if (!isMerged && !createdWorktreeBackup) {
+                const safeName = branchName.replace(/\//g, '-');
+                const branchBackupRef = `refs/maw/trash/${safeName}-${formatTrashTimestamp()}`;
+                const tipRes = await gitRun(['rev-parse', branchName], { cwd: repoPath });
+                if (tipRes.code === 0 && tipRes.stdout.trim()) {
+                  await gitRun(['update-ref', branchBackupRef, tipRes.stdout.trim()], {
+                    cwd: repoPath,
+                    allowFailure: true,
+                  });
+                  if (!backupRef) backupRef = branchBackupRef;
+                }
+              }
+
+              await gitRun(['branch', '-D', branchName], { cwd: repoPath, allowFailure: true });
+            }
           }
         }
 
-        // Also delete branch if exists and not checked out
-        const branchName = `maw/${cand.name}`;
-        await gitRun(['branch', '-D', branchName], { cwd: repoPath, allowFailure: true });
-
         // Update record
-        await withStoreLock(async () => {
-          const s = await loadWorktreesStore(dataDir);
-          const r = s.worktrees.find(
-            (w) => w.id === cand.name || w.worktree_path.toLowerCase() === wtPath.toLowerCase()
-          );
-          if (r) {
-            r.status = 'discarded';
-            r.cleaned_at = new Date().toISOString();
-            await saveWorktreesStore(dataDir, s);
-          }
-        });
+        if (record) {
+          await withStoreLock(async () => {
+            const s = await loadWorktreesStore(dataDir);
+            const r = s.worktrees.find((w) => w.id === record.id);
+            if (r) {
+              r.status = 'discarded';
+              r.cleaned_at = new Date().toISOString();
+              await saveWorktreesStore(dataDir, s);
+            }
+          });
+        }
 
         // Audit
         const auditEntry = {
@@ -1127,15 +1296,6 @@ export async function handleCleanupApply(
   const confirmRisky = rawRisky.map(String).filter(Boolean);
 
   return await applyCleanupCandidates(ctx, repoPath, items, confirmRisky);
-}
-
-export function extractBranchFromTrashRef(ref: string): string {
-  const baseRefName = ref.replace(/^refs\/maw\/trash\//, '');
-  const withoutTs = baseRefName.replace(/-\d{14}$/, '');
-  if (withoutTs.startsWith('maw-')) {
-    return 'maw/' + withoutTs.slice(4);
-  }
-  return withoutTs.startsWith('maw/') ? withoutTs : `maw/${withoutTs}`;
 }
 
 export async function handleCleanupTrash(

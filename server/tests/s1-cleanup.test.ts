@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn, type ChildProcess } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -7,6 +8,7 @@ import test from 'node:test';
 import type { MawFeatureContext } from '../lib/feature.ts';
 import { resolveServerPaths, type ServerPaths } from '../lib/paths.ts';
 import { runCommand } from '../lib/proc.ts';
+import { saveCheckpointsConfig } from '../features/checkpoints/index.ts';
 import { createCheckpoint } from '../features/checkpoints/snapshot.ts';
 import {
   type CleanupCandidate,
@@ -529,6 +531,297 @@ test('S1 Cleanup: scan writes cleanup-latest.json and feature.status reflects it
     const cleanSt = st.cleanup as Record<string, unknown>;
     assert.equal(cleanSt.count, raw.count);
     assert.equal(cleanSt.size_bytes, raw.size_bytes);
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup K1 & K4: path normalization, registered worktree slash mismatch, and unregistered folder (b) no git backup', async () => {
+  const env = await setupCleanupEnv();
+  try {
+    const dataDir = env.paths.featureDataDir('worktrees');
+    const containerDir = path.win32.join(env.projectsRoot, '.maw-wt', 'sample-repo');
+    fs.mkdirSync(containerDir, { recursive: true });
+
+    // 1. Create registered worktree via git directly
+    const regWtPath = path.win32.join(containerDir, 'wt-k1-reg');
+    await runCommand('git', ['worktree', 'add', '-b', 'maw/k1-reg', regWtPath, 'main'], {
+      cwd: env.repoDir,
+    });
+
+    // Record in store as active
+    const store = await loadWorktreesStore(dataDir);
+    store.worktrees.push({
+      id: 'wt-k1-reg',
+      project_path: env.repoDir,
+      worktree_path: regWtPath,
+      branch: 'maw/k1-reg',
+      base: 'main',
+      base_commit: '12345678',
+      port: 4490,
+      origin: 'manual',
+      status: 'active',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    await saveWorktreesStore(dataDir, store);
+
+    // 2. Create unregistered folder (b) - plain folder not in git worktree list
+    const unregPath = path.win32.join(containerDir, 'wt-k1-unreg');
+    fs.mkdirSync(unregPath, { recursive: true });
+    fs.writeFileSync(path.win32.join(unregPath, 'orphan.txt'), 'not a git worktree\n', 'utf8');
+
+    // Get candidates
+    const cfg = loadCleanupConfig(env.ctx);
+    const candidates = await getCleanupCandidates(env.ctx, env.repoDir, cfg);
+
+    // Verify K1: Registered active worktree is NOT classified as unregistered folder (b)
+    const regCand = candidates.find((c) => c.name === 'wt-k1-reg' || c.path === regWtPath);
+    assert.equal(regCand, undefined, 'Active registered worktree must not be a candidate despite forward slashes from git');
+
+    // Verify K4: Unregistered folder (b) has reason indicating no git backup and is marked risky
+    const unregCand = candidates.find((c) => c.name === 'wt-k1-unreg');
+    assert.ok(unregCand, 'Unregistered folder must be detected as orphan candidate');
+    assert.equal(unregCand!.kind, 'orphan_worktree');
+    assert.equal(unregCand!.risky, true);
+    assert.ok(
+      unregCand!.reason?.includes('not a git worktree; cannot be backed up'),
+      `Reason should explain no git backup, got: ${unregCand!.reason}`
+    );
+
+    // Apply cleanup on unregistered folder (b)
+    const applyRes = await handleCleanupApply(env.ctx, {
+      project_path: env.repoDir,
+      items: [unregCand!.id],
+      confirm: true,
+      confirm_risky: [unregCand!.id],
+    });
+    assert.equal(applyRes.ok, true);
+    assert.equal(applyRes.deleted.length, 1);
+    assert.equal(applyRes.deleted[0]!.id, unregCand!.id);
+    assert.equal(applyRes.deleted[0]!.backup_ref, undefined, 'Unregistered folder must not produce backup_ref');
+    assert.ok(!fs.existsSync(unregPath), 'Unregistered folder must be deleted via fs.rmSync');
+    assert.ok(fs.existsSync(regWtPath), 'Registered worktree must remain intact');
+
+    // Cleanup registered worktree
+    await runCommand('git', ['worktree', 'remove', '--force', regWtPath], { cwd: env.repoDir });
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup K2: missing folder orphan worktrees (a) pruned via git worktree prune without rmSync or backup', async () => {
+  const env = await setupCleanupEnv();
+  try {
+    const containerDir = path.win32.join(env.projectsRoot, '.maw-wt', 'sample-repo');
+    fs.mkdirSync(containerDir, { recursive: true });
+
+    const pruneWtPath = path.win32.join(containerDir, 'wt-k2-prune');
+    await runCommand('git', ['worktree', 'add', '-b', 'maw/k2-prune', pruneWtPath, 'main'], {
+      cwd: env.repoDir,
+    });
+
+    // Delete folder on disk so it becomes prunable (a)
+    fs.rmSync(pruneWtPath, { recursive: true, force: true });
+    assert.ok(!fs.existsSync(pruneWtPath), 'Folder must be missing on disk');
+
+    const cfg = loadCleanupConfig(env.ctx);
+    const candidates = await getCleanupCandidates(env.ctx, env.repoDir, cfg);
+    const prunableCand = candidates.find((c) => c.name === 'wt-k2-prune');
+    assert.ok(prunableCand, 'Prunable worktree missing on disk must be detected');
+    assert.ok(prunableCand!.reason?.includes('prunable'));
+
+    // Apply cleanup
+    const applyRes = await handleCleanupApply(env.ctx, {
+      project_path: env.repoDir,
+      items: [prunableCand!.id],
+      confirm: true,
+      confirm_risky: [prunableCand!.id],
+    });
+    assert.equal(applyRes.ok, true);
+    assert.equal(applyRes.deleted.length, 1);
+    assert.equal(applyRes.deleted[0]!.id, prunableCand!.id);
+
+    // Verify git pruned it
+    const wtList = await runCommand('git', ['worktree', 'list', '--porcelain'], { cwd: env.repoDir });
+    assert.ok(!wtList.stdout.includes('wt-k2-prune'), 'Git worktree list must no longer include pruned worktree');
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup K3: registered worktree remove failure skips cleanly without calling fs.rmSync', async () => {
+  const env = await setupCleanupEnv();
+  let lockingProc: ChildProcess | null = null;
+  try {
+    const dataDir = env.paths.featureDataDir('worktrees');
+    const wtRes = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'wt-k3-fail',
+      base: 'main',
+    });
+    const wtPath = wtRes.worktree.worktree_path;
+
+    // Mark as kept_worktree in past
+    const store = await loadWorktreesStore(dataDir);
+    const rec = store.worktrees.find((w: WorktreeRecord) => w.id === 'wt-k3-fail')!;
+    rec.status = 'merged';
+    rec.remove_after = new Date(Date.now() - 3600 * 1000).toISOString();
+    await saveWorktreesStore(dataDir, store);
+
+    // Keep a child process running with cwd inside wtPath so Windows locks the directory
+    lockingProc = spawn('cmd.exe', ['/k', 'echo ready'], {
+      cwd: wtPath,
+      windowsHide: true,
+    });
+    await new Promise<void>((resolve) => {
+      lockingProc!.stdout?.once('data', () => resolve());
+    });
+
+    const candId = 'kept_worktree:wt-k3-fail';
+    const applyRes = await handleCleanupApply(env.ctx, {
+      project_path: env.repoDir,
+      items: [candId],
+      confirm: true,
+      confirm_risky: [candId],
+    });
+
+    // Verify skipped due to git failure, not partially deleted
+    assert.equal(applyRes.ok, true);
+    assert.equal(applyRes.deleted.length, 0);
+    assert.equal(applyRes.skipped.length, 1);
+    assert.equal(applyRes.skipped[0]!.id, candId);
+    assert.ok(
+      applyRes.skipped[0]!.reason.includes('failed to delete') ||
+        applyRes.skipped[0]!.reason.includes('Permission denied') ||
+        applyRes.skipped[0]!.reason.includes('git worktree remove'),
+      `Reason must mention git worktree remove failure, got: ${applyRes.skipped[0]!.reason}`
+    );
+
+    // Verify directory is NOT deleted via fs.rmSync
+    assert.ok(fs.existsSync(wtPath), 'Worktree directory must still exist when git remove fails');
+
+    // Verify record in store was NOT marked discarded
+    const reloadedStore = await loadWorktreesStore(dataDir);
+    const reloadedRec = reloadedStore.worktrees.find((w: WorktreeRecord) => w.id === 'wt-k3-fail')!;
+    assert.equal(reloadedRec.status, 'merged', 'Store record must not be marked discarded on failure');
+  } finally {
+    if (lockingProc) {
+      try {
+        lockingProc.kill();
+      } catch {
+        // ignore
+      }
+    }
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup K5: checkpoint_excess respects config retention limit and sorts by unix timestamp', async () => {
+  const env = await setupCleanupEnv();
+  try {
+    const ckDataDir = env.paths.featureDataDir('checkpoints');
+    // Set retention to 5 (minimum allowed)
+    saveCheckpointsConfig(ckDataDir, { enabled: true, retention: 5 });
+
+    const jobId = 'job_excess_k5';
+    const treeRes = await runCommand('git', ['write-tree'], { cwd: env.repoDir });
+    const treeHash = treeRes.stdout.trim();
+
+    // Create 7 checkpoints with explicit timestamps
+    for (let i = 1; i <= 7; i++) {
+      const padSeq = String(i).padStart(4, '0');
+      const msgFile = path.win32.join(env.tempBase, `msg-${padSeq}.txt`);
+      fs.writeFileSync(
+        msgFile,
+        `checkpoint\n\nMAW-Event: manual\nMAW-Workdir: ${env.repoDir}\nMAW-Parent: main\n`,
+        'utf8'
+      );
+      const commitDate = new Date(Date.now() - (10 - i) * 60 * 1000).toISOString();
+      const commitRes = await runCommand('git', ['commit-tree', treeHash, '-F', msgFile], {
+        cwd: env.repoDir,
+        env: { GIT_COMMITTER_DATE: commitDate, GIT_AUTHOR_DATE: commitDate },
+      });
+      const ckRef = `refs/maw/checkpoints/${jobId}/${padSeq}`;
+      await runCommand('git', ['update-ref', ckRef, commitRes.stdout.trim()], { cwd: env.repoDir });
+    }
+
+    const cfg = loadCleanupConfig(env.ctx);
+    const candidates = await getCleanupCandidates(env.ctx, env.repoDir, cfg);
+    const excessCands = candidates.filter((c) => c.kind === 'checkpoint_excess');
+
+    // 7 checkpoints total with retention 5 -> exactly 2 excess candidates
+    assert.equal(excessCands.length, 2, 'Must have exactly 2 excess checkpoints');
+    // Sorted by timestamp ascending: 0001 and 0002 should be the candidates to prune
+    assert.equal(excessCands[0]!.name, `refs/maw/checkpoints/${jobId}/0001`);
+    assert.equal(excessCands[1]!.name, `refs/maw/checkpoints/${jobId}/0002`);
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup K7 & K8: worktree branch deletion backs up unmerged clean branch tip and respects exact branch set', async () => {
+  const env = await setupCleanupEnv();
+  try {
+    const dataDir = env.paths.featureDataDir('worktrees');
+
+    // 1. Create worktree wt-k7 with unmerged commit, but clean working tree
+    const wtRes = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'wt-k7',
+      base: 'main',
+    });
+    const wtPath = wtRes.worktree.worktree_path;
+    fs.writeFileSync(path.win32.join(wtPath, 'unmerged.txt'), 'unmerged work\n', 'utf8');
+    await runCommand('git', ['add', '.'], { cwd: wtPath });
+    await runCommand('git', ['commit', '-m', 'feat: unmerged commit on wt-k7'], { cwd: wtPath });
+
+    // 2. Create another active worktree wt-k8-active on branch maw/wt-k8-active
+    const wtActiveRes = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'wt-k8-active',
+      base: 'main',
+    });
+
+    // Mark wt-k7 as kept_worktree in past
+    const store = await loadWorktreesStore(dataDir);
+    const rec = store.worktrees.find((w: WorktreeRecord) => w.id === 'wt-k7')!;
+    rec.status = 'merged';
+    rec.remove_after = new Date(Date.now() - 3600 * 1000).toISOString();
+    await saveWorktreesStore(dataDir, store);
+
+    // Apply cleanup for wt-k7
+    const candId = 'kept_worktree:wt-k7';
+    const applyRes = await handleCleanupApply(env.ctx, {
+      project_path: env.repoDir,
+      items: [candId],
+      confirm: true,
+      confirm_risky: [candId],
+    });
+
+    assert.equal(applyRes.ok, true);
+    assert.equal(applyRes.deleted.length, 1);
+    const del = applyRes.deleted[0]!;
+    assert.equal(del.id, candId);
+    // K7: Unmerged clean branch tip backed up to trash
+    assert.ok(del.backup_ref, 'Must create backup_ref for unmerged branch tip');
+    assert.ok(del.backup_ref!.startsWith('refs/maw/trash/maw-wt-k7-'));
+
+    // Verify backup ref contains the unmerged commit
+    const showRef = await runCommand('git', ['rev-parse', del.backup_ref!], { cwd: env.repoDir });
+    assert.equal(showRef.code, 0, 'Trash backup ref must exist');
+
+    // Branch maw/wt-k7 is deleted
+    const branchCheck = await runCommand('git', ['show-ref', '--verify', 'refs/heads/maw/wt-k7'], {
+      cwd: env.repoDir,
+    });
+    assert.notEqual(branchCheck.code, 0, 'Branch maw/wt-k7 must be deleted');
+
+    // K8: Checked out branch maw/wt-k8-active remains active and untouched
+    const activeBranchCheck = await runCommand('git', ['show-ref', '--verify', 'refs/heads/maw/wt-k8-active'], {
+      cwd: env.repoDir,
+    });
+    assert.equal(activeBranchCheck.code, 0, 'Active branch maw/wt-k8-active must not be deleted');
   } finally {
     cleanupTestEnv(env);
   }

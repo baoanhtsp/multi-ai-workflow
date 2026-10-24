@@ -1454,3 +1454,56 @@ test('S1 Worktrees S4-2: Merge gate blocks with blocked: "checks" when checks_ga
     cleanupWorktreeEnv(env);
   }
 });
+
+test('S1 Worktrees S4-3: Merge gate fails closed on error and skips only on unknown action (K6)', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    const wtRes = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      base: 'master',
+      name: 's4-failclose-wt',
+      origin: 'manual',
+    });
+    const wtPath = wtRes.worktree.worktree_path;
+    fs.writeFileSync(path.win32.join(wtPath, 'feat.txt'), 'feature code\n', 'utf8');
+
+    // 1. Unexpected runtime exception in checks_gate -> FAILS CLOSED
+    const failingCtx = {
+      ...env.ctx,
+      callAction: async (action: string) => {
+        if (action === 'checks_gate') {
+          throw new Error('S4 gate crashed or database timed out');
+        }
+        throw new Error(`Unknown action: ${action}`);
+      },
+    };
+
+    const blockedRes = await handleWorktreeMerge(failingCtx as any, {
+      id: 's4-failclose-wt',
+      strategy: 'merge',
+      confirm: true,
+    });
+    assert.equal(blockedRes.ok, true);
+    assert.equal(blockedRes.merged, false);
+    assert.equal(blockedRes.blocked, 'checks');
+    assert.deepEqual(blockedRes.checks, { error: 'S4 gate crashed or database timed out' });
+
+    // 2. "Unknown action" in checks_gate -> SKIPS gracefully without blocking
+    const unknownActionCtx = {
+      ...env.ctx,
+      callAction: async (action: string) => {
+        throw new Error(`Unknown action: ${action}`);
+      },
+    };
+
+    const passRes = await handleWorktreeMerge(unknownActionCtx as any, {
+      id: 's4-failclose-wt',
+      strategy: 'merge',
+      confirm: true,
+    });
+    assert.equal(passRes.ok, true);
+    assert.equal(passRes.merged, true);
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});

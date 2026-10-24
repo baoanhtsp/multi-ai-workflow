@@ -272,8 +272,26 @@ export async function handleWorktreeMerge(
             checks: gateRes,
           };
         }
-      } catch {
-        // Without S4 / if checks_gate fails to resolve, gate is skipped and checks carries null
+      } catch (err: unknown) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const isUnknownAction =
+          errMsg.includes('Unknown action') ||
+          errMsg.includes('Unsupported action') ||
+          (typeof err === 'object' &&
+            err !== null &&
+            (err as { statusCode?: number }).statusCode === 400 &&
+            errMsg.toLowerCase().includes('action'));
+
+        if (!isUnknownAction) {
+          // Fail closed: any non-"unknown action" error blocks merge (K6)
+          return {
+            ok: true,
+            merged: false,
+            blocked: 'checks',
+            checks: { error: errMsg },
+          };
+        }
+        // Without S4 (unknown action), gate is skipped and checks carries null
       }
     }
 

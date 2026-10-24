@@ -345,8 +345,16 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
                         }
                       }
                     });
-                  } catch (err) {
+                  } catch (err: unknown) {
                     const msg = err instanceof Error ? err.message : String(err);
+                    const isUnknownAction =
+                      msg.includes('Unknown action') ||
+                      msg.includes('Unsupported action') ||
+                      (typeof err === 'object' &&
+                        err !== null &&
+                        (err as { statusCode?: number }).statusCode === 400 &&
+                        msg.toLowerCase().includes('action'));
+
                     await withRunLock(runId, async () => {
                       const freshRun = loadBestOfRun(dataDir, runId);
                       if (freshRun) {
@@ -354,17 +362,21 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
                           (cand) => cand.i === candidateIndex
                         );
                         if (targetCand) {
-                          targetCand.tests = {
-                            status: 'error',
-                            results: [
-                              {
-                                name: 's4_checks',
-                                exit_code: null,
-                                duration_s: 0,
-                                tail: msg,
-                              },
-                            ],
-                          };
+                          if (isUnknownAction) {
+                            targetCand.tests = { status: 'unavailable', results: [] };
+                          } else {
+                            targetCand.tests = {
+                              status: 'error',
+                              results: [
+                                {
+                                  name: 's4_checks',
+                                  exit_code: null,
+                                  duration_s: 0,
+                                  tail: msg,
+                                },
+                              ],
+                            };
+                          }
                           saveBestOfRun(dataDir, freshRun);
                         }
                       }
