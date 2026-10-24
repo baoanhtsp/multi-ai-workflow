@@ -113,6 +113,7 @@ test('Telegram Round 3 Item 2: readTelegramState preserves push_since and pushNe
     });
 
     // 1. Verify readTelegramState preserves push_since
+    tryAcquirePollerLock(paths);
     const pastIso = new Date(Date.now() - 60000).toISOString();
     writeTelegramState(paths, {
       offset: 10,
@@ -671,6 +672,7 @@ test('Telegram Review #2 Item 2: reply to mapped approval item sends usage hint 
 test('Telegram Review #2 Item 6: writeTelegramState prevents lost updates by merging concurrent disk changes', () => {
   const { paths, cleanup } = createTempTestPaths();
   try {
+    tryAcquirePollerLock(paths);
     // 1. Initial state
     writeTelegramState(paths, {
       offset: 10,
@@ -750,6 +752,67 @@ test('Telegram Review #2 Item 7: poller runs push/digest timers when inbound is 
     assert.equal(status.owner, 'this', 'Poller lock must be owned by this server');
 
     poller.stop();
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #3 Item 4: writeTelegramState is skipped when process does not own poller.lock', () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    const dataDir = paths.featureDataDir('telegram');
+    const lockFile = path.join(dataDir, 'poller.lock');
+    fs.mkdirSync(dataDir, { recursive: true });
+
+    // 1. Another active process owns poller.lock
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid + 99999,
+        port: 4399,
+        heartbeat: Date.now(),
+      }),
+      'utf8'
+    );
+
+    // Initial state does not exist or has offset 0
+    assert.equal(readTelegramState(paths).offset, 0);
+
+    // Non-owner attempts to write state
+    const written1 = writeTelegramState(paths, {
+      offset: 777,
+      push_since: '2026-10-25T03:00:00.000Z',
+      last_digest: { morning: '', evening: '' },
+      msg_map: { '777': 'itemNonOwner' },
+    });
+
+    assert.equal(written1, false, 'Non-owner write must return false / be skipped');
+    const stateAfterNonOwner = readTelegramState(paths);
+    assert.equal(stateAfterNonOwner.offset, 0, 'State file on disk must not be modified by non-owner');
+    assert.equal(stateAfterNonOwner.msg_map['777'], undefined, 'Non-owner msg_map must not be written');
+
+    // 2. Now this process acquires poller.lock
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid,
+        port: 4317,
+        heartbeat: Date.now(),
+      }),
+      'utf8'
+    );
+
+    const written2 = writeTelegramState(paths, {
+      offset: 777,
+      push_since: '2026-10-25T03:00:00.000Z',
+      last_digest: { morning: '', evening: '' },
+      msg_map: { '777': 'itemOwner' },
+    });
+
+    assert.equal(written2, true, 'Owner write must return true / succeed');
+    const stateAfterOwner = readTelegramState(paths);
+    assert.equal(stateAfterOwner.offset, 777, 'State file on disk must reflect owner write');
+    assert.equal(stateAfterOwner.msg_map['777'], 'itemOwner');
   } finally {
     cleanup();
   }

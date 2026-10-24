@@ -644,11 +644,11 @@ test('Item 5: pre-existing atomic claim lock rejects with 409 without calling st
       },
     });
 
-    // Create pre-existing claim lock file in data/inbox/claims/<id>.lock
+    // Create active claim lock file for current process in data/inbox/claims/<id>.lock
     const claimsDir = path.join(paths.featureDataDir('inbox'), 'claims');
     fs.mkdirSync(claimsDir, { recursive: true });
     const claimFile = path.join(claimsDir, `${item.id}.lock`);
-    fs.writeFileSync(claimFile, 'pid:9999\n', 'utf8');
+    fs.writeFileSync(claimFile, JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n', 'utf8');
 
     // 1. Retry with pre-existing claim => 409, startJob not called
     await assert.rejects(
@@ -675,6 +675,112 @@ test('Item 5: pre-existing atomic claim lock rejects with 409 without calling st
     assert.equal(startJobCalls, 1, 'startJob must be called once');
     assert.equal(getInboxItem(paths, item.id)?.status, 'done');
     assert.equal(fs.existsSync(claimFile), false, 'Claim file should be cleaned up after status update');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #3 Item 2: retry in flight blocks approve with 409 processed; approve after retry finishes throws 409 resolved', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  let startJobCalled = false;
+
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+  ctx.startJob = async () => {
+    startJobCalled = true;
+    // Simulate long-running in-flight job execution
+    await new Promise((r) => setTimeout(r, 60));
+    return { ok: true, job_id: 'job_in_flight_123' };
+  };
+
+  try {
+    const { item } = addInboxItem(paths, {
+      kind: 'review_changes',
+      title: 'Review item with retry and approval',
+      actions: ['retry', 'approve', 'reject', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Retry code',
+      },
+    });
+
+    // 1. Launch retry asynchronously (claim held during startJob)
+    const retryPromise = performInboxAction(ctx, item.id, 'retry', undefined, 'ui');
+
+    // Wait a brief tick so retry acquires the claim and enters startJob
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(startJobCalled, true, 'startJob must be running');
+
+    // 2. Concurrently attempt approve: claim is held => 409 already being processed
+    await assert.rejects(
+      async () => await performInboxAction(ctx, item.id, 'approve', undefined, 'ui'),
+      (err: any) => err.statusCode === 409 && err.message.includes('already being processed')
+    );
+
+    // 3. Await retry completion
+    const retryRes = await retryPromise;
+    assert.equal(retryRes.ok, true);
+    assert.equal(getInboxItem(paths, item.id)?.status, 'done');
+
+    // 4. Now attempt approve after retry finished: item is resolved => 409 already resolved
+    await assert.rejects(
+      async () => await performInboxAction(ctx, item.id, 'approve', undefined, 'ui'),
+      (err: any) => err.statusCode === 409 && err.message.includes('already resolved')
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #3 Item 3: claim file of a dead pid or stale timestamp is automatically recovered', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  let startJobCalls = 0;
+
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+  ctx.startJob = async () => {
+    startJobCalls++;
+    return { ok: true, job_id: 'job_recovered_123' };
+  };
+
+  try {
+    const { item } = addInboxItem(paths, {
+      kind: 'failed',
+      title: 'Stale claim recovery test',
+      actions: ['retry', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Fix it',
+      },
+    });
+
+    // 1. Create a claim file with a dead pid (e.g. 999999)
+    const claimsDir = path.join(paths.featureDataDir('inbox'), 'claims');
+    fs.mkdirSync(claimsDir, { recursive: true });
+    const claimFile = path.join(claimsDir, `${item.id}.lock`);
+    fs.writeFileSync(claimFile, JSON.stringify({ pid: 999999, ts: Date.now() }) + '\n', 'utf8');
+
+    // Action should detect dead pid, remove stale claim atomically, acquire claim, and succeed
+    const res1 = await performInboxAction(ctx, item.id, 'retry', undefined, 'ui');
+    assert.equal(res1.ok, true);
+    assert.equal(startJobCalls, 1);
+    assert.equal(getInboxItem(paths, item.id)?.status, 'done');
+
+    // 2. Add another item and test stale timestamp (> 120s old)
+    const { item: item2 } = addInboxItem(paths, {
+      kind: 'needs_login',
+      title: 'Stale timestamp test',
+      actions: ['dismiss'],
+    });
+    const claimFile2 = path.join(claimsDir, `${item2.id}.lock`);
+    // Stale timestamp: 200 seconds ago
+    fs.writeFileSync(claimFile2, JSON.stringify({ pid: process.pid, ts: Date.now() - 200_000 }) + '\n', 'utf8');
+
+    const res2 = await performInboxAction(ctx, item2.id, 'dismiss', undefined, 'ui');
+    assert.equal(res2.ok, true);
+    assert.equal(getInboxItem(paths, item2.id)?.status, 'dismissed');
   } finally {
     cleanup();
   }

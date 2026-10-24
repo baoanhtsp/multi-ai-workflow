@@ -14,10 +14,9 @@ export function isMaskedValue(val: string): boolean {
   return typeof val === 'string' && val.startsWith('••••');
 }
 
-export function maskExtraValue(val: unknown, keyName: string = '', underSecretContainer: boolean = false): unknown {
+export function maskExtraValue(val: unknown, keyName: string = '', secretContext: boolean = false): unknown {
   if (val === null || val === undefined) return val;
-  const isSecretContainer = keyName.toLowerCase() === 'env' || keyName.toLowerCase() === 'env_http_headers';
-  const isSecret = underSecretContainer || isSecretContainer || SECRET_KEY_REGEX.test(keyName);
+  const isSecret = secretContext || keyName.toLowerCase() === 'env' || SECRET_KEY_REGEX.test(keyName);
   if (typeof val === 'string') {
     return isSecret ? maskEnvValue(val) : val;
   }
@@ -27,7 +26,7 @@ export function maskExtraValue(val: unknown, keyName: string = '', underSecretCo
   if (typeof val === 'object') {
     const res: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
-      res[k] = maskExtraValue(v, k, underSecretContainer || isSecretContainer);
+      res[k] = maskExtraValue(v, k, isSecret);
     }
     return res;
   }
@@ -80,7 +79,7 @@ export function maskAllEnvsInToml(tomlContent: string): string {
     }
 
     if (inEnvSubTable) {
-      const kvMatch = /^(\s*[A-Za-z0-9_.-]+\s*=\s*)(.+)$/.exec(line);
+      const kvMatch = /^(\s*(?:[A-Za-z0-9_.-]+|"[^"]*"|'[^']*')\s*=\s*)(.+)$/.exec(line);
       if (kvMatch) {
         const prefix = kvMatch[1]!;
         const rawVal = kvMatch[2]!.trim();

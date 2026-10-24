@@ -110,7 +110,19 @@ export function readTelegramState(paths: ServerPaths): TelegramStateData {
   }
 }
 
-export function writeTelegramState(paths: ServerPaths, state: TelegramStateData): void {
+export function writeTelegramState(paths: ServerPaths, state: TelegramStateData): boolean {
+  // Check ownership right before each write: only the process that owns poller.lock may write state.json.
+  // Skip and log otherwise (Codex Review #3 Item 4).
+  const lockStatus = getPollerLockStatus(paths);
+  if (lockStatus.owner !== 'this') {
+    console.warn(
+      `[telegram] writeTelegramState: process ${process.pid} does not own poller.lock (owner: ${lockStatus.owner ?? 'none'}); write skipped.`
+    );
+    return false;
+  }
+
+  // Inside the process, keep read-merge-write fully synchronous (no await between read and rename)
+  // to prevent race conditions and lost updates across concurrent operations in this process.
   const dataDir = paths.featureDataDir('telegram');
   const stateFile = path.win32.join(dataDir, 'state.json');
 
@@ -172,6 +184,7 @@ export function writeTelegramState(paths: ServerPaths, state: TelegramStateData)
   const tempFile = `${stateFile}.${process.pid}.${Date.now()}.tmp`;
   fs.writeFileSync(tempFile, JSON.stringify(finalState, null, 2), 'utf8');
   fs.renameSync(tempFile, stateFile);
+  return true;
 }
 
 // Single-poller lock management with atomic 'wx' creation & stale rename (Round 3 Item 7)

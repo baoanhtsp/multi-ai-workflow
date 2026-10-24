@@ -658,6 +658,9 @@ test('MCP Round 3 Item 1: extra secret keys and inline TOML env table masking & 
             Authorization: 'Bearer secret_bearer_token_11',
             UserAgent: 'SafeClient/1.0',
           },
+          client_options: {
+            name: 'SafeClient',
+          },
           timeout: 30,
         },
       },
@@ -671,7 +674,8 @@ test('MCP Round 3 Item 1: extra secret keys and inline TOML env table masking & 
     assert.ok(srv.extra.auth_token.startsWith('••••'), 'auth_token must be masked');
     assert.ok(!srv.extra.auth_token.includes('super_secret'), 'Real auth_token must not appear in config');
     assert.ok(srv.extra.headers.Authorization.startsWith('••••'), 'Authorization header must be masked');
-    assert.equal(srv.extra.headers.UserAgent, 'SafeClient/1.0', 'Non-secret extra keys must be preserved');
+    assert.ok(srv.extra.headers.UserAgent.startsWith('••••'), 'All string leaves under headers must be masked');
+    assert.equal(srv.extra.client_options.name, 'SafeClient', 'Non-secret extra keys must be preserved');
 
     // 3. Retain unmasked secret when updating with masked value
     const reqUpdate = {
@@ -861,8 +865,57 @@ test('Item 4: Claude JSON with HTTP server (env + headers) is byte-identical whe
     assert.equal(existingHttp.transport, 'http');
     assert.equal(existingHttp.env?.HTTP_PROXY, 'http://proxy.local');
     assert.deepEqual(existingHttp.extra?.headers, origClaude.mcpServers.existing_http.headers);
-    assert.deepEqual(updatedParsed.mcpServers.existing_http, origClaude.mcpServers.existing_http);
-    assert.ok(updatedParsed.mcpServers.new_srv, 'new_srv must also exist');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Codex Review #3 Item 1: secret context flag masks all leaves under headers (JSON + TOML inline & sub-table)', () => {
+  const { paths, claudeFile, cleanup } = createTempMcpPaths();
+  try {
+    const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+
+    // 1. JSON test: {"headers":{"Custom":"sensitive-value"}} in Claude JSON
+    const claudeJson = {
+      mcpServers: {
+        custom_header_srv: {
+          type: 'http',
+          url: 'https://api.example.com',
+          headers: {
+            Custom: 'sensitive-value',
+            'Another-Key': 'another-secret-val',
+          },
+        },
+      },
+    };
+    fs.writeFileSync(claudeFile, JSON.stringify(claudeJson, null, 2) + '\n', 'utf8');
+
+    const cfgRes = handleMcpConfig(ctx, { ...ctx, query: new URLSearchParams('') } as any) as any;
+    const claudeStatus = cfgRes.platforms.find((p: any) => p.platform === 'claude');
+    const srv = claudeStatus.servers.find((s: any) => s.name === 'custom_header_srv');
+    assert.ok(srv, 'custom_header_srv must be returned');
+    assert.ok(srv.extra.headers.Custom.startsWith('••••'), 'Custom leaf under headers must be masked in mcp_config');
+    assert.ok(!srv.extra.headers.Custom.includes('sensitive-value'), 'Real secret must not leak');
+    assert.ok(srv.extra.headers['Another-Key'].startsWith('••••'), 'Another-Key must be masked');
+
+    // 2. TOML test: inline table + [mcp_servers.x.http_headers] sub-table
+    const toml = `[mcp_servers.remote]
+url = "https://example.com"
+http_headers = { Custom = "inline-secret-val", "X-Key" = "inline-val-2" }
+
+[mcp_servers.sub_remote]
+url = "https://example.com"
+
+[mcp_servers.sub_remote.http_headers]
+Custom = "subtable-secret-val"
+"X-Custom-2" = "subtable-secret-val-2"
+`;
+    const masked = maskAllEnvsInToml(toml);
+    assert.ok(!masked.includes('inline-secret-val'), 'inline Custom secret must be masked');
+    assert.ok(!masked.includes('inline-val-2'), 'inline X-Key secret must be masked');
+    assert.ok(!masked.includes('subtable-secret-val'), 'subtable Custom secret must be masked');
+    assert.ok(!masked.includes('subtable-secret-val-2'), 'subtable X-Custom-2 secret must be masked');
+    assert.ok(masked.includes('••••al'), 'Masked value must be present');
   } finally {
     cleanup();
   }

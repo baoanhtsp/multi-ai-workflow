@@ -75,13 +75,15 @@ function mergeSingleExtraValue(
   newVal: unknown,
   existingVal: unknown,
   keyName: string,
-  maskEnv?: boolean
+  maskEnv?: boolean,
+  secretContext: boolean = false
 ): unknown {
   if (newVal === null || newVal === undefined) return newVal;
+  const isSecret = secretContext || keyName.toLowerCase() === 'env' || SECRET_KEY_REGEX.test(keyName);
 
   if (typeof newVal === 'string') {
     if (maskEnv) {
-      if (SECRET_KEY_REGEX.test(keyName)) {
+      if (isSecret) {
         return maskEnvValue(newVal);
       }
       return newVal;
@@ -96,7 +98,7 @@ function mergeSingleExtraValue(
   if (Array.isArray(newVal)) {
     const existingArr = Array.isArray(existingVal) ? existingVal : [];
     return newVal.map((item, idx) =>
-      mergeSingleExtraValue(item, existingArr[idx], keyName, maskEnv)
+      mergeSingleExtraValue(item, existingArr[idx], keyName, maskEnv, isSecret)
     );
   }
 
@@ -107,7 +109,7 @@ function mergeSingleExtraValue(
         : undefined;
     const res: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(newVal as Record<string, unknown>)) {
-      res[k] = mergeSingleExtraValue(v, existingObj?.[k], k, maskEnv);
+      res[k] = mergeSingleExtraValue(v, existingObj?.[k], k, maskEnv, isSecret);
     }
     return res;
   }

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { MawFeatureContext, MawFeatureRequest } from '../../lib/feature.ts';
 import type { ServerPaths } from '../../lib/paths.ts';
+import { isProcessRunning } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { getJobFlags, runJobScanner } from './scanner.ts';
 import {
@@ -215,22 +216,64 @@ export function handleInboxAdd(
 
 const inFlightActionIds = new Set<string>();
 
-function tryAcquireInboxClaim(paths: ServerPaths, id: string): { release: () => void } {
+function tryAcquireInboxClaim(paths: ServerPaths, id: string, isRetry = false): { release: () => void } {
   const claimsDir = path.win32.join(paths.featureDataDir('inbox'), 'claims');
   if (!fs.existsSync(claimsDir)) {
     fs.mkdirSync(claimsDir, { recursive: true });
   }
   const claimFile = path.win32.join(claimsDir, `${id}.lock`);
-  let fd: number;
+  let fd: number | null = null;
   try {
     fd = fs.openSync(claimFile, 'wx');
+    const claimData = JSON.stringify({ pid: process.pid, ts: Date.now() }) + '\n';
+    fs.writeFileSync(fd, claimData, 'utf8');
   } catch (err: any) {
     if (err?.code === 'EEXIST') {
+      if (!isRetry) {
+        let isStale = false;
+        try {
+          const raw = fs.readFileSync(claimFile, 'utf8');
+          const data = JSON.parse(raw);
+          const pid = Number(data.pid);
+          const ts = Number(data.ts);
+          if (ts && Date.now() - ts > 120_000) {
+            isStale = true;
+          } else if (pid && !isProcessRunning(pid)) {
+            isStale = true;
+          }
+        } catch {
+          // Corrupt or unreadable claim file is treated as stale
+          isStale = true;
+        }
+
+        if (isStale) {
+          const staleFile = `${claimFile}.stale.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+          try {
+            fs.renameSync(claimFile, staleFile);
+            try {
+              fs.unlinkSync(staleFile);
+            } catch {
+              // ignore
+            }
+            return tryAcquireInboxClaim(paths, id, true);
+          } catch {
+            // Another process won rename race, retry claim once
+            return tryAcquireInboxClaim(paths, id, true);
+          }
+        }
+      }
       throw new ApiValidationError(`Inbox item '${id}' is already being processed.`, 409);
     }
     throw err;
+  } finally {
+    if (fd !== null) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // ignore
+      }
+    }
   }
-  fs.closeSync(fd);
 
   return {
     release: () => {
@@ -259,93 +302,73 @@ export async function performInboxAction(
     );
   }
 
-  // Guard against concurrent in-flight retry/reply double invocation (Round 2 Item 2)
-  if (normAction === 'retry' || normAction === 'reply') {
-    if (inFlightActionIds.has(id)) {
-      throw new ApiValidationError(`Inbox item '${id}' is already being processed.`, 409);
+  // Acquire claim lock FIRST for every state-changing action (Codex Review #3 Item 2)
+  const claim = tryAcquireInboxClaim(ctx.paths, id);
+  inFlightActionIds.add(id);
+
+  try {
+    // Re-read item from disk AFTER acquiring the claim lock
+    const item = getInboxItem(ctx.paths, id);
+    if (!item) {
+      throw new ApiValidationError(`Inbox item '${id}' not found.`, 404);
     }
-  }
 
-  const item = getInboxItem(ctx.paths, id);
-  if (!item) {
-    throw new ApiValidationError(`Inbox item '${id}' not found.`, 404);
-  }
-
-  // Guard: retry, reply, approve, reject, done on an item that is not 'open' => 409 (Round 3 Item 4)
-  if (
-    normAction === 'retry' ||
-    normAction === 'reply' ||
-    normAction === 'approve' ||
-    normAction === 'reject' ||
-    normAction === 'done'
-  ) {
+    // Check status after claim acquisition
     if (item.status !== 'open') {
+      // Dismiss on an already-dismissed item is idempotent
+      if (normAction === 'dismiss' && item.status === 'dismissed') {
+        return {
+          ok: true,
+          item,
+        };
+      }
       throw new ApiValidationError(`Inbox item '${id}' is already resolved (${item.status}).`, 409);
     }
-  }
 
-  // Dismiss on an already-dismissed item is idempotent; on any other non-open status => 409
-  if (normAction === 'dismiss') {
-    if (item.status === 'dismissed') {
+    // Action must be in item.actions, unless it is dismiss (which is always allowed)
+    if (normAction !== 'dismiss' && !item.actions.includes(normAction as InboxAction)) {
+      throw new ApiValidationError(
+        `Action '${normAction}' is not allowed for item '${id}' (allowed: ${item.actions.join(', ')})`,
+        400
+      );
+    }
+
+    const resolvedBy = by || 'ui';
+    const now = new Date().toISOString();
+    logInboxAudit(ctx, id, normAction, resolvedBy);
+
+    if (normAction === 'dismiss' || normAction === 'done' || normAction === 'approve' || normAction === 'reject') {
+      const newStatus: InboxStatus =
+        normAction === 'dismiss'
+          ? 'dismissed'
+          : normAction === 'done'
+            ? 'done'
+            : normAction === 'approve'
+              ? 'approved'
+              : 'rejected';
+
+      const resolution = {
+        action: normAction,
+        text: text ? String(text).slice(0, 4000) : undefined,
+        by: resolvedBy,
+        at: now,
+      };
+
+      const updated = updateInboxItemStatus(ctx.paths, id, newStatus, resolution);
+      if (updated) {
+        await fireInboxResolved(updated);
+      }
       return {
         ok: true,
-        item,
+        item: updated,
       };
     }
-    if (item.status !== 'open') {
-      throw new ApiValidationError(`Inbox item '${id}' is already resolved (${item.status}).`, 409);
-    }
-  }
 
-  // Action must be in item.actions, unless it is dismiss (which is always allowed)
-  if (normAction !== 'dismiss' && !item.actions.includes(normAction as InboxAction)) {
-    throw new ApiValidationError(
-      `Action '${normAction}' is not allowed for item '${id}' (allowed: ${item.actions.join(', ')})`,
-      400
-    );
-  }
+    if (normAction === 'retry') {
+      if (!item.retry) {
+        throw new ApiValidationError(`Inbox item '${id}' has no retry configuration.`, 400);
+      }
 
-  const resolvedBy = by || 'ui';
-  const now = new Date().toISOString();
-
-  logInboxAudit(ctx, id, normAction, resolvedBy);
-
-  if (normAction === 'dismiss' || normAction === 'done' || normAction === 'approve' || normAction === 'reject') {
-    const newStatus: InboxStatus =
-      normAction === 'dismiss'
-        ? 'dismissed'
-        : normAction === 'done'
-          ? 'done'
-          : normAction === 'approve'
-            ? 'approved'
-            : 'rejected';
-
-    const resolution = {
-      action: normAction,
-      text: text ? String(text).slice(0, 4000) : undefined,
-      by: resolvedBy,
-      at: now,
-    };
-
-    const updated = updateInboxItemStatus(ctx.paths, id, newStatus, resolution);
-    if (updated) {
-      await fireInboxResolved(updated);
-    }
-    return {
-      ok: true,
-      item: updated,
-    };
-  }
-
-  if (normAction === 'retry') {
-    if (!item.retry) {
-      throw new ApiValidationError(`Inbox item '${id}' has no retry configuration.`, 400);
-    }
-
-    inFlightActionIds.add(id);
-    let claim: { release: () => void } | null = null;
-    try {
-      claim = tryAcquireInboxClaim(ctx.paths, id);
       const jobResult = await ctx.startJob(item.retry as unknown as Record<string, unknown>);
       const newJobId = (jobResult.job_id as string) ?? '';
 
@@ -357,9 +380,6 @@ export async function performInboxAction(
       };
 
       const updated = updateInboxItemStatus(ctx.paths, id, 'done', resolution);
-      claim.release();
-      claim = null;
-
       if (updated) {
         await fireInboxResolved(updated);
       }
@@ -369,25 +389,12 @@ export async function performInboxAction(
         item: updated,
         job_id: newJobId,
       };
-    } catch (err) {
-      claim?.release();
-      throw err;
-    } finally {
-      inFlightActionIds.delete(id);
-    }
-  }
-
-  if (normAction === 'reply') {
-    const rawText = String(text ?? '').trim();
-    if (rawText.length < 1 || rawText.length > 4000) {
-      throw new ApiValidationError("Reply text must be between 1 and 4000 characters.", 400);
     }
 
-    inFlightActionIds.add(id);
-    let replyClaim: { release: () => void } | null = null;
-    try {
-      if (item.retry) {
-        replyClaim = tryAcquireInboxClaim(ctx.paths, id);
+    if (normAction === 'reply') {
+      const rawText = String(text ?? '').trim();
+      if (rawText.length < 1 || rawText.length > 4000) {
+        throw new ApiValidationError("Reply text must be between 1 and 4000 characters.", 400);
       }
 
       const resolution = {
@@ -406,7 +413,6 @@ export async function performInboxAction(
 
         let followUpJobId: string | null = null;
         if (!handled && item.retry) {
-          // Start follow-up job with original prompt + user follow-up
           const originalPrompt = item.retry.prompt ?? '';
           const followUpPrompt = `${originalPrompt}\n\n## Follow-up from the user\n${rawText}`.trim();
           const followUpBody = {
@@ -429,29 +435,24 @@ export async function performInboxAction(
           }
         }
 
-        replyClaim?.release();
-        replyClaim = null;
-
         return {
           ok: true,
           item: updated,
           job_id: followUpJobId,
         };
       } catch (err) {
-        replyClaim?.release();
-        replyClaim = null;
-        // Roll back to 'open' and clear resolution if follow-up job start fails (Round 3 Item 6)
+        // Roll back to 'open' and clear resolution if follow-up job start fails
         updateInboxItemStatus(ctx.paths, id, 'open', null);
         unmarkInboxResolved(id);
         throw err;
       }
-    } finally {
-      replyClaim?.release();
-      inFlightActionIds.delete(id);
     }
-  }
 
-  throw new ApiValidationError(`Unsupported action '${normAction}'.`, 400);
+    throw new ApiValidationError(`Unsupported action '${normAction}'.`, 400);
+  } finally {
+    inFlightActionIds.delete(id);
+    claim.release();
+  }
 }
 
 export async function handleInboxAct(
