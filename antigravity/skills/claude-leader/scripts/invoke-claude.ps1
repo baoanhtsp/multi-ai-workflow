@@ -165,7 +165,39 @@ try {
     }
 
     $allArgs = $commonFlags + $roleFlags
-    $Prompt | & $claudeExe @allArgs
+    $outputLines = $Prompt | & $claudeExe @allArgs | Tee-Object -Variable capturedOut
+    $outputLines
+
+    try {
+        $auditFile = Join-Path $env:USERPROFILE ".gemini\antigravity\multi-ai-audit.jsonl"
+        $auditDir = Split-Path -Parent $auditFile
+        if (-not (Test-Path $auditDir)) {
+            New-Item -ItemType Directory -Path $auditDir -Force | Out-Null
+        }
+        $fullOut = ($capturedOut -join "`n")
+        $verdict = if ($fullOut -match '\bCHANGES_REQUESTED\b') {
+            "CHANGES_REQUESTED"
+        } elseif ($fullOut -match '\bAPPROVED\b') {
+            "APPROVED"
+        } else {
+            "COMPLETED"
+        }
+        $score = if ($fullOut -match '\b(\d+(?:\.\d+)?\s*/\s*10)\b') {
+            $Matches[1]
+        } else {
+            ""
+        }
+        [ordered]@{
+            Timestamp   = (Get-Date).ToString("o")
+            Tool        = "claude"
+            Role        = $Role
+            Model       = $model
+            WorkDir     = $WorkDir
+            PromptChars = $Prompt.Length
+            Score       = $score
+            Verdict     = $verdict
+        } | ConvertTo-Json -Compress | Add-Content -Path $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch {}
 } finally {
     Pop-Location
 }
