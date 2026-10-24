@@ -1,0 +1,60 @@
+/* S3 — shared styles for the attention features (health, inbox, timeline, mcp) + the Health tab.
+   Only theme tokens from index.html are used, so light / dark / neon all work. */
+.s3 { padding: 16px; display: grid; gap: 20px; min-width: 0; }
+.s3-sec { display: grid; gap: 10px; min-width: 0; }
+.s3-sec + .s3-sec { padding-top: 20px; border-top: 1px solid var(--border); }
+.s3-sec-h { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 16px; }
+.s3-sec-h > :first-child { flex: 1 1 240px; min-width: 0; }
+.s3-sec-h h2 { font-size: 14px; }
+.s3-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.s3-h3 { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; margin: 0 0 6px; }
+.s3-stack { display: grid; gap: 8px; }
+.s3-wrap { white-space: normal; word-break: break-word; }
+.s3 .sub, .s3-ov .sub, .s3-login .sub, .s3-drawer .sub { font-size: 12px; }
+.s3-agent { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.s3-table td { vertical-align: top; }
+.s3-reason { max-width: 32rem; word-break: break-word; }
+.s3-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+.btn.is-busy { position: relative; color: transparent !important; }
+.btn.is-busy::after { content: ''; position: absolute; inset: 0; margin: auto; width: 12px; height: 12px; border: 2px solid var(--accent-fg); border-right-color: transparent; border-radius: 50%; animation: s3spin .7s linear infinite; }
+@keyframes s3spin { to { transform: rotate(360deg); } }
+
+/* agent cards */
+.s3-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.s3-grid-doc { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-top: 8px; }
+.s3-grid-doc .kv { padding: 3px 0; }
+.s3-acard { display: grid; gap: 8px; align-content: start; padding: 12px 14px; border: 1px solid var(--border); border-left: 3px solid var(--border-strong); border-radius: 8px; background: var(--surface); min-width: 0; }
+.s3-acard.s3-st-ok { border-left-color: var(--ok); }
+.s3-acard.s3-st-warn { border-left-color: var(--warn); }
+.s3-acard.s3-st-error { border-left-color: var(--err); }
+.s3-dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; margin: 0; font-size: 12px; }
+.s3-dl dt { color: var(--muted); }
+.s3-dl dd { margin: 0; min-width: 0; }
+.s3-q.warn > i { background: var(--warn); }
+.s3-q.err > i { background: var(--err); }
+
+/* header pill */
+.s3-hpill { cursor: pointer; background: var(--surface); }
+.s3-hpill:hover { background: var(--hover); color: var(--text); }
+
+/* overlay (log viewer, diffs) */
+.s3-ov { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 16px; background: rgba(0, 0, 0, .45); }
+.s3-ov-box { width: min(720px, 100%); max-height: calc(100vh - 32px); display: flex; flex-direction: column; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 18px 48px rgba(0, 0, 0, .35); min-width: 0; }
+.s3-ov-wide { width: min(1080px, 100%); }
+.s3-ov-h { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.s3-ov-h h2 { font-size: 14px; flex: 1; min-width: 0; }
+.s3-ov-b { padding: 12px 16px 16px; overflow: auto; display: grid; gap: 10px; min-height: 0; }
+.s3-loghead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; }
+.s3-log { border-radius: 6px; max-height: calc(100vh - 200px); min-height: 240px; }
+[data-skin="neon"] .s3-ov-box { background: rgba(12, 15, 36, .96); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: 0 0 0 1px rgba(139, 92, 246, .25), 0 18px 48px rgba(0, 0, 0, .55); }
+
+/* login card (V7) */
+.s3-login { position: fixed; left: 16px; bottom: 16px; z-index: 55; width: min(380px, calc(100vw - 32px)); box-shadow: 0 10px 30px rgba(0, 0, 0, .22); border-left: 3px solid var(--warn); }
+[data-skin="neon"] .s3-login { background: rgba(12, 15, 36, .95); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+
+@media (max-width: 760px) {
+  .s3 { padding: 12px; }
+  .s3-grid { grid-template-columns: minmax(0, 1fr); }
+  .s3-ov { padding: 8px; place-items: stretch; }
+  .s3-ov-box { max-height: calc(100vh - 16px); }
+}
