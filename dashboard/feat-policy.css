@@ -1,0 +1,46 @@
+/* S4 shared layout (repeated in every feat-*.css of S4 so each file works alone) */
+.s4-body { padding: 16px; display: grid; gap: 16px; min-width: 0; }
+.s4-grid { display: grid; gap: 12px; min-width: 0; }
+.s4-g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.s4-sec { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; background: var(--surface); min-width: 0; }
+.s4-sec h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+.s4-sec-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.s4-sec-h h3 { margin: 0; }
+.s4-mt { margin-top: 12px; }
+.s4-gap { gap: 8px 16px; }
+.s4-mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
+.s4-sel { width: auto; padding: 3px 6px; font-size: 12px; max-width: 100%; }
+.s4-lbl { display: grid; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
+.s4-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 4px 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); font-size: 12px; max-width: 100%; overflow-wrap: anywhere; }
+.s4-x { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 3px; font-size: 11px; line-height: 1.4; border-radius: 4px; }
+.s4-x:hover { color: var(--text); background: var(--hover); }
+.s4-x:focus-visible { outline: none; box-shadow: var(--focus); }
+
+/* Policy specifics */
+.s4p-warn { border-color: var(--warn); background: var(--warn-soft); color: var(--text); }
+.s4p-list { display: grid; }
+.s4p-item { display: flex; gap: 10px; align-items: flex-start; padding: 8px 2px; border-bottom: 1px solid var(--border); min-width: 0; }
+.s4p-item:last-child { border-bottom: 0; }
+.s4p-item.s4p-done { opacity: .6; }
+.s4p-main { flex: 1; min-width: 0; font-size: 12px; }
+.s4p-detail { overflow-wrap: anywhere; }
+.s4p-acts { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.s4p-scopes { display: flex; flex-wrap: wrap; gap: 6px; }
+.s4p-scope { border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.s4p-scope:hover { color: var(--text); border-color: var(--border-strong); }
+.s4p-scope[aria-selected="true"] { background: var(--accent-soft); color: var(--text); border-color: var(--accent); font-weight: 600; }
+.s4p-scope:focus-visible { outline: none; box-shadow: var(--focus); }
+.s4p-add { border-style: dashed; }
+.s4p-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); min-height: 36px; }
+.s4p-add-in { flex: 1; min-width: 10rem; border: 0; box-shadow: none; padding: 3px 4px; background: transparent; }
+.s4p-add-in:focus { box-shadow: none; }
+.s4p-prev { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.s4p-grow { flex: 1; min-width: 14rem; }
+.s4p-pre { margin-top: 4px; max-height: 240px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+
+@media (max-width: 760px) {
+  .s4-body { padding: 12px; gap: 12px; }
+  .s4-g2 { grid-template-columns: minmax(0, 1fr); }
+  .s4p-item { flex-wrap: wrap; }
+  .s4p-acts { width: 100%; justify-content: flex-start; }
+}

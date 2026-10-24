@@ -1,0 +1,25 @@
+/* S4 shared layout (repeated in every feat-*.css of S4 so each file works alone) */
+.s4-body { padding: 16px; display: grid; gap: 16px; min-width: 0; }
+.s4-sec { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; background: var(--surface); min-width: 0; }
+.s4-sec h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+.s4-sec-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.s4-sec-h h3 { margin: 0; }
+.s4-sel { width: auto; padding: 3px 6px; font-size: 12px; max-width: 100%; }
+
+/* Scoreboard specifics */
+.s4s-team { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 10px; }
+.s4s-member { border: 1px solid var(--border); border-left: 3px solid var(--chip, var(--accent)); border-radius: 8px; padding: 8px 10px; background: var(--surface-2); display: grid; gap: 3px; min-width: 0; }
+.s4s-conf { font-size: 11px; }
+.s4s-table th { padding: 0; }
+.s4s-sort { all: unset; box-sizing: border-box; display: block; width: 100%; padding: 8px 12px; cursor: pointer; white-space: nowrap; }
+.s4s-sort:hover { color: var(--text); }
+.s4s-sort:focus-visible { box-shadow: var(--focus); border-radius: 4px; }
+th.num .s4s-sort { text-align: right; }
+.s4s-table td { white-space: nowrap; }
+.s4s-rate { display: inline-flex; align-items: center; gap: 6px; }
+.s4s-rate .bar { width: 48px; flex: none; min-width: 0; }
+
+@media (max-width: 760px) {
+  .s4-body { padding: 12px; gap: 12px; }
+  .s4s-team { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
