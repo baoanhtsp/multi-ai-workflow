@@ -114,6 +114,7 @@ multi-ai-workflow/
 ├── README.md                                              # Tài liệu hướng dẫn toàn diện
 ├── install.ps1                                            # Script cài đặt tự động 1-click
 ├── antigravity/
+│   ├── hooks.json                                         # Hook tự động đồng bộ CSRF Token & Port cho Claude
 │   ├── rules/
 │   │   └── claude-leader-workflow.md                      # Luật toàn cục (Always-On Global Rule)
 │   └── skills/
@@ -122,7 +123,8 @@ multi-ai-workflow/
 │           └── scripts/
 │               ├── invoke-claude.ps1                      # Điều phối Claude 3 tầng (Opus/Sonnet/Haiku)
 │               ├── invoke-codex.ps1                       # Điều phối OpenAI Codex CLI (Review/Critic/Coder)
-│               └── invoke-antigravity.ps1                 # Cầu nối để Claude ra lệnh ngược cho Antigravity
+│               ├── invoke-antigravity.ps1                 # Cầu nối để Claude ra lệnh ngược cho Antigravity
+│               └── save-agentapi-env.ps1                  # Tự động lưu CSRF Token ra agentapi-bridge.json
 └── claude/
     ├── CLAUDE.md                                          # Bộ nhớ toàn cục cho Claude Code
     └── commands/
