@@ -61,7 +61,7 @@ MAW-Workdir: <absolute normalised workdir>
 ### 1.2 Hooks (PowerShell 5.1)
 `scripts/hooks/_shared/10-checkpoint-lib.ps1` defines `New-MawCheckpoint -WorkDir -JobKey -Event -Label [-Agent] [-Role] [-Round] [-Retention]` implementing §1.1 with `Invoke-NativeProcess`-style argument arrays (stdin closed; `$env:GIT_INDEX_FILE` set only for the child and restored in `finally`). It returns the checkpoint id or `$null`, and **never throws** (a failed checkpoint must not block the job; it writes `[checkpoint] failed: …`).
 
-Hook files (each is ~10 lines, dot-sources the library via `Join-Path (Split-Path $PSScriptRoot) '_shared-checkpoint-lib.ps1'`, never returns `Block`):
+Hook files (each is ~10 lines, dot-sources the library via `Join-Path (Split-Path $PSScriptRoot) '_shared\10-checkpoint-lib.ps1'`, never returns `Block`):
 - `hooks/job-start/10-checkpoint.ps1`: `JobKey = $Context.job_id`, `WorkDir = $Context.project`, label `before job <job_id> (<agent>/<role>)`. Writes `[checkpoint] <id>` (becomes a job-log line).
 - `hooks/round-start/10-checkpoint.ps1`: `JobKey = $env:MAW_JOB_ID` if valid else `autogate-<yyyyMMdd>`; label `before Auto-Gate round <round>`; `Round = $Context.round`.
 - `hooks/before-agent/10-checkpoint.ps1`: `JobKey = $env:MAW_JOB_ID` if valid else `agent-<yyyyMMdd>`; label `before <agent> as <role>`; `WorkDir = $Context.workdir`.
