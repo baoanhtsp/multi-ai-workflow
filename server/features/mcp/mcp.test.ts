@@ -17,6 +17,7 @@ import { generateUnifiedDiff } from './diff.ts';
 import { renderPlatformFile, setMcpPathOverrides } from './manager.ts';
 import {
   isMaskedValue,
+  maskAllEnvsInToml,
   maskEnvValue,
   parseCodexTomlMcp,
   updateCodexTomlMcp,
@@ -629,6 +630,161 @@ test('MCP Round 2 Item 1: codex one-line change produces hunk with <= 7 lines of
     assert.ok(!claudeRes.diff.includes('unrelated_key_'), 'Subtree diff must not include non-mcpServers keys');
     assert.ok(claudeRes.diff.includes('-      "old.js"'));
     assert.ok(claudeRes.diff.includes('+      "new.js"'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('MCP Round 3 Item 1: extra secret keys and inline TOML env table masking & unmasked retain', () => {
+  const { paths, claudeFile, codexFile, cleanup } = createTempMcpPaths();
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+
+  try {
+    // 1. Inline TOML env table masking
+    const tomlWithInlineEnv = `[mcp_servers.my_srv]\ncommand = "node"\nenv = { API_KEY = "secret123456", PORT = "8080" }\n`;
+    const maskedToml = maskAllEnvsInToml(tomlWithInlineEnv);
+    assert.ok(maskedToml.includes('API_KEY = "••••56"'), 'Inline TOML API_KEY must be masked');
+    assert.ok(maskedToml.includes('PORT = "••••"'), 'Inline TOML PORT must be masked');
+    assert.ok(!maskedToml.includes('secret123456'), 'Original secret must not appear in masked TOML');
+
+    // 2. Extra secret keys masking in Claude JSON
+    const claudeJson = {
+      mcpServers: {
+        secure_srv: {
+          command: 'node',
+          args: ['run.js'],
+          auth_token: 'super_secret_auth_token_99',
+          headers: {
+            Authorization: 'Bearer secret_bearer_token_11',
+            UserAgent: 'SafeClient/1.0',
+          },
+          timeout: 30,
+        },
+      },
+    };
+    fs.writeFileSync(claudeFile, JSON.stringify(claudeJson, null, 2), 'utf8');
+
+    const cfgRes = handleMcpConfig(ctx, { ...ctx, query: new URLSearchParams('') } as any) as any;
+    const claudeStatus = cfgRes.platforms.find((p: any) => p.platform === 'claude');
+    const srv = claudeStatus.servers.find((s: any) => s.name === 'secure_srv');
+    assert.ok(srv, 'secure_srv must be present');
+    assert.ok(srv.extra.auth_token.startsWith('••••'), 'auth_token must be masked');
+    assert.ok(!srv.extra.auth_token.includes('super_secret'), 'Real auth_token must not appear in config');
+    assert.ok(srv.extra.headers.Authorization.startsWith('••••'), 'Authorization header must be masked');
+    assert.equal(srv.extra.headers.UserAgent, 'SafeClient/1.0', 'Non-secret extra keys must be preserved');
+
+    // 3. Retain unmasked secret when updating with masked value
+    const reqUpdate = {
+      ...ctx,
+      url: new URL('http://127.0.0.1:4317/api?action=mcp_apply'),
+      query: new URLSearchParams(''),
+      body: {
+        confirm: true,
+        platforms: ['claude'],
+        set: [
+          {
+            name: 'secure_srv',
+            command: 'node',
+            args: ['run.js'],
+            extra: {
+              auth_token: srv.extra.auth_token, // Masked value submitted from UI
+              headers: {
+                Authorization: srv.extra.headers.Authorization, // Masked value
+                UserAgent: 'UpdatedClient/2.0',
+              },
+              timeout: 45,
+            },
+          },
+        ],
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx,
+    };
+
+    const applyRes = handleMcpApply(ctx, reqUpdate as any) as any;
+    assert.equal(applyRes.ok, true);
+
+    const updatedRaw = fs.readFileSync(claudeFile, 'utf8');
+    const updatedParsed = JSON.parse(updatedRaw);
+    const updatedSrv = updatedParsed.mcpServers.secure_srv;
+    assert.equal(updatedSrv.auth_token, 'super_secret_auth_token_99', 'Existing unmasked auth_token must be retained');
+    assert.equal(updatedSrv.headers.Authorization, 'Bearer secret_bearer_token_11', 'Existing unmasked Authorization must be retained');
+    assert.equal(updatedSrv.headers.UserAgent, 'UpdatedClient/2.0', 'Updated UserAgent must be written');
+    assert.equal(updatedSrv.timeout, 45, 'Updated timeout must be written');
+  } finally {
+    cleanup();
+  }
+});
+
+test('MCP Round 3 Item 8: copy_from across platforms in preview and apply', () => {
+  const { paths, codexFile, geminiFile, cleanup } = createTempMcpPaths();
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+
+  try {
+    // 1. Setup Codex source server with real env
+    const codexToml = `[mcp_servers.tool_srv]\ncommand = "python"\nargs = ["tool.py"]\n\n[mcp_servers.tool_srv.env]\nAPI_KEY = "my_unmasked_secret_123"\n`;
+    fs.writeFileSync(codexFile, codexToml, 'utf8');
+
+    // 2. Mutual exclusivity check: copy_from with set throws 400
+    assert.throws(
+      () =>
+        handleMcpPreview(ctx, {
+          ...ctx,
+          body: {
+            platform: 'gemini',
+            copy_from: { platform: 'codex', name: 'tool_srv' },
+            set: [{ name: 'other' }],
+          },
+        } as any),
+      (err: any) => err.statusCode === 400 && err.message.includes('mutually exclusive')
+    );
+
+    // 3. Unknown source server throws 404
+    assert.throws(
+      () =>
+        handleMcpPreview(ctx, {
+          ...ctx,
+          body: {
+            platform: 'gemini',
+            copy_from: { platform: 'codex', name: 'nonexistent' },
+          },
+        } as any),
+      (err: any) => err.statusCode === 404
+    );
+
+    // 4. Preview copy_from: diff has masked secret
+    const previewRes = handleMcpPreview(ctx, {
+      ...ctx,
+      body: {
+        platform: 'gemini',
+        copy_from: { platform: 'codex', name: 'tool_srv' },
+      },
+    } as any) as any;
+    assert.equal(previewRes.ok, true);
+    assert.equal(previewRes.changed, true);
+    assert.ok(previewRes.diff.includes('tool_srv'), 'Diff must include tool_srv');
+    assert.ok(previewRes.diff.includes('••••23'), 'Diff must show masked API_KEY');
+    assert.ok(!previewRes.diff.includes('my_unmasked_secret_123'), 'Diff must NOT contain unmasked secret');
+
+    // 5. Apply copy_from to gemini: writes real unmasked env to target file
+    const applyRes = handleMcpApply(ctx, {
+      ...ctx,
+      body: {
+        confirm: true,
+        platforms: ['gemini'],
+        copy_from: { platform: 'codex', name: 'tool_srv' },
+      },
+    } as any) as any;
+    assert.equal(applyRes.ok, true);
+    assert.equal(applyRes.results[0].changed, true);
+
+    const geminiRaw = fs.readFileSync(geminiFile, 'utf8');
+    const geminiParsed = JSON.parse(geminiRaw);
+    assert.ok(geminiParsed.mcpServers.tool_srv, 'tool_srv must be written to gemini');
+    assert.equal(geminiParsed.mcpServers.tool_srv.command, 'python');
+    assert.deepEqual(geminiParsed.mcpServers.tool_srv.args, ['tool.py']);
+    assert.equal(geminiParsed.mcpServers.tool_srv.env.API_KEY, 'my_unmasked_secret_123', 'Real secret must be written');
   } finally {
     cleanup();
   }

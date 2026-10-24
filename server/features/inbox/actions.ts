@@ -10,6 +10,7 @@ import {
   fireInboxResolved,
   getInboxItem,
   readInboxData,
+  unmarkInboxResolved,
   updateInboxItemStatus,
   writeInboxData,
   type InboxAction,
@@ -242,8 +243,27 @@ export async function performInboxAction(
     throw new ApiValidationError(`Inbox item '${id}' not found.`, 404);
   }
 
-  // Guard: retry or reply on an item that is not 'open' => 409 "already resolved" (Item 12)
-  if (normAction === 'retry' || normAction === 'reply') {
+  // Guard: retry, reply, approve, reject, done on an item that is not 'open' => 409 (Round 3 Item 4)
+  if (
+    normAction === 'retry' ||
+    normAction === 'reply' ||
+    normAction === 'approve' ||
+    normAction === 'reject' ||
+    normAction === 'done'
+  ) {
+    if (item.status !== 'open') {
+      throw new ApiValidationError(`Inbox item '${id}' is already resolved (${item.status}).`, 409);
+    }
+  }
+
+  // Dismiss on an already-dismissed item is idempotent; on any other non-open status => 409
+  if (normAction === 'dismiss') {
+    if (item.status === 'dismissed') {
+      return {
+        ok: true,
+        item,
+      };
+    }
     if (item.status !== 'open') {
       throw new ApiValidationError(`Inbox item '${id}' is already resolved (${item.status}).`, 409);
     }
@@ -339,41 +359,48 @@ export async function performInboxAction(
       };
 
       const updated = updateInboxItemStatus(ctx.paths, id, 'done', resolution);
-      let handled = false;
-      if (updated) {
-        handled = await fireInboxResolved(updated);
-      }
+      try {
+        let handled = false;
+        if (updated) {
+          handled = await fireInboxResolved(updated);
+        }
 
-      let followUpJobId: string | null = null;
-      if (!handled && item.retry) {
-        // Start follow-up job with original prompt + user follow-up
-        const originalPrompt = item.retry.prompt ?? '';
-        const followUpPrompt = `${originalPrompt}\n\n## Follow-up from the user\n${rawText}`.trim();
-        const followUpBody = {
-          ...item.retry,
-          prompt: followUpPrompt,
-        };
-        const jobRes = await ctx.startJob(followUpBody as unknown as Record<string, unknown>);
-        followUpJobId = (jobRes.job_id as string) ?? null;
-        if (updated && followUpJobId) {
-          updated.resolution = {
-            ...resolution,
-            job_id: followUpJobId,
+        let followUpJobId: string | null = null;
+        if (!handled && item.retry) {
+          // Start follow-up job with original prompt + user follow-up
+          const originalPrompt = item.retry.prompt ?? '';
+          const followUpPrompt = `${originalPrompt}\n\n## Follow-up from the user\n${rawText}`.trim();
+          const followUpBody = {
+            ...item.retry,
+            prompt: followUpPrompt,
           };
-          const data = readInboxData(ctx.paths);
-          const idx = data.items.findIndex((it) => it.id === updated.id);
-          if (idx !== -1) {
-            data.items[idx] = updated;
-            writeInboxData(ctx.paths, data);
+          const jobRes = await ctx.startJob(followUpBody as unknown as Record<string, unknown>);
+          followUpJobId = (jobRes?.job_id as string) ?? null;
+          if (updated && followUpJobId) {
+            updated.resolution = {
+              ...resolution,
+              job_id: followUpJobId,
+            };
+            const data = readInboxData(ctx.paths);
+            const idx = data.items.findIndex((it) => it.id === updated.id);
+            if (idx !== -1) {
+              data.items[idx] = updated;
+              writeInboxData(ctx.paths, data);
+            }
           }
         }
-      }
 
-      return {
-        ok: true,
-        item: updated,
-        job_id: followUpJobId,
-      };
+        return {
+          ok: true,
+          item: updated,
+          job_id: followUpJobId,
+        };
+      } catch (err) {
+        // Roll back to 'open' and clear resolution if follow-up job start fails (Round 3 Item 6)
+        updateInboxItemStatus(ctx.paths, id, 'open', null);
+        unmarkInboxResolved(id);
+        throw err;
+      }
     } finally {
       inFlightActionIds.delete(id);
     }

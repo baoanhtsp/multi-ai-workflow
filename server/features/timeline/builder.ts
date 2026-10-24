@@ -23,6 +23,12 @@ export interface TimelineItem {
   tokens: { in: number; out: number };
   score: string | null;
   verdict: string | null;
+  sub?: boolean;
+}
+
+export function normalizeProjectPath(p?: string): string {
+  if (!p) return '';
+  return path.win32.resolve(p).toLowerCase().replace(/[/\\]+$/, '');
 }
 
 export interface TimelineLane {
@@ -133,6 +139,7 @@ export function buildTimeline(
 
   // Load audit rows for telemetry matching
   const auditRows = parseAuditRows(paths.auditFile);
+  const normFilterProject = options?.project ? normalizeProjectPath(options.project) : undefined;
 
   // Group events by job_id or handoff id
   const itemsMap = new Map<string, TimelineItem>();
@@ -144,8 +151,13 @@ export function buildTimeline(
       continue;
     }
 
-    if (options?.project && ev.project && !ev.project.toLowerCase().includes(options.project.toLowerCase())) {
-      continue;
+    if (normFilterProject) {
+      if (!ev.project) {
+        continue;
+      }
+      if (normalizeProjectPath(ev.project) !== normFilterProject) {
+        continue;
+      }
     }
 
     const key = ev.job_id || `${ev.event}_${ev.ts}_${ev.agent}`;
@@ -182,9 +194,10 @@ export function buildTimeline(
   for (const [jobId, item] of itemsMap.entries()) {
     const itemStartMs = new Date(item.start).getTime();
     const itemEndMs = item.end ? new Date(item.end).getTime() + 5000 : Date.now() + 5000;
+    const normItemProj = item.project_path ? normalizeProjectPath(item.project_path) : '';
 
     const matchedAudit = auditRows.filter((row) => {
-      if (item.project_path && row.WorkDir && row.WorkDir.toLowerCase() !== item.project_path.toLowerCase()) {
+      if (normItemProj && row.WorkDir && normalizeProjectPath(row.WorkDir) !== normItemProj) {
         return false;
       }
       const rowMs = new Date(row.Timestamp).getTime();
@@ -224,6 +237,7 @@ export function buildTimeline(
           tokens: { in: telem.in_tokens, out: telem.out_tokens },
           score: row.Score || null,
           verdict: row.Verdict || null,
+          sub: true, // Mark sub-item from audit row (Round 3 Item 9)
         };
         prevSubEnd = row.Timestamp;
         multiToolSubItems.push({ laneAgent: toolId, item: subItem });
@@ -289,6 +303,10 @@ export function buildTimeline(
     // Sort items by start time
     lane.items.sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
     for (const it of lane.items) {
+      if (it.sub) {
+        // Skip sub-items in totals calculation to avoid double-counting (Round 3 Item 9)
+        continue;
+      }
       totalJobs++;
       if (it.status === 'DONE') doneCount++;
       else if (it.status === 'FAILED') failedCount++;
@@ -360,9 +378,28 @@ export async function generateTimelineReport(
     }
   }
 
-  // Audit review rows
+  // Audit review rows: filter by project AND [from, to] window (Round 3 Item 5)
+  const fromMs = new Date(data.from).getTime();
+  const toMs = new Date(data.to).getTime();
+  const normReportProj = options.project ? normalizeProjectPath(options.project) : undefined;
+
   const auditRows = parseAuditRows(paths.auditFile);
-  const reviewerRows = auditRows.filter((r) => r.Role === 'reviewer' || r.Score || r.Verdict);
+  const reviewerRows = auditRows.filter((r) => {
+    if (r.Role !== 'reviewer' && !r.Score && !r.Verdict) {
+      return false;
+    }
+    const t = new Date(r.Timestamp).getTime();
+    if (Number.isNaN(t) || t < fromMs || t > toMs) {
+      return false;
+    }
+    if (normReportProj) {
+      if (!r.WorkDir) return false;
+      if (normalizeProjectPath(r.WorkDir) !== normReportProj) {
+        return false;
+      }
+    }
+    return true;
+  });
 
   if (options.format === 'md') {
     const lines: string[] = [];

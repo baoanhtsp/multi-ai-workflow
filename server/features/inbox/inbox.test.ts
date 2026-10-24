@@ -497,3 +497,126 @@ test('Inbox Round 2 Item 3: buildMeaningfulDetail strips job header/mode/ruler/f
   assert.ok(lines.length <= 8, `Expected <= 8 lines, got ${lines.length}`);
   assert.equal(lines[lines.length - 1], 'Step 20 processing');
 });
+
+test('Inbox Round 3 Item 4: approve, reject, and done on non-open item throw 409, dismiss is idempotent, and onInboxResolved fires at most once', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+
+  try {
+    let resolvedCount = 0;
+    const unsub = onInboxResolved(() => {
+      resolvedCount++;
+    });
+
+    // 1. Approval item: approve succeeds once, subsequent calls throw 409
+    const { item: approvalItem } = addInboxItem(paths, {
+      kind: 'approval',
+      title: 'Deploy approval',
+      actions: ['approve', 'reject', 'dismiss'],
+    });
+
+    const appRes1 = await performInboxAction(ctx, approvalItem.id, 'approve', undefined, 'ui');
+    assert.equal(appRes1.ok, true);
+    assert.equal((appRes1.item as any).status, 'approved');
+    assert.equal(resolvedCount, 1, 'onInboxResolved should have fired once');
+
+    // Subsequent approve => 409
+    await assert.rejects(
+      async () => await performInboxAction(ctx, approvalItem.id, 'approve', undefined, 'ui'),
+      (err: any) => err.statusCode === 409 && err.message.includes('already resolved')
+    );
+
+    // Reject on approved => 409
+    await assert.rejects(
+      async () => await performInboxAction(ctx, approvalItem.id, 'reject', undefined, 'ui'),
+      (err: any) => err.statusCode === 409
+    );
+
+    // Done on approved => 409
+    await assert.rejects(
+      async () => await performInboxAction(ctx, approvalItem.id, 'done', undefined, 'ui'),
+      (err: any) => err.statusCode === 409
+    );
+
+    // Dismiss on approved => 409
+    await assert.rejects(
+      async () => await performInboxAction(ctx, approvalItem.id, 'dismiss', undefined, 'ui'),
+      (err: any) => err.statusCode === 409
+    );
+
+    assert.equal(resolvedCount, 1, 'onInboxResolved must not fire for rejected operations');
+
+    // 2. Dismiss is idempotent on already-dismissed item
+    const { item: dismissItem } = addInboxItem(paths, {
+      kind: 'custom',
+      title: 'Dismissable notice',
+      actions: ['dismiss'],
+    });
+
+    const disRes1 = await performInboxAction(ctx, dismissItem.id, 'dismiss', undefined, 'ui');
+    assert.equal(disRes1.ok, true);
+    assert.equal((disRes1.item as any).status, 'dismissed');
+    assert.equal(resolvedCount, 2, 'onInboxResolved should fire on first dismissal');
+
+    // Idempotent second dismiss
+    const disRes2 = await performInboxAction(ctx, dismissItem.id, 'dismiss', undefined, 'ui');
+    assert.equal(disRes2.ok, true);
+    assert.equal((disRes2.item as any).status, 'dismissed');
+    assert.equal(resolvedCount, 2, 'onInboxResolved must NOT fire again on idempotent dismiss');
+
+    unsub();
+  } finally {
+    cleanup();
+  }
+});
+
+test('Inbox Round 3 Item 6: reply path rolls back to open on startJob failure', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  let failStartJob = true;
+
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+  ctx.startJob = async () => {
+    if (failStartJob) {
+      throw new Error('Follow-up runner failed');
+    }
+    return { ok: true, job_id: 'job_followup_success_123' };
+  };
+
+  try {
+    const { item } = addInboxItem(paths, {
+      kind: 'needs_input',
+      title: 'Waiting for prompt clarification',
+      actions: ['reply', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Initial prompt',
+      },
+    });
+
+    // 1. Reply when startJob fails => throws, status rolls back to 'open'
+    await assert.rejects(
+      async () => await performInboxAction(ctx, item.id, 'reply', 'User clarification here', 'ui'),
+      /Follow-up runner failed/
+    );
+
+    const rolledBack = getInboxItem(paths, item.id);
+    assert.ok(rolledBack, 'Item must still exist');
+    assert.equal(rolledBack.status, 'open', 'Item status must be rolled back to open');
+    assert.equal(rolledBack.resolution, null, 'Item resolution must be rolled back to null');
+
+    // 2. Retry reply when startJob succeeds => succeeds, status becomes 'done'
+    failStartJob = false;
+    const repRes = await performInboxAction(ctx, item.id, 'reply', 'User clarification here', 'ui');
+    assert.equal(repRes.ok, true);
+    assert.equal((repRes.item as any).status, 'done');
+    assert.equal(repRes.job_id, 'job_followup_success_123');
+
+    const doneItem = getInboxItem(paths, item.id);
+    assert.equal(doneItem?.status, 'done');
+    assert.equal(doneItem?.resolution?.job_id, 'job_followup_success_123');
+  } finally {
+    cleanup();
+  }
+});

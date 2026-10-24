@@ -171,3 +171,173 @@ test('timeline report generates markdown and escaped html', async () => {
     cleanup();
   }
 });
+
+test('Timeline Round 3 Item 5: project filter exact path normalization and report reviewer rows filtering', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    const registry = loadAgentRegistry(paths);
+    const ctx = createFeatureContext(paths, registry);
+    const now = new Date();
+    const tStart = new Date(now.getTime() - 10_000).toISOString();
+    const tEnd = now.toISOString();
+
+    const projA = 'C:\\Projects\\AppAlpha\\';
+    const projB = 'C:\\Projects\\AppAlpha\\submodule';
+
+    // 1. Event in projA with forward slashes and trailing slash
+    appendTimelineEvent(paths, {
+      ts: tStart,
+      event: 'job-start',
+      job_id: 'job_proj_a',
+      agent: 'claude',
+      project: 'c:/projects/appalpha/',
+      status: 'DONE',
+      start: tStart,
+      end: tEnd,
+    });
+
+    // 2. Event in projB (subpath)
+    appendTimelineEvent(paths, {
+      ts: tStart,
+      event: 'job-start',
+      job_id: 'job_proj_b',
+      agent: 'codex',
+      project: projB,
+      status: 'DONE',
+      start: tStart,
+      end: tEnd,
+    });
+
+    // 3. Event without project
+    appendTimelineEvent(paths, {
+      ts: tStart,
+      event: 'job-start',
+      job_id: 'job_no_proj',
+      agent: 'gemini',
+      status: 'DONE',
+      start: tStart,
+      end: tEnd,
+    });
+
+    // Audit file with 3 rows
+    fs.mkdirSync(path.dirname(paths.auditFile), { recursive: true });
+    const auditRows = [
+      {
+        Timestamp: tStart,
+        Tool: 'claude',
+        Role: 'reviewer',
+        WorkDir: projA,
+        Score: '9/10',
+        Verdict: 'APPROVED',
+      },
+      {
+        Timestamp: tStart,
+        Tool: 'codex',
+        Role: 'reviewer',
+        WorkDir: projB, // Different project
+        Score: '5/10',
+        Verdict: 'CHANGES_REQUESTED',
+      },
+      {
+        Timestamp: new Date(now.getTime() - 48 * 3600_000).toISOString(), // Outside 24h window
+        Tool: 'claude',
+        Role: 'reviewer',
+        WorkDir: projA,
+        Score: '8/10',
+        Verdict: 'APPROVED',
+      },
+    ];
+    fs.writeFileSync(paths.auditFile, auditRows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+
+    // Query timeline with project filter
+    const timelineData = buildTimeline(paths, registry, {
+      project: 'C:\\Projects\\AppAlpha',
+    });
+
+    // Should only have job_proj_a
+    const allItems = timelineData.lanes.flatMap((l) => l.items);
+    assert.equal(allItems.length, 1, 'Only exact project match must be included');
+    assert.equal(allItems[0]!.id, 'job_proj_a');
+
+    // Report with project filter
+    const report = await handleTimelineReport(ctx, {
+      ...ctx,
+      query: new URLSearchParams('format=md&project=C:\\Projects\\AppAlpha'),
+    } as any) as any;
+
+    assert.equal(report.ok, true);
+    assert.ok(report.content.includes('9/10'), 'Matching audit row should be in report');
+    assert.ok(!report.content.includes('5/10'), 'Other project audit row must be excluded');
+    assert.ok(!report.content.includes('8/10'), 'Outside window audit row must be excluded');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Timeline Round 3 Item 9: totals do not double count multi-tool sub-items', () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    const registry = loadAgentRegistry(paths);
+    const now = new Date();
+    const tStart = new Date(now.getTime() - 20_000).toISOString();
+    const tEnd = now.toISOString();
+
+    // Team job
+    appendTimelineEvent(paths, {
+      ts: tStart,
+      event: 'job-start',
+      job_id: 'job_team_1',
+      mode: 'team',
+      agent: 'claude',
+      role: 'backend',
+      project: paths.repoRoot,
+      status: 'DONE',
+      start: tStart,
+      end: tEnd,
+    });
+
+    // Two reviewer audit rows for this team job
+    fs.mkdirSync(path.dirname(paths.auditFile), { recursive: true });
+    const auditRows = [
+      {
+        Timestamp: new Date(now.getTime() - 10_000).toISOString(),
+        Tool: 'codex',
+        Role: 'reviewer',
+        WorkDir: paths.repoRoot,
+        PromptChars: 500,
+        OutputChars: 500,
+        InputTokens: 200,
+        OutputTokens: 100,
+        Score: '8/10',
+        Verdict: 'APPROVED',
+      },
+      {
+        Timestamp: new Date(now.getTime() - 5_000).toISOString(),
+        Tool: 'gemini',
+        Role: 'critic',
+        WorkDir: paths.repoRoot,
+        PromptChars: 500,
+        OutputChars: 500,
+        InputTokens: 200,
+        OutputTokens: 100,
+        Score: '9/10',
+        Verdict: 'APPROVED',
+      },
+    ];
+    fs.writeFileSync(paths.auditFile, auditRows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+
+    const data = buildTimeline(paths, registry);
+
+    // Verify sub-items exist on their lanes
+    const codexLane = data.lanes.find((l) => l.agent === 'codex');
+    assert.ok(codexLane && codexLane.items.length === 1);
+    assert.equal(codexLane.items[0]!.sub, true, 'Sub-item must have sub: true');
+
+    // Totals MUST count only parent job
+    assert.equal(data.totals.jobs, 1, 'Total jobs must be 1, not 3 (no double counting)');
+    assert.equal(data.totals.done, 1, 'Done jobs must be 1');
+    assert.equal(data.totals.failed, 0, 'Failed jobs must be 0');
+  } finally {
+    cleanup();
+  }
+});

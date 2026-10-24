@@ -181,6 +181,55 @@ export function handleMcpConfig(
   };
 }
 
+function resolveMutationSet(
+  ctx: MawFeatureContext,
+  body: Record<string, unknown>
+): {
+  set?: McpServerConfig[];
+  remove?: string[];
+  copyFromInfo?: { platform: string; name: string };
+} {
+  const hasCopyFrom = body.copy_from !== undefined && body.copy_from !== null;
+  const hasSet = body.set !== undefined && body.set !== null;
+  const hasRemove = body.remove !== undefined && body.remove !== null;
+
+  if (hasCopyFrom) {
+    if (hasSet || hasRemove) {
+      throw new ApiValidationError("'copy_from' is mutually exclusive with 'set' and 'remove'.", 400);
+    }
+    if (typeof body.copy_from !== 'object' || Array.isArray(body.copy_from)) {
+      throw new ApiValidationError("Property 'copy_from' must be an object with 'platform' and 'name'.", 400);
+    }
+    const cf = body.copy_from as Record<string, unknown>;
+    const fromPlatform = String(cf.platform ?? '').trim().toLowerCase() as 'claude' | 'codex' | 'gemini';
+    if (!VALID_PLATFORMS.has(fromPlatform)) {
+      throw new ApiValidationError(`Invalid source platform '${String(cf.platform)}' in copy_from.`, 400);
+    }
+    const serverName = String(cf.name ?? '').trim();
+    if (!serverName) {
+      throw new ApiValidationError("Missing 'name' in copy_from.", 400);
+    }
+
+    const files = getMcpFiles(ctx.paths);
+    const sourceRes = readPlatformServers(files[fromPlatform], fromPlatform);
+    const found = sourceRes.servers.find((s) => s.name.toLowerCase() === serverName.toLowerCase());
+    if (!found) {
+      throw new ApiValidationError(`Source server '${serverName}' not found in platform '${fromPlatform}'.`, 404);
+    }
+
+    return {
+      set: [{ ...found }],
+      remove: undefined,
+      copyFromInfo: { platform: fromPlatform, name: serverName },
+    };
+  }
+
+  return {
+    set: body.set as McpServerConfig[] | undefined,
+    remove: body.remove as string[] | undefined,
+  };
+}
+
 export function handleMcpPreview(
   ctx: MawFeatureContext,
   req: MawFeatureRequest
@@ -191,8 +240,10 @@ export function handleMcpPreview(
     throw new ApiValidationError("Property 'platform' must be 'claude', 'codex', or 'gemini'.", 400);
   }
 
+  const mutation = resolveMutationSet(ctx, body as Record<string, unknown>);
+
   // Validate set and remove inputs (Item 4)
-  validateMcpMutation(platform, body.set, body.remove);
+  validateMcpMutation(platform, mutation.set, mutation.remove);
 
   const files = getMcpFiles(ctx.paths);
   const targetFile = files[platform];
@@ -201,8 +252,8 @@ export function handleMcpPreview(
   try {
     // Render unmasked updated content to compute `changed` and check validity
     const unmaskedUpdated = renderPlatformFile(targetFile, platform, {
-      set: body.set as McpServerConfig[] | undefined,
-      remove: body.remove as string[] | undefined,
+      set: mutation.set,
+      remove: mutation.remove,
       maskEnv: false,
     });
 
@@ -275,11 +326,13 @@ export function handleMcpApply(
     throw new ApiValidationError("Property 'platforms' must be a non-empty array.", 400);
   }
 
+  const mutation = resolveMutationSet(ctx, body as Record<string, unknown>);
+
   // Validate mutation for every valid target platform (Item 4)
   for (const rawPlatform of body.platforms) {
     const p = String(rawPlatform).trim().toLowerCase() as 'claude' | 'codex' | 'gemini';
     if (VALID_PLATFORMS.has(p)) {
-      validateMcpMutation(p, body.set, body.remove);
+      validateMcpMutation(p, mutation.set, mutation.remove);
     }
   }
 
@@ -297,8 +350,8 @@ export function handleMcpApply(
     try {
       const origContent = isFileSafe(targetFile) ? fs.readFileSync(targetFile, 'utf8') : '';
       const newContent = renderPlatformFile(targetFile, p, {
-        set: body.set as McpServerConfig[] | undefined,
-        remove: body.remove as string[] | undefined,
+        set: mutation.set,
+        remove: mutation.remove,
         maskEnv: false, // Apply writes unmasked env
       });
 
@@ -322,8 +375,9 @@ export function handleMcpApply(
       logMcpAudit(ctx.paths, 'mcp_apply', {
         platform: p,
         backup: backupName,
-        set: body.set ? (body.set as McpServerConfig[]).map((s) => s.name) : [],
-        remove: body.remove ?? [],
+        set: mutation.set ? mutation.set.map((s) => s.name) : [],
+        remove: mutation.remove ?? [],
+        copy_from: mutation.copyFromInfo,
       });
 
       results.push({ platform: p, changed: true, backup: backupName });

@@ -87,6 +87,7 @@ export type InboxResolvedListener = (
 ) => Promise<boolean | void> | boolean | void;
 
 const listeners = new Set<InboxResolvedListener>();
+const resolvedFiredIds = new Set<string>();
 
 export function onInboxResolved(listener: InboxResolvedListener): () => void {
   listeners.add(listener);
@@ -95,7 +96,19 @@ export function onInboxResolved(listener: InboxResolvedListener): () => void {
   };
 }
 
+export function unmarkInboxResolved(id: string): void {
+  resolvedFiredIds.delete(id);
+}
+
+export function resetInboxResolvedTracker(): void {
+  resolvedFiredIds.clear();
+}
+
 export async function fireInboxResolved(item: InboxItem): Promise<boolean> {
+  if (resolvedFiredIds.has(item.id)) {
+    return false;
+  }
+  resolvedFiredIds.add(item.id);
   let handled = false;
   for (const listener of listeners) {
     try {
@@ -272,7 +285,7 @@ export function updateInboxItemStatus(
   paths: ServerPaths,
   id: string,
   status: InboxStatus,
-  resolution?: InboxResolution
+  resolution?: InboxResolution | null
 ): InboxItem | null {
   const data = readInboxData(paths);
   const item = data.items.find((it) => it.id.toLowerCase() === id.toLowerCase());
@@ -281,7 +294,7 @@ export function updateInboxItemStatus(
   }
   item.status = status;
   item.updated_at = new Date().toISOString();
-  if (resolution) {
+  if (resolution !== undefined) {
     item.resolution = resolution;
   }
   writeInboxData(paths, data);

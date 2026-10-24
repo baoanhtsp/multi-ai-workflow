@@ -7,7 +7,9 @@ import { generateUnifiedDiff } from './diff.ts';
 import {
   isMaskedValue,
   maskEnvValue,
+  maskExtraValue,
   parseCodexTomlMcp,
+  SECRET_KEY_REGEX,
   updateCodexTomlMcp,
 } from './toml.ts';
 import type { McpBackupEntry, McpServerConfig, PlatformMcpStatus } from './types.ts';
@@ -43,7 +45,7 @@ export function maskServerConfig(s: McpServerConfig): McpServerConfig {
     command: s.command,
     args: s.args ? [...s.args] : undefined,
     url: s.url,
-    extra: s.extra ? { ...s.extra } : undefined,
+    extra: s.extra ? (maskExtraValue(s.extra) as Record<string, unknown>) : undefined,
   };
   if (s.env) {
     masked.env = {};
@@ -52,6 +54,65 @@ export function maskServerConfig(s: McpServerConfig): McpServerConfig {
     }
   }
   return masked;
+}
+
+export function mergeExtraRetainingExisting(
+  newExtra: Record<string, unknown>,
+  existingExtra?: Record<string, unknown>,
+  maskEnv?: boolean
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+
+  for (const [key, newVal] of Object.entries(newExtra)) {
+    const existingVal = existingExtra?.[key];
+    result[key] = mergeSingleExtraValue(newVal, existingVal, key, maskEnv);
+  }
+
+  return result;
+}
+
+function mergeSingleExtraValue(
+  newVal: unknown,
+  existingVal: unknown,
+  keyName: string,
+  maskEnv?: boolean
+): unknown {
+  if (newVal === null || newVal === undefined) return newVal;
+
+  if (typeof newVal === 'string') {
+    if (maskEnv) {
+      if (SECRET_KEY_REGEX.test(keyName)) {
+        return maskEnvValue(newVal);
+      }
+      return newVal;
+    }
+    // Write path: if newVal is masked and existingVal is string, retain existingVal
+    if (isMaskedValue(newVal) && typeof existingVal === 'string') {
+      return existingVal;
+    }
+    return newVal;
+  }
+
+  if (Array.isArray(newVal)) {
+    const existingArr = Array.isArray(existingVal) ? existingVal : [];
+    return newVal.map((item, idx) =>
+      mergeSingleExtraValue(item, existingArr[idx], keyName, maskEnv)
+    );
+  }
+
+  if (typeof newVal === 'object') {
+    const existingObj =
+      typeof existingVal === 'object' && existingVal !== null && !Array.isArray(existingVal)
+        ? (existingVal as Record<string, unknown>)
+        : undefined;
+    const res: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(newVal as Record<string, unknown>)) {
+      res[k] = mergeSingleExtraValue(v, existingObj?.[k], k, maskEnv);
+    }
+    return res;
+  }
+
+  return newVal;
 }
 
 export function readPlatformServers(filePath: string, platform: 'claude' | 'codex' | 'gemini'): {
@@ -207,9 +268,14 @@ export function renderPlatformFile(
       }
     }
 
+    const resolvedExtra = newS.extra
+      ? mergeExtraRetainingExisting(newS.extra, existing?.extra, options.maskEnv)
+      : undefined;
+
     const merged: McpServerConfig = {
       ...newS,
       env: Object.keys(resolvedEnv).length > 0 ? resolvedEnv : undefined,
+      extra: resolvedExtra,
     };
 
     const idx = activeServers.findIndex((s) => s.name.toLowerCase() === norm);

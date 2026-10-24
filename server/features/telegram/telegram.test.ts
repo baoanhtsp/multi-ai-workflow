@@ -8,9 +8,12 @@ import { redactTelegramSecrets, TelegramClient } from './client.ts';
 import {
   getPollerLockStatus,
   readTelegramConfig,
+  readTelegramState,
+  refreshPollerHeartbeat,
   TelegramPoller,
   tryAcquirePollerLock,
   writeTelegramConfig,
+  writeTelegramState,
 } from './poller.ts';
 
 function createTempTestPaths(): { paths: ServerPaths; cleanup: () => void } {
@@ -52,19 +55,23 @@ test('redactTelegramSecrets strips bot token and bot<token> strings', () => {
   assert.ok(sanitized.includes('bot[redacted-token]'), 'Expected bot[redacted-token]');
 });
 
-test('telegram single-poller lock acquisition and heartbeat refresh', () => {
+test('telegram single-poller lock acquisition and heartbeat refresh (Round 3 Item 7)', () => {
   const { paths, cleanup } = createTempTestPaths();
   try {
     const ok1 = tryAcquirePollerLock(paths, 4317);
-    assert.equal(ok1, true);
+    assert.equal(ok1, true, 'First acquirer must win fresh lock');
 
     const lockStatus1 = getPollerLockStatus(paths);
     assert.equal(lockStatus1.owner, 'this');
     assert.equal(lockStatus1.pid, process.pid);
 
-    // Same process acquiring again refreshes heartbeat
+    // Two acquirers in a row on a fresh lock => second one fails (Item 7)
     const ok2 = tryAcquirePollerLock(paths, 4317);
-    assert.equal(ok2, true);
+    assert.equal(ok2, false, 'Second acquirer in a row on a fresh lock must fail');
+
+    // Heartbeat refresh succeeds when we own the lock
+    const refreshed = refreshPollerHeartbeat(paths);
+    assert.equal(refreshed, true, 'Heartbeat refresh must succeed for owner');
 
     const dataDir = paths.featureDataDir('telegram');
     const lockFile = path.win32.join(dataDir, 'poller.lock');
@@ -82,6 +89,87 @@ test('telegram single-poller lock acquisition and heartbeat refresh', () => {
     // If PID is alive and heartbeat fresh, it's considered owned
     const lockStatus2 = getPollerLockStatus(paths);
     assert.equal(lockStatus2.owner, 'this');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Telegram Round 3 Item 2: readTelegramState preserves push_since and pushNewInboxItems pushes item after push_since exactly once', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    const notifyCfg = {
+      desktop_toast: true,
+      webhook_url: '',
+      telegram_bot_token: '123456:BOT_TOKEN_FOR_PUSH',
+      telegram_chat_id: '888999',
+    };
+    fs.mkdirSync(path.dirname(paths.notifyCfgFile), { recursive: true });
+    fs.writeFileSync(paths.notifyCfgFile, JSON.stringify(notifyCfg), 'utf8');
+
+    writeTelegramConfig(paths, {
+      inbound: true,
+      push_inbox: true,
+      digest: { enabled: false, morning: '08:30', evening: '18:00' },
+    });
+
+    // 1. Verify readTelegramState preserves push_since
+    const pastIso = new Date(Date.now() - 60000).toISOString();
+    writeTelegramState(paths, {
+      offset: 10,
+      push_since: pastIso,
+      last_digest: { morning: '', evening: '' },
+      msg_map: {},
+    });
+    const readState1 = readTelegramState(paths);
+    assert.equal(readState1.push_since, pastIso, 'readTelegramState must preserve push_since');
+
+    // 2. Add an inbox item created after push_since (e.g. now)
+    const dataDir = paths.featureDataDir('inbox');
+    fs.mkdirSync(dataDir, { recursive: true });
+    const itemsFile = path.join(dataDir, 'items.json');
+    const item1 = {
+      id: 'i_push_test_1',
+      kind: 'review_changes',
+      severity: 'warn',
+      title: 'Review changes requested',
+      detail: 'Need refactoring',
+      actions: ['retry', 'dismiss'],
+      status: 'open',
+      resolution: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(itemsFile, JSON.stringify({ version: 1, items: [item1] }), 'utf8');
+
+    const sentMessages: string[] = [];
+    const mockFetch: typeof fetch = async (input, init) => {
+      const urlStr = String(input);
+      if (urlStr.includes('/sendMessage')) {
+        const bodyObj = JSON.parse(String(init?.body ?? '{}'));
+        sentMessages.push(bodyObj.text);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 1001 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    const poller = new TelegramPoller(paths, {
+      fetchFn: mockFetch,
+      baseUrl: 'http://fake-telegram.local',
+    });
+
+    // First tick
+    await poller.pushNewInboxItems();
+    assert.equal(sentMessages.length, 1, 'Item created after push_since must be pushed on first tick');
+    assert.ok(sentMessages[0]!.includes('Review changes requested'));
+
+    // Second tick: must NOT push again (exactly once)
+    await poller.pushNewInboxItems();
+    assert.equal(sentMessages.length, 1, 'Item must not be pushed a second time');
+
+    // Verify state still has push_since and mapped message_id
+    const readState2 = readTelegramState(paths);
+    assert.equal(readState2.push_since, pastIso);
+    assert.equal(readState2.msg_map['1001'], 'i_push_test_1');
   } finally {
     cleanup();
   }

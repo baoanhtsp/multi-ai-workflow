@@ -98,6 +98,7 @@ export function readTelegramState(paths: ServerPaths): TelegramStateData {
     const parsed = JSON.parse(raw) as Partial<TelegramStateData>;
     return {
       offset: Number(parsed.offset ?? 0) || 0,
+      push_since: typeof parsed.push_since === 'string' ? parsed.push_since : undefined,
       last_digest: {
         morning: parsed.last_digest?.morning ?? '',
         evening: parsed.last_digest?.evening ?? '',
@@ -129,42 +130,108 @@ export function writeTelegramState(paths: ServerPaths, state: TelegramStateData)
   fs.renameSync(tempFile, stateFile);
 }
 
-// Single-poller lock management
-export function tryAcquirePollerLock(paths: ServerPaths, port?: number): boolean {
+// Single-poller lock management with atomic 'wx' creation & stale rename (Round 3 Item 7)
+export function refreshPollerHeartbeat(paths: ServerPaths): boolean {
   const dataDir = paths.featureDataDir('telegram');
   const lockFile = path.win32.join(dataDir, 'poller.lock');
-  const now = Date.now();
+  if (!isFileSafe(lockFile)) return false;
+  try {
+    const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8')) as TelegramLockData;
+    if (lock.pid === process.pid) {
+      lock.heartbeat = Date.now();
+      const tmp = `${lockFile}.${process.pid}.${Date.now()}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(lock), 'utf8');
+      fs.renameSync(tmp, lockFile);
+      return true;
+    }
+  } catch {
+    // Ignore
+  }
+  return false;
+}
 
-  if (isFileSafe(lockFile)) {
+export function tryAcquirePollerLock(
+  paths: ServerPaths,
+  port?: number,
+  options?: { pid?: number; isHeartbeat?: boolean }
+): boolean {
+  const dataDir = paths.featureDataDir('telegram');
+  fs.mkdirSync(dataDir, { recursive: true });
+  const lockFile = path.win32.join(dataDir, 'poller.lock');
+  const now = Date.now();
+  const myPid = options?.pid ?? process.pid;
+
+  if (options?.isHeartbeat) {
+    return refreshPollerHeartbeat(paths);
+  }
+
+  const lockData: TelegramLockData = {
+    pid: myPid,
+    port,
+    heartbeat: now,
+  };
+  const lockContent = JSON.stringify(lockData);
+
+  // 1. Try atomic create with 'wx' flag (fails if file already exists)
+  try {
+    const fd = fs.openSync(lockFile, 'wx');
     try {
-      const lock = JSON.parse(fs.readFileSync(lockFile, 'utf8')) as TelegramLockData;
-      if (lock.pid === process.pid) {
-        // Own lock: refresh heartbeat
-        lock.heartbeat = now;
-        fs.writeFileSync(lockFile, JSON.stringify(lock), 'utf8');
-        return true;
-      }
-      const isAlive = isProcessRunning(lock.pid);
-      const isStale = now - (lock.heartbeat ?? 0) > 60000;
-      if (isAlive && !isStale) {
-        // Active other poller owns lock
-        return false;
-      }
+      fs.writeFileSync(fd, lockContent, 'utf8');
+    } finally {
+      fs.closeSync(fd);
+    }
+    // Re-read after writing and keep only if pid matches
+    try {
+      const readBack = JSON.parse(fs.readFileSync(lockFile, 'utf8')) as TelegramLockData;
+      return readBack.pid === myPid;
     } catch {
-      // Corrupt lock file, reacquire
+      return false;
+    }
+  } catch (err: any) {
+    if (err.code !== 'EEXIST') {
+      return false;
     }
   }
 
+  // 2. Lock file exists: check if lock is stale or owner is dead
   try {
-    const lockData: TelegramLockData = {
-      pid: process.pid,
-      port,
-      heartbeat: now,
-    };
-    const tempFile = `${lockFile}.${process.pid}.${Date.now()}.tmp`;
-    fs.writeFileSync(tempFile, JSON.stringify(lockData), 'utf8');
-    fs.renameSync(tempFile, lockFile);
-    return true;
+    const raw = fs.readFileSync(lockFile, 'utf8');
+    const lock = JSON.parse(raw) as TelegramLockData;
+
+    const isAlive = isProcessRunning(lock.pid);
+    const isStale = now - (lock.heartbeat ?? 0) > 60000;
+    if (isAlive && !isStale) {
+      // Active poller owns the lock: acquisition fails
+      return false;
+    }
+
+    // Stale or dead-owner lock: rename to unique .stale-<pid>-<ts> (only one process wins rename)
+    const staleFile = `${lockFile}.stale-${myPid}-${now}`;
+    try {
+      fs.renameSync(lockFile, staleFile);
+      try {
+        fs.unlinkSync(staleFile);
+      } catch {
+        // Ignore unlink error
+      }
+    } catch {
+      // Lost rename race
+      return false;
+    }
+
+    // Now 'wx'-create atomically
+    try {
+      const fd = fs.openSync(lockFile, 'wx');
+      try {
+        fs.writeFileSync(fd, lockContent, 'utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
+      const readBack = JSON.parse(fs.readFileSync(lockFile, 'utf8')) as TelegramLockData;
+      return readBack.pid === myPid;
+    } catch {
+      return false;
+    }
   } catch {
     return false;
   }
@@ -307,7 +374,7 @@ export class TelegramPoller {
 
     // Start 20s heartbeat timer
     this.heartbeatTimer = setInterval(() => {
-      tryAcquirePollerLock(this.paths);
+      refreshPollerHeartbeat(this.paths);
     }, 20000);
     this.heartbeatTimer.unref();
 
@@ -672,10 +739,18 @@ export class TelegramPoller {
 
   public async pushNewInboxItems(): Promise<void> {
     const tgCfg = readTelegramConfig(this.paths);
-    if (!tgCfg.push_inbox || !this.client) return;
+    if (!tgCfg.push_inbox) return;
 
     const notifyCfg = loadInternalNotifyConfig(this.paths.notifyCfgFile);
-    if (!notifyCfg.telegram_chat_id) return;
+    if (!notifyCfg.telegram_chat_id || !notifyCfg.telegram_bot_token) return;
+
+    if (!this.client) {
+      this.client = new TelegramClient({
+        token: notifyCfg.telegram_bot_token,
+        fetchFn: this.customFetch,
+        baseUrl: this.customBaseUrl,
+      });
+    }
 
     const state = readTelegramState(this.paths);
     if (!state.push_since) {

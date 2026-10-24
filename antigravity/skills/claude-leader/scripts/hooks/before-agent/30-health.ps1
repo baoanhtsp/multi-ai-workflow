@@ -64,10 +64,16 @@ try {
 
     # No fresh cache entry: perform minimal local probe for that agent only
     $scriptsDir = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-    $regFile = Join-Path $scriptsDir "agents.json"
+    $claudeLeaderDir = Split-Path -Parent $scriptsDir
+    $regFile = Join-Path $claudeLeaderDir "agents.json"
+    if (-not (Test-Path -LiteralPath $regFile -PathType Leaf)) {
+        $regFile = Join-Path $scriptsDir "agents.json"
+    }
+
     $statusCmd = @()
     $agentCmd = $normAgent
     $label = $normAgent
+    $agentFound = $null
 
     if (Test-Path -LiteralPath $regFile -PathType Leaf) {
         try {
@@ -75,21 +81,50 @@ try {
             if ($regObj -and $regObj.agents) {
                 foreach ($a in $regObj.agents) {
                     if ($a.id -and $a.id.ToString().ToLowerInvariant() -eq $normAgent) {
-                        $label = if ($a.label) { $a.label } else { $normAgent }
-                        if ($a.detect -and $a.detect.command) {
-                            $agentCmd = $a.detect.command
-                        } elseif ($a.cli -and $a.cli.command) {
-                            $agentCmd = $a.cli.command
-                        }
-                        if ($a.status_cmd) {
-                            $statusCmd = @($a.status_cmd)
-                        }
+                        $agentFound = $a
                         break
                     }
                 }
             }
         } catch {
             # Ignore registry parse errors
+        }
+    }
+
+    # User overrides from $mawHome\agents.json (SPEC §7.1 user status_cmd wins)
+    $userRegFile = Join-Path $mawHome "agents.json"
+    if (Test-Path -LiteralPath $userRegFile -PathType Leaf) {
+        try {
+            $userRegObj = (Get-Content -LiteralPath $userRegFile -Raw -Encoding UTF8) | ConvertFrom-Json
+            if ($userRegObj -and $userRegObj.agents) {
+                foreach ($ua in $userRegObj.agents) {
+                    if ($ua.id -and $ua.id.ToString().ToLowerInvariant() -eq $normAgent) {
+                        if ($null -eq $agentFound) {
+                            $agentFound = $ua
+                        } else {
+                            if ($ua.label) { $agentFound.label = $ua.label }
+                            if ($ua.status_cmd) { $agentFound.status_cmd = $ua.status_cmd }
+                            if ($ua.cli) { $agentFound.cli = $ua.cli }
+                            if ($ua.detect) { $agentFound.detect = $ua.detect }
+                        }
+                        break
+                    }
+                }
+            }
+        } catch {
+            # Ignore user registry parse errors
+        }
+    }
+
+    if ($null -ne $agentFound) {
+        $label = if ($agentFound.label) { $agentFound.label } else { $normAgent }
+        if ($agentFound.detect -and $agentFound.detect.command) {
+            $agentCmd = $agentFound.detect.command
+        } elseif ($agentFound.cli -and $agentFound.cli.command) {
+            $agentCmd = $agentFound.cli.command
+        }
+        if ($agentFound.status_cmd) {
+            $statusCmd = @($agentFound.status_cmd)
         }
     }
 

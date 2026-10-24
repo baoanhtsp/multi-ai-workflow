@@ -1,5 +1,7 @@
 import type { McpServerConfig } from './types.ts';
 
+export const SECRET_KEY_REGEX = /header|authorization|token|secret|key|password|bearer|cookie/i;
+
 export function maskEnvValue(val: string): string {
   const s = String(val ?? '');
   if (s.length <= 6) {
@@ -12,17 +14,59 @@ export function isMaskedValue(val: string): boolean {
   return typeof val === 'string' && val.startsWith('••••');
 }
 
+export function maskExtraValue(val: unknown, keyName: string = ''): unknown {
+  if (val === null || val === undefined) return val;
+  if (typeof val === 'string') {
+    if (SECRET_KEY_REGEX.test(keyName)) {
+      return maskEnvValue(val);
+    }
+    return val;
+  }
+  if (Array.isArray(val)) {
+    return val.map((item) => maskExtraValue(item, keyName));
+  }
+  if (typeof val === 'object') {
+    const res: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      res[k] = maskExtraValue(v, k);
+    }
+    return res;
+  }
+  return val;
+}
+
+export function maskInlineTomlEnv(inlineEnvContent: string): string {
+  return inlineEnvContent.replace(
+    /([A-Za-z0-9_.-]+\s*=\s*)(("[^"]*")|('[^']*')|([^\s,}]+))/g,
+    (_match, prefix, val) => {
+      const parsed = parseTomlString(val);
+      return `${prefix}${JSON.stringify(maskEnvValue(parsed))}`;
+    }
+  );
+}
+
 export function maskAllEnvsInToml(tomlContent: string): string {
   const lines = tomlContent.split(/\r?\n/);
   const outLines: string[] = [];
   let inEnvSubTable = false;
+  let inMcpServerTable = false;
 
   for (const line of lines) {
     const trimmed = line.trim();
     // Header for [mcp_servers.<name>.env]
-    const headerMatch = /^\s*\[\s*mcp_servers\.([A-Za-z0-9_-]+)\.env\s*\]/.exec(trimmed);
-    if (headerMatch) {
+    const envHeaderMatch = /^\s*\[\s*mcp_servers\.([A-Za-z0-9_-]+)\.env\s*\]/.exec(trimmed);
+    if (envHeaderMatch) {
       inEnvSubTable = true;
+      inMcpServerTable = false;
+      outLines.push(line);
+      continue;
+    }
+
+    // Header for [mcp_servers.<name>]
+    const serverHeaderMatch = /^\s*\[\s*mcp_servers\.([A-Za-z0-9_-]+)\s*\]/.exec(trimmed);
+    if (serverHeaderMatch) {
+      inMcpServerTable = true;
+      inEnvSubTable = false;
       outLines.push(line);
       continue;
     }
@@ -30,6 +74,7 @@ export function maskAllEnvsInToml(tomlContent: string): string {
     // Any other table header
     if (trimmed.startsWith('[')) {
       inEnvSubTable = false;
+      inMcpServerTable = false;
       outLines.push(line);
       continue;
     }
@@ -42,6 +87,35 @@ export function maskAllEnvsInToml(tomlContent: string): string {
         const strVal = parseTomlString(rawVal);
         outLines.push(`${prefix}${JSON.stringify(maskEnvValue(strVal))}`);
         continue;
+      }
+    }
+
+    // Inline env table: env = { KEY = "v", ... } (Item 1)
+    if (line.includes('{') && line.includes('}')) {
+      const inlineEnvMatch = /(env\s*=\s*\{)([^}]+)(\})/.exec(line);
+      if (inlineEnvMatch) {
+        const p1 = inlineEnvMatch[1]!;
+        const inner = inlineEnvMatch[2]!;
+        const p3 = inlineEnvMatch[3]!;
+        const maskedLine = line.replace(inlineEnvMatch[0], `${p1}${maskInlineTomlEnv(inner)}${p3}`);
+        outLines.push(maskedLine);
+        continue;
+      }
+    }
+
+    // Mask secret keys in mcp_servers table lines
+    if (inMcpServerTable) {
+      const kvMatch = /^(\s*([A-Za-z0-9_.-]+)\s*=\s*)(.+)$/.exec(line);
+      if (kvMatch) {
+        const keyName = kvMatch[2]!;
+        if (SECRET_KEY_REGEX.test(keyName)) {
+          const rawVal = kvMatch[3]!.trim();
+          if ((rawVal.startsWith('"') && rawVal.endsWith('"')) || (rawVal.startsWith("'") && rawVal.endsWith("'"))) {
+            const parsed = parseTomlString(rawVal);
+            outLines.push(`${kvMatch[1]}${JSON.stringify(maskEnvValue(parsed))}`);
+            continue;
+          }
+        }
       }
     }
 
@@ -72,6 +146,11 @@ export function maskAllEnvsInJson(jsonContent: string): string {
           const envObj = defObj.env as Record<string, unknown>;
           for (const [k, v] of Object.entries(envObj)) {
             envObj[k] = maskEnvValue(String(v ?? ''));
+          }
+        }
+        for (const [k, v] of Object.entries(defObj)) {
+          if (!['type', 'command', 'args', 'env', 'url', 'httpUrl'].includes(k)) {
+            defObj[k] = maskExtraValue(v, k);
           }
         }
       }
@@ -151,6 +230,13 @@ export function parseCodexTomlMcp(tomlContent: string): McpServerConfig[] {
     } else if (key === 'url') {
       currentServer.url = parseTomlString(rawVal);
       currentServer.transport = 'http';
+    } else if (key === 'env' && rawVal.startsWith('{') && rawVal.endsWith('}')) {
+      currentServer.env = currentServer.env ?? {};
+      const inner = rawVal.slice(1, -1);
+      const matches = inner.matchAll(/([A-Za-z0-9_.-]+)\s*=\s*(("[^"]*")|('[^']*')|([^\s,}]+))/g);
+      for (const m of matches) {
+        currentServer.env[m[1]!] = parseTomlString(m[2]!);
+      }
     } else {
       // Platform-specific extra keys (startup_timeout_sec, env_vars, etc.)
       currentServer.extra = currentServer.extra ?? {};
@@ -379,11 +465,17 @@ export function updateCodexTomlMcp(
             }
           } else if (newServer.extra && key in newServer.extra) {
             handledKeys.add(key);
+            let valToSet = newServer.extra[key];
+            if (options.maskEnv) {
+              valToSet = maskExtraValue(valToSet, key);
+            } else if (typeof valToSet === 'string' && isMaskedValue(valToSet) && typeof existingServer?.extra?.[key] === 'string') {
+              valToSet = existingServer.extra[key];
+            }
             const origVal = parseTomlLiteral(rawVal);
-            if (valuesEqual(origVal, newServer.extra[key])) {
+            if (valuesEqual(origVal, valToSet)) {
               renderedLines.push(line);
             } else {
-              renderedLines.push(`${key} = ${JSON.stringify(newServer.extra[key])}`);
+              renderedLines.push(`${key} = ${JSON.stringify(valToSet)}`);
             }
           } else {
             // Unmanaged key (like env_vars): keep verbatim!
@@ -410,7 +502,13 @@ export function updateCodexTomlMcp(
         if (newServer.extra) {
           for (const [k, v] of Object.entries(newServer.extra)) {
             if (!handledKeys.has(k)) {
-              missingLines.push(`${k} = ${JSON.stringify(v)}`);
+              let valToSet = v;
+              if (options.maskEnv) {
+                valToSet = maskExtraValue(valToSet, k);
+              } else if (typeof valToSet === 'string' && isMaskedValue(valToSet) && typeof existingServer?.extra?.[k] === 'string') {
+                valToSet = existingServer.extra[k];
+              }
+              missingLines.push(`${k} = ${JSON.stringify(valToSet)}`);
             }
           }
         }

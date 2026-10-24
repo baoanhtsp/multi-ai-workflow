@@ -84,6 +84,30 @@ Describe "S3 Hooks (30-health.ps1, 30-timeline.ps1)" {
             $res = . $healthHook
             $res.Block | Should -Be $false
         }
+
+        It "blocks when user registry in MAW_HOME provides status_cmd that exits 1 with Not logged in" {
+            $healthDataDir = Join-Path $env:MAW_HOME "data\health"
+            $cacheFile = Join-Path $healthDataDir "cache.json"
+            Remove-Item -LiteralPath $cacheFile -Force -ErrorAction SilentlyContinue
+
+            $userRegFile = Join-Path $env:MAW_HOME "agents.json"
+            $userReg = @{
+                agents = @(
+                    @{
+                        id = "mock-agent"
+                        label = "Mock Agent"
+                        cli = @{ command = "powershell.exe" }
+                        status_cmd = @("powershell.exe", "-NoProfile", "-Command", "Write-Output 'Not logged in'; exit 1")
+                    }
+                )
+            } | ConvertTo-Json -Depth 5
+            [System.IO.File]::WriteAllText($userRegFile, $userReg, [System.Text.Encoding]::UTF8)
+
+            $Context = @{ agent = 'mock-agent'; role = 'backend' }
+            $res = . $healthHook
+            $res.Block | Should -Be $true
+            $res.Reason | Should -Match "Mock Agent: Not logged in"
+        }
     }
 
     Context "30-timeline.ps1 job hooks" {
