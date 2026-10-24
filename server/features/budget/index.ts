@@ -381,8 +381,8 @@ export const feature: MawFeature = {
           cap: { warn: 0, block: 0 },
         };
         if (projectPath) {
-          // Item 15: match override by path containment
-          const projOverride = findProjectOverride(budgetCfg.projects, projectPath) || budgetCfg.caps.project;
+          // Item 15: match override by path containment, fallback to global project cap (Item 4)
+          const projOverride = findProjectOverride(budgetCfg.projects, projectPath) ?? budgetCfg.caps.project;
           const period = projOverride?.period || 'month';
           const pSpend = calculateProjectSpend(rows, projectPath, period, now);
           project = {

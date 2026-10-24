@@ -1162,7 +1162,11 @@ export function extractProjectEnvSecrets(projectPath: string): string[] {
   return Array.from(secrets);
 }
 
-export function redactSecrets(text: string, extraValues?: string[]): string {
+export function redactSecrets(
+  text: string,
+  extraValues?: string[],
+  secretPatterns?: string[]
+): string {
   if (!text) return '';
 
   // 1. Stash S4 Policy blocks so policy markers are never touched
@@ -1194,7 +1198,7 @@ export function redactSecrets(text: string, extraValues?: string[]): string {
     '$1[REDACTED:assignment]$3'
   );
 
-  // 3. Extra values (.env values, secret_patterns)
+  // 3. Literal extra values (.env values)
   if (extraValues && extraValues.length > 0) {
     for (const val of extraValues) {
       if (typeof val === 'string' && val.trim().length >= 8) {
@@ -1206,7 +1210,21 @@ export function redactSecrets(text: string, extraValues?: string[]): string {
     }
   }
 
-  // 4. Restore policy blocks
+  // 4. Custom regex secret patterns (Item 5: flags 'gi')
+  if (secretPatterns && secretPatterns.length > 0) {
+    for (const pat of secretPatterns) {
+      if (typeof pat === 'string' && pat.trim().length > 0) {
+        try {
+          const re = new RegExp(pat.trim(), 'gi');
+          out = out.replace(re, '[REDACTED:custom]');
+        } catch {
+          // If invalid regex pattern, skip safely
+        }
+      }
+    }
+  }
+
+  // 5. Restore policy blocks
   for (let i = 0; i < policyBlocks.length; i++) {
     out = out.replace(`__MAW_S4_POLICY_BLOCK_${i}__`, policyBlocks[i]!);
   }

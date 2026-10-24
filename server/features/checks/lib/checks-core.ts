@@ -24,6 +24,7 @@ export interface CheckItem {
   timeout_s?: number;
   required?: boolean;
   cwd?: string;
+  command_sha?: string;
 }
 
 export interface ChecksConfig {
@@ -46,6 +47,7 @@ export interface CheckRunResult {
   at: string;
   head: string;
   dirty_signature?: string;
+  command_sha?: string;
 }
 
 export interface GateItem {
@@ -82,6 +84,14 @@ export interface ChecksOverride {
 // ============================================================================
 // 2. Defaults & Validation
 // ============================================================================
+
+export function computeCheckCommandSha(check: { command: string[]; cwd?: string }): string {
+  const payload = JSON.stringify({
+    command: check.command,
+    cwd: check.cwd || '',
+  });
+  return crypto.createHash('sha1').update(payload, 'utf8').digest('hex');
+}
 
 export function createDefaultChecksConfig(): ChecksConfig {
   return {
@@ -245,21 +255,39 @@ export function validateChecksConfig(
             config: defaults,
             warnings,
             errorField: `checks[${i}].cwd`,
-            errorMessage: `checks[${i}].cwd must stay inside project`,
+            errorMessage: `checks[${i}].cwd escapes the project`,
           };
+        }
+        if (fs.existsSync(resolvedCwd)) {
+          try {
+            const realProj = fs.existsSync(projectPath) ? fs.realpathSync(projectPath) : projectPath;
+            const realCwd = fs.realpathSync(resolvedCwd);
+            if (!isPathInsideProject(realCwd, realProj)) {
+              return {
+                config: defaults,
+                warnings,
+                errorField: `checks[${i}].cwd`,
+                errorMessage: `checks[${i}].cwd escapes the project`,
+              };
+            }
+          } catch {
+            // Ignore if realpath fails
+          }
         }
       }
       cwd = normCwd;
     }
 
-    validatedChecks.push({
+    const checkItem: CheckItem = {
       id,
       label,
       command: cmdStrings,
       timeout_s,
       required,
       ...(cwd ? { cwd } : {}),
-    });
+    };
+    checkItem.command_sha = computeCheckCommandSha(checkItem);
+    validatedChecks.push(checkItem);
   }
 
   let todo_patterns = defaults.todo_patterns;
@@ -613,6 +641,35 @@ export async function runCheckProcess(
 }> {
   const startTime = Date.now();
   const cwd = check.cwd ? path.resolve(projectPath, check.cwd) : projectPath;
+  if (!isPathInsideProject(cwd, projectPath)) {
+    return {
+      state: 'fail',
+      exit_code: 1,
+      duration_ms: Date.now() - startTime,
+      output_tail: `[S4:gate] cwd escapes the project: ${cwd}`,
+    };
+  }
+  if (fs.existsSync(cwd)) {
+    try {
+      const realProj = fs.existsSync(projectPath) ? fs.realpathSync(projectPath) : projectPath;
+      const realCwd = fs.realpathSync(cwd);
+      if (!isPathInsideProject(realCwd, realProj)) {
+        return {
+          state: 'fail',
+          exit_code: 1,
+          duration_ms: Date.now() - startTime,
+          output_tail: `[S4:gate] cwd escapes the project: ${realCwd}`,
+        };
+      }
+    } catch (err: any) {
+      return {
+        state: 'fail',
+        exit_code: 1,
+        duration_ms: Date.now() - startTime,
+        output_tail: `[S4:gate] cwd error: ${err?.message || String(err)}`,
+      };
+    }
+  }
   const timeoutMs = (check.timeout_s ?? 600) * 1000;
 
   const cmd0 = check.command[0]!;
@@ -831,9 +888,80 @@ export function getGitInfo(projectPath: string): {
   }
 }
 
-export function computeDirtySignature(porcelainLines: string[]): string {
+export function computeDirtySignature(
+  projectPathOrLines: string | string[],
+  maybePorcelain?: string[]
+): string {
+  let projectPath = '';
+  let porcelainLines: string[] = [];
+
+  if (Array.isArray(projectPathOrLines)) {
+    porcelainLines = projectPathOrLines;
+  } else {
+    projectPath = projectPathOrLines;
+    porcelainLines = maybePorcelain || [];
+  }
+
   if (porcelainLines.length === 0) return 'clean';
-  return crypto.createHash('sha1').update(porcelainLines.join('\n')).digest('hex').slice(0, 16);
+
+  const hasher = crypto.createHash('sha1');
+  hasher.update(porcelainLines.join('\n'));
+
+  if (projectPath) {
+    try {
+      // 1. Diff of tracked changes
+      const diffOutput = child_process.execFileSync(
+        'git',
+        ['diff', 'HEAD', '--no-ext-diff', '--binary'],
+        {
+          cwd: projectPath,
+          shell: false,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }
+      );
+      hasher.update(diffOutput);
+    } catch {
+      try {
+        const diffOutput = child_process.execFileSync(
+          'git',
+          ['diff', '--no-ext-diff', '--binary'],
+          {
+            cwd: projectPath,
+            shell: false,
+            windowsHide: true,
+            stdio: ['ignore', 'pipe', 'ignore'],
+          }
+        );
+        hasher.update(diffOutput);
+      } catch {}
+    }
+
+    // 2. Untracked files metadata: path:size:mtimeMs
+    try {
+      const untrackedRaw = child_process
+        .execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
+          cwd: projectPath,
+          shell: false,
+          windowsHide: true,
+          stdio: ['ignore', 'pipe', 'ignore'],
+        })
+        .toString('utf8');
+      const untrackedFiles = untrackedRaw
+        .split(/\r?\n/)
+        .map((f) => f.trim())
+        .filter(Boolean);
+      for (const u of untrackedFiles) {
+        const absU = path.resolve(projectPath, u);
+        try {
+          const stat = fs.statSync(absU);
+          hasher.update(`\n${u}:${stat.size}:${stat.mtimeMs}`);
+        } catch {}
+      }
+    } catch {}
+  }
+
+  return hasher.digest('hex').slice(0, 16);
 }
 
 export function scanTrackedTodos(
@@ -919,7 +1047,7 @@ export async function computeGate(
   const nowIso = new Date().toISOString();
 
   const gitInfo = getGitInfo(projectPath);
-  const currentDirtySig = computeDirtySignature(gitInfo.porcelainLines);
+  const currentDirtySig = computeDirtySignature(projectPath, gitInfo.porcelainLines);
 
   // 1. Git clean item
   if (!gitInfo.isGit) {
@@ -989,10 +1117,12 @@ export async function computeGate(
       continue;
     }
 
-    // Staleness check
+    // Staleness check (Item 6 & Item 7)
+    const currentCommandSha = c.command_sha || computeCheckCommandSha(c);
     const isStale =
-      gitInfo.isGit &&
-      (r.head !== gitInfo.head || (r.dirty_signature && r.dirty_signature !== currentDirtySig));
+      (gitInfo.isGit &&
+        (r.head !== gitInfo.head || (r.dirty_signature && r.dirty_signature !== currentDirtySig))) ||
+      (r.command_sha !== undefined && r.command_sha !== currentCommandSha);
 
     if (isStale) {
       items.push({

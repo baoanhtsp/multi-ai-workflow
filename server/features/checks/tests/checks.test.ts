@@ -5,9 +5,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { resolveServerPaths } from '../../../lib/paths.ts';
+import { resolveServerPaths, type ServerPaths } from '../../../lib/paths.ts';
 import { loadAgentRegistry } from '../../../lib/registry.ts';
 import {
+  computeCheckCommandSha,
+  computeDirtySignature,
   computeGate,
   detectChecks,
   getGitInfo,
@@ -18,8 +20,9 @@ import {
   validateChecksConfig,
   type CheckItem,
 } from '../lib/checks-core.ts';
+import { feature } from '../index.ts';
 
-function createTempProject(): { dir: string; cleanup: () => void } {
+function createTempProject(): { dir: string; paths: ServerPaths; cleanup: () => void } {
   const dir = path.win32.join(
     os.tmpdir(),
     `maw_test_checks_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
@@ -54,6 +57,14 @@ function createTempProject(): { dir: string; cleanup: () => void } {
     // Ignore git init errors if git not found
   }
 
+  const paths = resolveServerPaths({
+    repoRoot: dir,
+    userProfile: path.join(dir, 'user'),
+    mawHome: path.join(dir, '.maw_home'),
+    projectsRoot: path.dirname(dir),
+  });
+  paths.tempDir = tempDir;
+
   const cleanup = () => {
     process.env.TEMP = oldTemp;
     process.env.TMP = oldTmp;
@@ -64,7 +75,7 @@ function createTempProject(): { dir: string; cleanup: () => void } {
     }
   };
 
-  return { dir, cleanup };
+  return { dir, paths, cleanup };
 }
 
 test('checks config validation: id regex, command length, timeout bounds, cwd safety', () => {
@@ -443,6 +454,259 @@ test('gate unrun: required check has state pending (gate not green), non-require
     };
     const gateOpt = await computeGate(paths, dir, optOnlyConfig, [], true, true);
     assert.equal(gateOpt.green, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression Item 6: command_sha marks check stale when command or cwd changes', async () => {
+  const { dir, paths, cleanup } = createTempProject();
+  try {
+    const gitInfo = getGitInfo(dir);
+    const dirtySig = computeDirtySignature(dir, gitInfo.porcelainLines);
+
+    const check1: CheckItem = {
+      id: 'test_cmd',
+      label: 'Test Command',
+      command: ['node', '-e', 'process.exit(0)'],
+      required: true,
+    };
+    const sha1 = computeCheckCommandSha(check1);
+    check1.command_sha = sha1;
+
+    const previousResult = {
+      id: 'test_cmd',
+      label: 'Test Command',
+      state: 'pass' as const,
+      exit_code: 0,
+      duration_ms: 10,
+      output_tail: 'ok',
+      at: new Date().toISOString(),
+      head: gitInfo.head,
+      dirty_signature: dirtySig,
+      command_sha: sha1,
+    };
+
+    // 1. Unchanged check: gate evaluates pass
+    const config1 = {
+      version: 1,
+      checks: [check1],
+      spec_guard: false,
+    };
+    const gate1 = await computeGate(paths, dir, config1, [previousResult], true, true);
+    const item1 = gate1.items.find((it) => it.id === 'test_cmd');
+    assert.ok(item1);
+    assert.equal(item1.state, 'pass');
+
+    // 2. Changed command: gate marks stale because command_sha changed
+    const check2: CheckItem = {
+      id: 'test_cmd',
+      label: 'Test Command',
+      command: ['node', '-e', 'process.exit(1)'], // command changed!
+      required: true,
+    };
+    check2.command_sha = computeCheckCommandSha(check2);
+
+    const config2 = {
+      version: 1,
+      checks: [check2],
+      spec_guard: false,
+    };
+    const gate2 = await computeGate(paths, dir, config2, [previousResult], true, true);
+    const item2 = gate2.items.find((it) => it.id === 'test_cmd');
+    assert.ok(item2);
+    assert.equal(item2.state, 'stale', 'check must be stale when command changes');
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression Item 7: computeDirtySignature changes when tracked file is edited a second time', () => {
+  const { dir, cleanup } = createTempProject();
+  try {
+    const testFile = path.win32.join(dir, 'tracked.txt');
+    fs.writeFileSync(testFile, 'initial content\n', 'utf8');
+    child_process.execFileSync('git', ['add', 'tracked.txt'], { cwd: dir, windowsHide: true });
+    child_process.execFileSync('git', ['commit', '-m', 'add tracked'], { cwd: dir, windowsHide: true });
+
+    // First edit
+    fs.writeFileSync(testFile, 'first edit\n', 'utf8');
+    const info1 = getGitInfo(dir);
+    const sig1 = computeDirtySignature(dir, info1.porcelainLines);
+
+    // Second edit on same file (porcelain lines still " M tracked.txt")
+    fs.writeFileSync(testFile, 'second edit with different content\n', 'utf8');
+    const info2 = getGitInfo(dir);
+    const sig2 = computeDirtySignature(dir, info2.porcelainLines);
+
+    assert.deepEqual(info1.porcelainLines, info2.porcelainLines, 'porcelain lines are identical between edits');
+    assert.notEqual(sig1, sig2, 'dirty signature must change when content changes even if porcelain line is identical');
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression Item 9: cwd escaping project boundary is rejected in validation and execution', async () => {
+  const { dir, cleanup } = createTempProject();
+  try {
+    const outside = path.resolve(dir, '..', 'some_outside_dir');
+
+    // 1. validateChecksConfig rejects escaping cwd
+    const valRes = validateChecksConfig(
+      {
+        version: 1,
+        checks: [{ id: 'escape', command: ['node', '-v'], cwd: '../outside' }],
+      },
+      dir
+    );
+    assert.equal(valRes.errorField, 'checks[0].cwd');
+    assert.ok(valRes.errorMessage?.includes('escapes the project'));
+
+    // 2. runCheckProcess rejects escaping cwd safely
+    const runRes = await runCheckProcess(
+      { id: 'escape', label: 'Escape', command: ['node', '-v'], cwd: '../outside' },
+      dir
+    );
+    assert.equal(runRes.state, 'fail');
+    assert.ok(runRes.output_tail.includes('escapes the project'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression Item 14: checks_gate scope honoring (merge vs review)', async () => {
+  const { dir, paths, cleanup } = createTempProject();
+  try {
+    const ctx = {
+      paths,
+      readJobs: async () => [],
+      startJob: async () => ({ job_id: 'test' }),
+    } as any;
+
+    // Create an override with scope: 'review'
+    const ovrHandler = (feature as any).routes.checks_override.handler;
+    const ovrRes = (await ovrHandler(ctx, {
+      method: 'POST',
+      url: new URL('http://localhost/checks_override'),
+      headers: new Headers(),
+      query: new URLSearchParams(),
+      body: {
+        project_path: dir,
+        reason: 'Temporary test override',
+        scope: 'review',
+      },
+    })) as any;
+    assert.ok(ovrRes.ok);
+    const token = ovrRes.token;
+
+    // Setup an unrun required check so gate is naturally red
+    const mawDir = path.win32.join(dir, '.maw');
+    fs.mkdirSync(mawDir, { recursive: true });
+    const checksConfig = {
+      version: 1,
+      checks: [{ id: 'must_pass', command: ['node', '-v'], required: true }],
+      spec_guard: false,
+    };
+    fs.writeFileSync(path.win32.join(mawDir, 'checks.json'), JSON.stringify(checksConfig), 'utf8');
+    trustProjectChecks(paths, dir, crypto.createHash('sha256').update(JSON.stringify(checksConfig)).digest('hex'));
+
+    const gateHandler = (feature as any).routes.checks_gate.handler;
+
+    // 1. Querying with scope 'merge' must NOT consume 'review' token
+    const mergeQuery = new URLSearchParams({
+      project_path: dir,
+      override_token: token,
+      scope: 'merge',
+    });
+    const gateMerge = (await gateHandler(ctx, {
+      method: 'GET',
+      url: new URL(`http://localhost/checks_gate?${mergeQuery.toString()}`),
+      headers: new Headers(),
+      query: mergeQuery,
+    })) as any;
+    assert.equal(gateMerge.green, false, 'scope merge must not accept scope review token');
+    assert.equal(gateMerge.overridden, false);
+
+    // 2. Querying with scope 'review' MUST consume token and turn gate green
+    const reviewQuery = new URLSearchParams({
+      project_path: dir,
+      override_token: token,
+      scope: 'review',
+    });
+    const gateReview = (await gateHandler(ctx, {
+      method: 'GET',
+      url: new URL(`http://localhost/checks_gate?${reviewQuery.toString()}`),
+      headers: new Headers(),
+      query: reviewQuery,
+    })) as any;
+    assert.equal(gateReview.green, true, 'scope review must accept scope review token');
+    assert.equal(gateReview.overridden, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression Item 11: checks_cancel prevents saving finished results on cancelled run', async () => {
+  const { dir, paths, cleanup } = createTempProject();
+  try {
+    const mawDir = path.win32.join(dir, '.maw');
+    fs.mkdirSync(mawDir, { recursive: true });
+
+    // A check that takes a few hundred ms
+    const slowScript = path.join(dir, 'slow.js');
+    fs.writeFileSync(slowScript, 'setTimeout(() => process.exit(0), 300);', 'utf8');
+
+    const checksConfig = {
+      version: 1,
+      checks: [{ id: 'slow_test', label: 'Slow Test', command: [process.execPath, slowScript] }],
+      spec_guard: false,
+    };
+    fs.writeFileSync(path.win32.join(mawDir, 'checks.json'), JSON.stringify(checksConfig), 'utf8');
+    trustProjectChecks(paths, dir, crypto.createHash('sha256').update(JSON.stringify(checksConfig)).digest('hex'));
+
+    const ctx = {
+      paths,
+      readJobs: async () => [],
+      startJob: async () => ({ job_id: 'test' }),
+    } as any;
+
+    const runHandler = (feature as any).routes.checks_run.handler;
+    const cancelHandler = (feature as any).routes.checks_cancel.handler;
+
+    // Start running
+    const runRes = await runHandler(ctx, {
+      method: 'POST',
+      url: new URL('http://localhost/checks_run'),
+      headers: new Headers(),
+      query: new URLSearchParams(),
+      body: { project_path: dir },
+    });
+    assert.ok(runRes.ok);
+
+    // Cancel immediately while slow script is running
+    const cancelRes = await cancelHandler(ctx, {
+      method: 'POST',
+      url: new URL('http://localhost/checks_cancel'),
+      headers: new Headers(),
+      query: new URLSearchParams(),
+      body: { project_path: dir },
+    });
+    assert.ok(cancelRes.ok);
+
+    // Wait for slow script to finish
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    // Stored results and status: active run must be clear
+    const statusHandler = (feature as any).routes.checks_status.handler;
+    const statusRes = await statusHandler(ctx, {
+      method: 'GET',
+      url: new URL(`http://localhost/checks_status?project_path=${encodeURIComponent(dir)}`),
+      headers: new Headers(),
+      query: new URLSearchParams({ project_path: dir }),
+    });
+
+    assert.equal(statusRes.running, false, 'running must be false');
+    assert.equal(statusRes.run_id, null, 'run_id must be null');
   } finally {
     cleanup();
   }

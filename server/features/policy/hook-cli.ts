@@ -6,6 +6,7 @@ import { resolveServerPaths, type ServerPaths } from '../../lib/paths.ts';
 import { loadAgentRegistry } from '../../lib/registry.ts';
 import { detectRegistryAgents } from '../../lib/versions.ts';
 import {
+  computeCheckCommandSha,
   computeGate,
   getGitInfo,
   getProjectChecksSha256,
@@ -151,6 +152,15 @@ async function main(): Promise<void> {
         context = JSON.parse(raw) as Record<string, unknown>;
       }
     } catch (err) {
+      if (event === 'before-review') {
+        const msg = err instanceof Error ? err.message : String(err);
+        outputResult({
+          block: true,
+          reason: `Test gate error: invalid stdin JSON: ${msg} [S4:gate]`,
+          lines: [`Test gate error: invalid stdin JSON: ${msg} [S4:gate]`],
+        });
+        return;
+      }
       outputResult({
         block: false,
         reason: '',
@@ -192,10 +202,11 @@ async function main(): Promise<void> {
                     policyCfg.global.redact_env_files !== false && project
                       ? extractProjectEnvSecrets(project)
                       : [];
-                  cleaned = redactSecrets(cleaned, [
-                    ...envSecrets,
-                    ...(policyCfg.global.secret_patterns || []),
-                  ]);
+                  cleaned = redactSecrets(
+                    cleaned,
+                    envSecrets,
+                    policyCfg.global.secret_patterns || []
+                  );
                 }
                 const redactedPrompt = cleaned;
 
@@ -239,18 +250,37 @@ async function main(): Promise<void> {
           }
         }
 
-        // Team Run ID lookup
+        // Team Run ID lookup (Item 12: retry up to 5x with 300ms pause if job is very new)
         let teamRunId = '';
         const recFile = path.win32.join(paths.featureDataDir('fallback'), 'recovery.json');
-        if (fs.existsSync(recFile)) {
-          const recData = readJsonSafe<{ items?: Array<{ new_job_id?: string; root_job_id?: string }> }>(
-            recFile,
-            { items: [] }
-          );
-          const matchItem = (recData.data.items || []).find((it) => it.new_job_id === jobId);
-          if (matchItem && matchItem.root_job_id) {
-            teamRunId = matchItem.root_job_id;
+
+        let startedMs = Date.now();
+        if (context.started_ts && typeof context.started_ts === 'number') {
+          startedMs = context.started_ts;
+        } else if (jobId) {
+          const jobFile = path.win32.join(paths.jobsDir, `${jobId}.json`);
+          if (fs.existsSync(jobFile)) {
+            try {
+              startedMs = fs.statSync(jobFile).mtimeMs;
+            } catch {}
           }
+        }
+        const isVeryNew = Math.abs(Date.now() - startedMs) <= 10000;
+
+        for (let attempt = 0; attempt < 5; attempt++) {
+          if (fs.existsSync(recFile)) {
+            const recData = readJsonSafe<{ items?: Array<{ new_job_id?: string; root_job_id?: string }> }>(
+              recFile,
+              { items: [] }
+            );
+            const matchItem = (recData.data.items || []).find((it) => it.new_job_id === jobId);
+            if (matchItem && matchItem.root_job_id) {
+              teamRunId = matchItem.root_job_id;
+              break;
+            }
+          }
+          if (!isVeryNew || attempt === 4) break;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
         }
 
         if (!teamRunId) {
@@ -329,6 +359,10 @@ async function main(): Promise<void> {
           return map;
         };
 
+        // Budget config & audit data for spend checks and fallbacks
+        const budgetCfg = loadBudgetConfig(paths.featureDataDir('budget')).config;
+        const earlyAudit = readAuditRows(paths.auditFile, 0);
+
         // 1. Cooldown Check
         if (agent && cooldowns[agent]) {
           const cd = cooldowns[agent];
@@ -338,12 +372,18 @@ async function main(): Promise<void> {
             const agentEntry = registry.agents.find((a) => a.id === agent);
             const agentLabel = agentEntry?.label || agent;
             const agentInfoMap = await getAgentInfoMap();
+            const earlySpentMap: Record<string, number> = {};
+            for (const ag of roleFallbacks) {
+              earlySpentMap[ag] = calculateAgentDaySpend(earlyAudit.rows, ag, now).usd;
+            }
             const fbResult = pickFallback({
               role,
               blockedAgent: agent,
               fallbacks: roleFallbacks,
               agents: agentInfoMap,
               cooldowns,
+              agentDaySpentUsd: earlySpentMap,
+              agentDayCapBlockUsd: budgetCfg.caps.agent_day?.usd?.block,
               now,
             });
             const fallbackId = fbResult ? fbResult.agent : 'none';
@@ -370,11 +410,10 @@ async function main(): Promise<void> {
         }
 
         // 2. Budget Check
-        const budgetCfg = loadBudgetConfig(paths.featureDataDir('budget')).config;
         const lines: string[] = [];
 
         if (budgetCfg.enabled) {
-          const { rows } = readAuditRows(paths.auditFile, 0);
+          const rows = earlyAudit.rows;
           const est = budgetCfg.estimate_next_call ? estimateNextCallCost(rows, agent) : 0;
           const caps = budgetCfg.caps;
 
@@ -435,12 +474,18 @@ async function main(): Promise<void> {
             const usdCap = caps.agent_day.usd;
             if (usdCap && usdCap.block > 0 && agentSpend.usd + est >= usdCap.block) {
               const agentInfoMap = await getAgentInfoMap();
+              const agentSpentMap: Record<string, number> = {};
+              for (const ag of roleFallbacks) {
+                agentSpentMap[ag] = calculateAgentDaySpend(rows, ag, now).usd;
+              }
               const fbResult = pickFallback({
                 role,
                 blockedAgent: agent,
                 fallbacks: roleFallbacks,
                 agents: agentInfoMap,
                 cooldowns,
+                agentDaySpentUsd: agentSpentMap,
+                agentDayCapBlockUsd: usdCap.block,
                 now,
               });
               const fallbackId = fbResult ? fbResult.agent : 'none';
@@ -477,7 +522,7 @@ async function main(): Promise<void> {
           // Scope: project (Item 15)
           const targetProj = process.env.MAW_JOB_PROJECT || workdir;
           if (targetProj) {
-            const projOverride = findProjectOverride(budgetCfg.projects, targetProj);
+            const projOverride = findProjectOverride(budgetCfg.projects, targetProj) ?? budgetCfg.caps.project;
             if (projOverride && projOverride.usd) {
               const period = projOverride.period || 'month';
               const projSpend = calculateProjectSpend(rows, targetProj, period, now);
@@ -683,19 +728,40 @@ async function main(): Promise<void> {
                 const nowMs = Date.now();
                 const validCutoff = nowMs - 24 * 60 * 60 * 1000;
 
-                const matchIdx = approvals.findIndex(
-                  (a) =>
+                const claimsDir = path.win32.join(paths.featureDataDir('policy'), 'approval-claims');
+                if (!fs.existsSync(claimsDir)) {
+                  try {
+                    fs.mkdirSync(claimsDir, { recursive: true });
+                  } catch {}
+                }
+
+                let claimed = false;
+                for (let i = 0; i < approvals.length; i++) {
+                  const a = approvals[i]!;
+                  if (
                     a.prompt_sha256 === promptSha256 &&
                     a.role.toLowerCase() === role.toLowerCase() &&
                     a.status === 'approved' &&
                     new Date(a.created_at).getTime() >= validCutoff
-                );
+                  ) {
+                    try {
+                      const claimFile = path.win32.join(claimsDir, a.id);
+                      const fd = fs.openSync(claimFile, 'wx');
+                      fs.closeSync(fd);
+                      claimed = true;
+                      a.status = 'used';
+                      writeJsonAtomic(approvalsFile, approvals);
+                      break;
+                    } catch (e: any) {
+                      if (e && e.code === 'EEXIST') {
+                        a.status = 'used';
+                        continue;
+                      }
+                    }
+                  }
+                }
 
-                if (matchIdx >= 0) {
-                  // Single use: mark used and allow through
-                  approvals[matchIdx]!.status = 'used';
-                  writeJsonAtomic(approvalsFile, approvals);
-                } else {
+                if (!claimed) {
                   // Create pending approval and block
                   const aprId = 'apr_' + crypto.randomBytes(6).toString('hex');
                   const newApr: PolicyApproval = {
@@ -835,10 +901,11 @@ async function main(): Promise<void> {
                 policyCfg.global.redact_env_files !== false && project
                   ? extractProjectEnvSecrets(project)
                   : [];
-              const redacted = redactSecrets(logContent, [
-                ...envSecrets,
-                ...(policyCfg.global.secret_patterns || []),
-              ]);
+              const redacted = redactSecrets(
+                logContent,
+                envSecrets,
+                policyCfg.global.secret_patterns || []
+              );
               if (redacted !== logContent) {
                 fs.writeFileSync(logFile, redacted, 'utf8');
               }
@@ -1015,7 +1082,13 @@ async function main(): Promise<void> {
             return;
           }
 
-          const { config } = validateChecksConfig(rawConfig, workdir);
+          const val = validateChecksConfig(rawConfig, workdir);
+          if (val.errorField) {
+            const reason = `Invalid .maw/checks.json: ${val.errorField} [S4:gate]`;
+            outputResult({ block: true, reason, lines: [reason] });
+            return;
+          }
+          const config = val.config;
           const gitInfo = getGitInfo(workdir);
           const results: CheckRunResult[] = [];
 
@@ -1031,6 +1104,7 @@ async function main(): Promise<void> {
               output_tail: res.output_tail,
               at: new Date().toISOString(),
               head: gitInfo.head,
+              command_sha: check.command_sha || computeCheckCommandSha(check),
             });
           }
 
@@ -1074,6 +1148,15 @@ async function main(): Promise<void> {
         lines: [],
       });
     } catch (err) {
+      if (event === 'before-review') {
+        const msg = err instanceof Error ? err.message : String(err);
+        outputResult({
+          block: true,
+          reason: `Test gate error: ${msg} [S4:gate]`,
+          lines: [`Test gate error: ${msg} [S4:gate]`],
+        });
+        return;
+      }
       outputResult({
         block: false,
         reason: '',
@@ -1088,6 +1171,16 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
+  const event = process.argv[2] || '';
+  if (event === 'before-review') {
+    const msg = err instanceof Error ? err.message : String(err);
+    outputResult({
+      block: true,
+      reason: `Test gate error: ${msg} [S4:gate]`,
+      lines: [`Test gate error: ${msg} [S4:gate]`],
+    });
+    return;
+  }
   outputResult({
     block: false,
     reason: '',

@@ -241,3 +241,19 @@ test('isPathInsideProject: enforces project boundary and worktree subdirectories
   assert.ok(!isPathInsideProject('C:\\laragon\\www\\my-project-evil', root));
   assert.ok(!isPathInsideProject('C:\\laragon\\www\\other', root));
 });
+
+test('regression Item 5: secretPatterns treated as regex, extraValues escaped as literals', () => {
+  // 1. extraValues with regex metacharacters must be escaped and matched literally
+  const literalSecret = 'p+a.s$s[w]o?r^d';
+  const textWithLiteral = `Connecting with ${literalSecret} in database string`;
+  const resLiteral = redactSecrets(textWithLiteral, [literalSecret]);
+  assert.ok(!resLiteral.includes(literalSecret));
+  assert.ok(resLiteral.includes('[REDACTED:custom]'));
+
+  // 2. secretPatterns treated as real regexes
+  const regexPattern = 'Bearer\\s+[a-zA-Z0-9_-]+';
+  const textWithBearer = 'Authorization: Bearer my-secret-auth-token_123';
+  const resBearer = redactSecrets(textWithBearer, [], [regexPattern]);
+  assert.ok(!resBearer.includes('my-secret-auth-token_123'));
+  assert.ok(resBearer.includes('[REDACTED:custom]'));
+});

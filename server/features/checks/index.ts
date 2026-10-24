@@ -12,6 +12,7 @@ import {
   writeJsonAtomic,
 } from '../policy/lib/s4-core.ts';
 import {
+  computeCheckCommandSha,
   computeDirtySignature,
   computeGate,
   createDefaultChecksConfig,
@@ -257,7 +258,7 @@ export const feature: MawFeature = {
         // Background execution
         (async () => {
           const gitInfo = getGitInfo(projectPath);
-          const dirtySig = computeDirtySignature(gitInfo.porcelainLines);
+          const dirtySig = computeDirtySignature(projectPath, gitInfo.porcelainLines);
           const results: CheckRunResult[] = getStoredResults(ctx.paths, projectPath);
 
           for (const check of checksToRun) {
@@ -274,6 +275,7 @@ export const feature: MawFeature = {
               at: new Date().toISOString(),
               head: gitInfo.head,
               dirty_signature: dirtySig,
+              command_sha: check.command_sha || computeCheckCommandSha(check),
             };
             if (runIdx >= 0) results[runIdx] = runningEntry;
             else results.push(runningEntry);
@@ -282,6 +284,9 @@ export const feature: MawFeature = {
             const res = await runCheckProcess(check, projectPath, (child) => {
               runInfo.childProcess = child;
             });
+
+            // Item 11: If cancelled while check was executing, do not save finished result
+            if (runInfo.cancelled) break;
 
             const finishedEntry: CheckRunResult = {
               id: check.id,
@@ -293,6 +298,7 @@ export const feature: MawFeature = {
               at: new Date().toISOString(),
               head: gitInfo.head,
               dirty_signature: dirtySig,
+              command_sha: check.command_sha || computeCheckCommandSha(check),
             };
 
             const finalIdx = results.findIndex((r) => r.id === check.id);
@@ -301,17 +307,23 @@ export const feature: MawFeature = {
             saveStoredResults(ctx.paths, projectPath, results);
           }
 
-          activeRuns.delete(normKey);
+          if (activeRuns.get(normKey)?.runId === runId) {
+            activeRuns.delete(normKey);
+          }
 
-          // Recompute gate and update summary
-          try {
-            const gate = await computeGate(ctx.paths, projectPath, config, results);
-            saveLastSummary(ctx.paths, projectPath, gate.green, new Date().toISOString());
-          } catch {
-            // Ignore
+          // Recompute gate and update summary only if not cancelled
+          if (!runInfo.cancelled) {
+            try {
+              const gate = await computeGate(ctx.paths, projectPath, config, results);
+              saveLastSummary(ctx.paths, projectPath, gate.green, new Date().toISOString());
+            } catch {
+              // Ignore
+            }
           }
         })().catch(() => {
-          activeRuns.delete(normKey);
+          if (activeRuns.get(normKey)?.runId === runId) {
+            activeRuns.delete(normKey);
+          }
         });
 
         return {
@@ -418,14 +430,16 @@ export const feature: MawFeature = {
           gate.green = false;
         }
 
-        // Check override token
+        // Check override token (Item 14: honor scope)
         if (overrideToken) {
+          const reqScope = (req.query.get('scope') || 'merge').trim().toLowerCase();
           const overrides = getOverrides(ctx);
           const now = Date.now();
           const idx = overrides.findIndex(
             (o) =>
               o.token === overrideToken &&
               isPathInsideProject(projectPath, o.project_path) &&
+              (o.scope ? o.scope.toLowerCase() === reqScope : true) &&
               new Date(o.expires_at).getTime() > now
           );
 

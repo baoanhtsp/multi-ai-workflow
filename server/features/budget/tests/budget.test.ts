@@ -308,3 +308,38 @@ test('syncLedger: is idempotent and computes job costs from audit rows', async (
     cleanup();
   }
 });
+
+test('regression Item 4: budget_spend falls back to global project cap when no override exists', async () => {
+  const { paths, ctx, cleanup } = createTempEnv();
+  try {
+    const budgetDir = paths.featureDataDir('budget');
+    fs.mkdirSync(budgetDir, { recursive: true });
+
+    // Set global project cap: warn: 10, block: 25, period: 'month'
+    const budgetConfig = {
+      version: 1,
+      enabled: true,
+      caps: {
+        project: { usd: { warn: 10, block: 25 }, period: 'month' },
+      },
+      projects: {}, // no project overrides
+    };
+    fs.writeFileSync(path.win32.join(budgetDir, 'budgets.json'), JSON.stringify(budgetConfig), 'utf8');
+
+    const spendHandler = (feature as any).routes.budget_spend.handler;
+    const req = {
+      method: 'GET',
+      url: new URL(`http://localhost/budget_spend?project_path=${encodeURIComponent(paths.projectsRoot)}`),
+      headers: new Headers(),
+      query: new URLSearchParams({ project_path: paths.projectsRoot }),
+    };
+
+    const res = await spendHandler(ctx, req);
+    assert.ok(res);
+    assert.equal(res.project.cap.warn, 10);
+    assert.equal(res.project.cap.block, 25);
+    assert.equal(res.project.period, 'month');
+  } finally {
+    cleanup();
+  }
+});

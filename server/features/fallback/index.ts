@@ -9,8 +9,10 @@ import {
   appendS4Audit,
   classifyFailure,
   createDefaultFallbackConfig,
+  loadBudgetConfig,
   loadFallbackConfig,
   pickFallback,
+  readAuditRows,
   readJsonSafe,
   rebuildRunBody,
   replaceAgent,
@@ -51,16 +53,12 @@ export async function withRecoveryLock<T>(fn: () => Promise<T>): Promise<T> {
   const nextLock = new Promise<void>((resolve) => {
     release = resolve;
   });
-  const prevLock = recoveryLockPromise;
-  recoveryLockPromise = (async () => {
-    try {
-      await prevLock;
-    } catch {
-      // Ignore previous lock failures
-    }
-  })();
-
-  await prevLock;
+  const prev = recoveryLockPromise;
+  recoveryLockPromise = prev.then(
+    () => nextLock,
+    () => nextLock
+  );
+  await prev.catch(() => {});
   try {
     return await fn();
   } finally {
@@ -72,6 +70,24 @@ function generateRecoveryId(): string {
   const ts = Date.now();
   const hex = crypto.randomBytes(4).toString('hex');
   return `rec_${ts}_${hex}`;
+}
+
+export function getAgentDaySpentUsd(auditFile: string, now: Date): Record<string, number> {
+  if (!fs.existsSync(auditFile)) return {};
+  const { rows } = readAuditRows(auditFile, 0);
+  const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const spent: Record<string, number> = {};
+  for (const r of rows) {
+    if (!r.Timestamp) continue;
+    const t = new Date(r.Timestamp).getTime();
+    if (t >= startOfDay) {
+      const ag = String(r.Agent || r.Tool || '').toLowerCase();
+      if (ag) {
+        spent[ag] = (spent[ag] || 0) + (Number(r.CostUsd) || 0);
+      }
+    }
+  }
+  return spent;
 }
 
 let lastClaimsPruneMs = 0;
@@ -140,6 +156,8 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
     ).data;
 
     const { config: routingCfg } = loadFallbackConfig(fallbackDir);
+    const budgetCfg = loadBudgetConfig(ctx.paths.featureDataDir('budget')).config;
+    const agentDayCapBlockUsd = budgetCfg.caps.agent_day?.usd?.block ?? 0;
 
     const validAgentIds = new Set(ctx.registry.agents.map((a) => a.id.toLowerCase()));
 
@@ -154,6 +172,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
     const processedSet = new Set(recData.processed_jobs || []);
     const now = new Date();
     const nowMs = now.getTime();
+    const agentDaySpentUsd = getAgentDaySpentUsd(ctx.paths.auditFile, now);
     let changed = false;
 
     pruneOldClaims(ctx.paths.tempDir, nowMs);
@@ -212,13 +231,20 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
       processedSet.add(jobId);
       changed = true;
 
-      // Item 8: Which agent failed: extract from tag if present, verify it is a valid registry agent
-      let failedAgent = String(meta.agent ?? '').trim().toLowerCase();
-      if (classified.kind === 'blocked' && classified.agent) {
+      // Rule: the failed agent = the [S4:... agent=] tag if present;
+      // else for mode task/direct = meta.agent;
+      // for team/council/auto-gate WITHOUT a tag = unknown -> retry the same body for transient/usage_limit, no cooldown, no fallback;
+      // never call replaceAgent with an unknown/non-registry id.
+      const mode = String(meta.mode ?? 'task').trim().toLowerCase();
+      const isMultiAgentMode = ['team', 'auto-gate', 'council'].includes(mode);
+
+      let failedAgent = 'unknown';
+      if ('agent' in classified && classified.agent) {
         failedAgent = classified.agent.trim().toLowerCase();
+      } else if (!isMultiAgentMode) {
+        failedAgent = String(meta.agent ?? '').trim().toLowerCase();
       }
-      const isKnownAgent = validAgentIds.has(failedAgent);
-      const isMultiAgentMode = ['team', 'auto-gate', 'council'].includes(String(meta.mode ?? ''));
+      const isKnownAgent = failedAgent !== 'unknown' && validAgentIds.has(failedAgent);
 
       const role = String(meta.role ?? 'backend').trim().toLowerCase();
       const roleCfg = routingCfg.roles[role] || { fallbacks: [], auto_fallback: false };
@@ -255,10 +281,20 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
 
       // Decisions Table
       if (classified.kind === 'blocked') {
-        if (classified.by === 's4' && (classified.code === 'budget' || classified.code === 'policy')) {
-          continue;
+        if (classified.by === 's4') {
+          if (classified.code === 'budget') {
+            // Per design 2.4: a [S4:budget agent=X fallback=Y] block whose fallback is not 'none'
+            // (= the agent_day scope) must go down the fallback path.
+            if (!classified.fallback || classified.fallback === 'none') {
+              continue;
+            }
+          } else if (classified.code === 'policy' || classified.code === 'approval') {
+            continue;
+          }
         }
-        if (classified.by === 's4' && classified.code === 'approval') {
+
+        // If failedAgent is unknown or not in registry, cannot determine fallback
+        if (!isKnownAgent) {
           continue;
         }
 
@@ -270,8 +306,13 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
           agents: infoMap,
           cooldowns,
           now,
+          agentDaySpentUsd,
+          agentDayCapBlockUsd,
         });
-        const fbAgent = fbResult ? fbResult.agent : null;
+        const fbAgent =
+          classified.fallback && classified.fallback !== 'none' && validAgentIds.has(classified.fallback)
+            ? classified.fallback
+            : fbResult ? fbResult.agent : null;
 
         if (roleCfg.auto_fallback && fbAgent) {
           const item: RecoveryItem = {
@@ -311,10 +352,62 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
           pushRecoveryItem(item);
         }
       } else if (classified.kind === 'usage_limit') {
+        // Item 13: usage_limit without a reset time = transient with the LONGEST backoff step (design 0.6), not 'suggested'
+        if (!classified.reset_at) {
+          const longestBackoffSec = routingCfg.recovery.backoff_s[routingCfg.recovery.backoff_s.length - 1] ?? 1800;
+          if (isKnownAgent) {
+            cooldowns[failedAgent] = {
+              until: new Date(nowMs + longestBackoffSec * 1000).toISOString(),
+              reason: 'Usage limit reached (no reset time given)',
+              source_job_id: jobId,
+            };
+          }
+
+          if (routingCfg.recovery.enabled && attempt < routingCfg.recovery.max_attempts) {
+            const nextAt = new Date(nowMs + longestBackoffSec * 1000).toISOString();
+            const item: RecoveryItem = {
+              id: generateRecoveryId(),
+              root_job_id: rootJobId,
+              source_job_id: jobId,
+              kind: 'usage_limit',
+              agent: failedAgent,
+              role,
+              fallback_agent: null,
+              attempt,
+              status: 'waiting',
+              next_at: nextAt,
+              reason: `Usage limit without reset time; retrying in ${longestBackoffSec}s`,
+              created_at: now.toISOString(),
+              new_job_id: null,
+              error: null,
+            };
+            pushRecoveryItem(item);
+          } else {
+            const item: RecoveryItem = {
+              id: generateRecoveryId(),
+              root_job_id: rootJobId,
+              source_job_id: jobId,
+              kind: 'usage_limit',
+              agent: failedAgent,
+              role,
+              fallback_agent: null,
+              attempt,
+              status: 'gave_up',
+              next_at: null,
+              reason: `Usage limit without reset time; max attempts reached`,
+              created_at: now.toISOString(),
+              new_job_id: null,
+              error: null,
+            };
+            pushRecoveryItem(item);
+          }
+          continue;
+        }
+
         const lastStep = routingCfg.recovery.backoff_s[routingCfg.recovery.backoff_s.length - 1] ?? 1800;
         const untilIso = classified.reset_at || new Date(nowMs + lastStep * 1000).toISOString();
 
-        // Item 8: Never set cooldown for non-registry id
+        // Never set cooldown for non-registry id
         if (isKnownAgent) {
           cooldowns[failedAgent] = {
             until: untilIso,
@@ -323,8 +416,8 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
           };
         }
 
-        const diffS = classified.reset_at ? (new Date(classified.reset_at).getTime() - nowMs) / 1000 : Infinity;
-        if (classified.reset_at && diffS <= routingCfg.recovery.max_wait_s) {
+        const diffS = (new Date(classified.reset_at).getTime() - nowMs) / 1000;
+        if (diffS <= routingCfg.recovery.max_wait_s) {
           if (routingCfg.recovery.prefer_fallback_on_limit && roleCfg.auto_fallback && isKnownAgent) {
             const infoMap = await getAgentInfoMap();
             const fbResult = pickFallback({
@@ -334,6 +427,8 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
               agents: infoMap,
               cooldowns,
               now,
+              agentDaySpentUsd,
+              agentDayCapBlockUsd,
             });
             if (fbResult) {
               const item: RecoveryItem = {
@@ -514,8 +609,14 @@ async function processDueItems(ctx: MawFeatureContext): Promise<void> {
       }
     }
 
+    const validAgentIds = new Set(ctx.registry.agents.map((a) => a.id.toLowerCase()));
     runBody = rebuildRunBody(meta, promptFile);
-    if (item.fallback_agent) {
+    if (
+      item.fallback_agent &&
+      item.agent !== 'unknown' &&
+      validAgentIds.has(item.agent) &&
+      validAgentIds.has(item.fallback_agent)
+    ) {
       runBody = replaceAgent(runBody, item.agent, item.fallback_agent);
     }
     dueItemToStart = item;
@@ -652,13 +753,20 @@ export const feature: MawFeature = {
           };
         }
 
+        const now = new Date();
+        const budgetCfg = loadBudgetConfig(ctx.paths.featureDataDir('budget')).config;
+        const agentDayCapBlockUsd = budgetCfg.caps.agent_day?.usd?.block ?? 0;
+        const agentDaySpentUsd = getAgentDaySpentUsd(ctx.paths.auditFile, now);
+
         const suggestion = pickFallback({
           role,
           blockedAgent: agent,
           fallbacks: roleFallbacks,
           agents: agentInfoMap,
           cooldowns,
-          now: new Date(),
+          now,
+          agentDaySpentUsd,
+          agentDayCapBlockUsd,
         });
 
         return {
@@ -775,8 +883,15 @@ export const feature: MawFeature = {
             }
           }
 
+          const validAgentIds = new Set(ctx.registry.agents.map((a) => a.id.toLowerCase()));
           runBody = rebuildRunBody(meta, promptFile);
-          if (targetAgent && targetAgent !== item.agent) {
+          if (
+            targetAgent &&
+            targetAgent !== item.agent &&
+            item.agent !== 'unknown' &&
+            validAgentIds.has(item.agent) &&
+            validAgentIds.has(targetAgent)
+          ) {
             runBody = replaceAgent(runBody, item.agent, targetAgent);
           }
           itemToApply = item;
