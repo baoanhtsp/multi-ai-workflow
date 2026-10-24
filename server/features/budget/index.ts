@@ -13,10 +13,12 @@ import {
   findProjectOverride,
   loadBudgetConfig,
   readAuditRows,
+  readHumanVerdicts,
   readJsonSafe,
   validateBudgetConfig,
   writeJsonAtomic,
   type BudgetConfig,
+  type HumanVerdict,
   type S4AuditEntry,
 } from '../policy/lib/s4-core.ts';
 
@@ -175,6 +177,13 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
 
   const jobsDir = ctx.paths.jobsDir;
 
+  // Read S5 human verdicts if present ($MAW_HOME/data/review/verdicts.jsonl)
+  const humanVerdictsList = readHumanVerdicts(ctx.paths.mawHome);
+  const humanVerdictsMap = new Map<string, HumanVerdict>();
+  for (const hv of humanVerdictsList) {
+    humanVerdictsMap.set(hv.job_id, hv); // latest entry per job_id wins
+  }
+
   for (const meta of jobs) {
     const jobId = String(meta.job_id ?? '').trim();
     if (!jobId || seenJobIds.has(jobId)) continue;
@@ -214,7 +223,7 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
       }
     }
 
-    // Review parsing
+    // Review parsing (meta.review -> S5 human verdict -> log parsing)
     let reviewVerdict: string | null = null;
     let reviewScore: number | null = null;
     let reviewRounds: number | null = null;
@@ -225,16 +234,24 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
       if (Number.isFinite(Number(r.score))) reviewScore = Number(r.score);
       if (Number.isFinite(Number(r.rounds))) reviewRounds = Number(r.rounds);
     } else {
-      const logFile = path.win32.join(jobsDir, `${jobId}.log`);
-      if (fs.existsSync(logFile)) {
-        try {
-          const logText = fs.readFileSync(logFile, 'utf8');
-          const parsedRev = parseReviewFromLog(logText);
-          reviewVerdict = parsedRev.verdict;
-          reviewScore = parsedRev.score;
-          reviewRounds = parsedRev.rounds;
-        } catch {
-          // Ignore
+      const hv = humanVerdictsMap.get(jobId);
+      if (hv) {
+        reviewVerdict = hv.verdict;
+        const sc = typeof hv.score === 'number' ? hv.score : Number.parseFloat(String(hv.score ?? ''));
+        if (Number.isFinite(sc)) reviewScore = sc;
+        reviewRounds = 1;
+      } else {
+        const logFile = path.win32.join(jobsDir, `${jobId}.log`);
+        if (fs.existsSync(logFile)) {
+          try {
+            const logText = fs.readFileSync(logFile, 'utf8');
+            const parsedRev = parseReviewFromLog(logText);
+            reviewVerdict = parsedRev.verdict;
+            reviewScore = parsedRev.score;
+            reviewRounds = parsedRev.rounds;
+          } catch {
+            // Ignore
+          }
         }
       }
     }

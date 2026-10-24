@@ -1600,3 +1600,43 @@ export function rebuildRunBody(
 
   return body;
 }
+
+// ============================================================================
+// 14. S5 Human Review Verdicts
+// ============================================================================
+
+export interface HumanVerdict {
+  ts: string;
+  job_id: string;
+  agent?: string;
+  role?: string;
+  model?: string;
+  project_path?: string;
+  verdict: string;
+  score?: number | string;
+  note?: string;
+  reviewer?: string;
+}
+
+export function readHumanVerdicts(mawHome: string): HumanVerdict[] {
+  const filePath = path.win32.join(mawHome, 'data', 'review', 'verdicts.jsonl');
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const results: HumanVerdict[] = [];
+    for (const l of lines) {
+      try {
+        const v = JSON.parse(l) as HumanVerdict;
+        if (v && v.job_id && v.verdict) {
+          results.push(v);
+        }
+      } catch {
+        // Skip malformed line
+      }
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}

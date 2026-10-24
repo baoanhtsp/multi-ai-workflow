@@ -21,6 +21,7 @@ import {
   type AttentionItem,
   type PolicyConfig,
 } from './lib/s4-core.ts';
+import { loadInbox, syncAttentionToInbox } from './lib/inbox-bridge.ts';
 
 // ============================================================================
 // 1. Interfaces
@@ -433,6 +434,133 @@ export function collectAttentionItems(ctx: MawFeatureContext): AttentionItem[] {
   return items;
 }
 
+export async function approvePolicyApproval(
+  ctx: MawFeatureContext,
+  id: string,
+  rerun = true
+): Promise<{ ok: boolean; item: PolicyApproval; job_id?: string }> {
+  const approvalsFile = path.win32.join(ctx.paths.featureDataDir('policy'), 'approvals.json');
+  const approvals = readJsonSafe<PolicyApproval[]>(approvalsFile, []).data;
+  const apr = approvals.find((a) => a.id === id);
+  if (!apr) {
+    throw new ApiValidationError(`Unknown approval id: ${id}`, 404);
+  }
+
+  if (apr.status !== 'pending') {
+    throw new ApiValidationError(
+      `Approval '${id}' cannot be approved (status: ${apr.status}).`,
+      409
+    );
+  }
+
+  apr.status = 'approved';
+  apr.approved_at = new Date().toISOString();
+  writeJsonAtomic(approvalsFile, approvals);
+
+  let newJobId: string | undefined;
+  if (rerun) {
+    const jobs = await ctx.readJobs();
+    const sourceJob = jobs.find((j) => String(j.job_id) === apr.job_id);
+    if (sourceJob) {
+      const promptFile = path.win32.join(ctx.paths.jobsDir, `${apr.job_id}.prompt.txt`);
+      const runBody = rebuildRunBody(sourceJob, promptFile);
+      const started = await ctx.startJob(runBody);
+      newJobId = String(started.job_id || '');
+    }
+  }
+
+  await withRecoveryLock(async () => {
+    const fallbackDir = ctx.paths.featureDataDir('fallback');
+    const recFile = path.win32.join(fallbackDir, 'recovery.json');
+    const recData = readJsonSafe<RecoveryData>(recFile, {
+      processed_jobs: [],
+      items: [],
+    }).data;
+
+    const existingItem = recData.items.find(
+      (it) => it.source_job_id === apr.job_id || it.new_job_id === apr.job_id
+    );
+    const rootJobId = existingItem ? existingItem.root_job_id : apr.job_id;
+
+    const now = new Date().toISOString();
+    const hex = crypto.randomBytes(6).toString('hex');
+    const recoveryItem: RecoveryItem = {
+      id: `rec_${hex}`,
+      created_at: now,
+      kind: 'approval',
+      status: 'started',
+      source_job_id: apr.job_id,
+      root_job_id: rootJobId,
+      new_job_id: newJobId || null,
+      agent: apr.agent,
+      role: apr.role,
+      fallback_agent: null,
+      attempt: 1,
+      next_at: null,
+      reason: `Policy approval for ${apr.command || apr.id}`,
+      error: null,
+    };
+
+    recData.items.push(recoveryItem);
+    if (recData.items.length > 500) {
+      recData.items = recData.items.slice(-500);
+    }
+    writeJsonAtomic(recFile, recData);
+  });
+
+  appendPolicyAudit(ctx, 'policy_approve', { id, rerun, new_job_id: newJobId });
+
+  return {
+    ok: true,
+    item: apr,
+    ...(newJobId ? { job_id: newJobId } : {}),
+  };
+}
+
+export async function rejectPolicyApproval(
+  ctx: MawFeatureContext,
+  id: string
+): Promise<{ ok: boolean }> {
+  const approvalsFile = path.win32.join(ctx.paths.featureDataDir('policy'), 'approvals.json');
+  const approvals = readJsonSafe<PolicyApproval[]>(approvalsFile, []).data;
+  const apr = approvals.find((a) => a.id === id);
+  if (!apr) {
+    throw new ApiValidationError(`Unknown approval id: ${id}`, 404);
+  }
+
+  if (apr.status !== 'pending') {
+    throw new ApiValidationError(
+      `Approval '${id}' cannot be rejected (status: ${apr.status}).`,
+      409
+    );
+  }
+
+  apr.status = 'rejected';
+  writeJsonAtomic(approvalsFile, approvals);
+  appendPolicyAudit(ctx, 'policy_reject', { id });
+
+  return { ok: true };
+}
+
+export function dismissAttentionItem(
+  ctx: MawFeatureContext,
+  id: string
+): { ok: boolean } {
+  const dismissedFile = path.win32.join(
+    ctx.paths.featureDataDir('policy'),
+    'attention-dismissed.json'
+  );
+  const dismissed = readJsonSafe<string[]>(dismissedFile, []).data;
+  if (!dismissed.includes(id)) {
+    dismissed.push(id);
+  }
+
+  const bounded = dismissed.slice(-1000);
+  writeJsonAtomic(dismissedFile, bounded);
+
+  return { ok: true };
+}
+
 // ============================================================================
 // Feature Export
 // ============================================================================
@@ -657,83 +785,7 @@ export const feature: MawFeature = {
           throw new ApiValidationError('id is required.', 400);
         }
         const rerun = body.rerun !== undefined ? Boolean(body.rerun) : true;
-
-        const approvalsFile = path.win32.join(ctx.paths.featureDataDir('policy'), 'approvals.json');
-        const approvals = readJsonSafe<PolicyApproval[]>(approvalsFile, []).data;
-        const apr = approvals.find((a) => a.id === id);
-        if (!apr) {
-          throw new ApiValidationError(`Unknown approval id: ${id}`, 404);
-        }
-
-        if (apr.status !== 'pending') {
-          throw new ApiValidationError(
-            `Approval '${id}' cannot be approved (status: ${apr.status}).`,
-            409
-          );
-        }
-
-        apr.status = 'approved';
-        apr.approved_at = new Date().toISOString();
-        writeJsonAtomic(approvalsFile, approvals);
-
-        let newJobId: string | undefined;
-        if (rerun) {
-          const jobs = await ctx.readJobs();
-          const sourceJob = jobs.find((j) => String(j.job_id) === apr.job_id);
-          if (sourceJob) {
-            const promptFile = path.win32.join(ctx.paths.jobsDir, `${apr.job_id}.prompt.txt`);
-            const runBody = rebuildRunBody(sourceJob, promptFile);
-            const started = await ctx.startJob(runBody);
-            newJobId = String(started.job_id || '');
-          }
-        }
-
-        await withRecoveryLock(async () => {
-          const fallbackDir = ctx.paths.featureDataDir('fallback');
-          const recFile = path.win32.join(fallbackDir, 'recovery.json');
-          const recData = readJsonSafe<RecoveryData>(recFile, {
-            processed_jobs: [],
-            items: [],
-          }).data;
-
-          const existingItem = recData.items.find(
-            (it) => it.source_job_id === apr.job_id || it.new_job_id === apr.job_id
-          );
-          const rootJobId = existingItem ? existingItem.root_job_id : apr.job_id;
-
-          const now = new Date().toISOString();
-          const hex = crypto.randomBytes(6).toString('hex');
-          const recoveryItem: RecoveryItem = {
-            id: `rec_${hex}`,
-            created_at: now,
-            kind: 'approval',
-            status: 'started',
-            source_job_id: apr.job_id,
-            root_job_id: rootJobId,
-            new_job_id: newJobId || null,
-            agent: apr.agent,
-            role: apr.role,
-            fallback_agent: null,
-            attempt: 1,
-            next_at: null,
-            reason: `Policy approval for ${apr.command || apr.id}`,
-            error: null,
-          };
-
-          recData.items.push(recoveryItem);
-          if (recData.items.length > 500) {
-            recData.items = recData.items.slice(-500);
-          }
-          writeJsonAtomic(recFile, recData);
-        });
-
-        appendPolicyAudit(ctx, 'policy_approve', { id, rerun, new_job_id: newJobId });
-
-        return {
-          ok: true,
-          item: apr,
-          ...(newJobId ? { job_id: newJobId } : {}),
-        };
+        return await approvePolicyApproval(ctx, id, rerun);
       },
     },
 
@@ -745,26 +797,7 @@ export const feature: MawFeature = {
         if (!id) {
           throw new ApiValidationError('id is required.', 400);
         }
-
-        const approvalsFile = path.win32.join(ctx.paths.featureDataDir('policy'), 'approvals.json');
-        const approvals = readJsonSafe<PolicyApproval[]>(approvalsFile, []).data;
-        const apr = approvals.find((a) => a.id === id);
-        if (!apr) {
-          throw new ApiValidationError(`Unknown approval id: ${id}`, 404);
-        }
-
-        if (apr.status !== 'pending') {
-          throw new ApiValidationError(
-            `Approval '${id}' cannot be rejected (status: ${apr.status}).`,
-            409
-          );
-        }
-
-        apr.status = 'rejected';
-        writeJsonAtomic(approvalsFile, approvals);
-        appendPolicyAudit(ctx, 'policy_reject', { id });
-
-        return { ok: true };
+        return await rejectPolicyApproval(ctx, id);
       },
     },
 
@@ -772,6 +805,7 @@ export const feature: MawFeature = {
       method: 'GET',
       handler: async (ctx: MawFeatureContext, req: MawFeatureRequest) => {
         writeRuntimeJson(ctx, req.req?.headers?.host);
+        await syncAttentionToInbox(ctx).catch(() => {});
         const since = (req.query.get('since') ?? '').trim();
         let items = collectAttentionItems(ctx);
 
@@ -797,20 +831,7 @@ export const feature: MawFeature = {
         if (!id) {
           throw new ApiValidationError('id is required.', 400);
         }
-
-        const dismissedFile = path.win32.join(
-          ctx.paths.featureDataDir('policy'),
-          'attention-dismissed.json'
-        );
-        const dismissed = readJsonSafe<string[]>(dismissedFile, []).data;
-        if (!dismissed.includes(id)) {
-          dismissed.push(id);
-        }
-
-        const bounded = dismissed.slice(-1000);
-        writeJsonAtomic(dismissedFile, bounded);
-
-        return { ok: true };
+        return dismissAttentionItem(ctx, id);
       },
     },
   },
@@ -855,6 +876,9 @@ export const feature: MawFeature = {
       (it) => it.severity === 'warn' || it.severity === 'error'
     ).length;
 
+    const inboxBridgeActive = Boolean(await loadInbox(ctx));
+    await syncAttentionToInbox(ctx).catch(() => {});
+
     return {
       enabled: true,
       pending_approvals: pendingApprovals,
@@ -862,6 +886,7 @@ export const feature: MawFeature = {
       attention_count: attentionCount,
       warnings: [],
       runtime_ok: runtimeOk,
+      inbox_bridge: inboxBridgeActive,
     };
   },
 };

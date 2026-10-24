@@ -343,3 +343,55 @@ test('regression Item 4: budget_spend falls back to global project cap when no o
     cleanup();
   }
 });
+
+test('syncLedger: uses S5 human review verdict from data/review/verdicts.jsonl when meta.review is missing', async () => {
+  const { paths, ctx, cleanup } = createTempEnv();
+  try {
+    fs.mkdirSync(paths.jobsDir, { recursive: true });
+
+    // Job without meta.review
+    const jobMeta = {
+      job_id: 'job_s5_human_rev',
+      status: 'DONE',
+      command: 'invoke-agent.ps1 -Role backend',
+      agent: 'claude',
+      role: 'backend',
+      started_at: '2026-10-25T09:00:00.000Z',
+      finished_at: '2026-10-25T09:05:00.000Z',
+    };
+    fs.writeFileSync(
+      path.win32.join(paths.jobsDir, 'job_s5_human_rev.json'),
+      JSON.stringify(jobMeta),
+      'utf8'
+    );
+
+    // S5 human verdict file
+    const reviewDir = path.win32.join(paths.mawHome, 'data', 'review');
+    fs.mkdirSync(reviewDir, { recursive: true });
+    const verdictLine = JSON.stringify({
+      ts: '2026-10-25T09:10:00.000Z',
+      job_id: 'job_s5_human_rev',
+      agent: 'claude',
+      role: 'backend',
+      verdict: 'APPROVED',
+      score: 9.5,
+      note: 'LGTM by human reviewer',
+    });
+    fs.writeFileSync(path.win32.join(reviewDir, 'verdicts.jsonl'), verdictLine + '\n', 'utf8');
+
+    await syncLedger(ctx);
+
+    const ledgerFile = path.win32.join(paths.featureDataDir('budget'), 'ledger.jsonl');
+    assert.ok(fs.existsSync(ledgerFile));
+    const lines = fs.readFileSync(ledgerFile, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 1);
+
+    const row = JSON.parse(lines[0]!);
+    assert.equal(row.job_id, 'job_s5_human_rev');
+    assert.equal(row.review?.verdict, 'APPROVED');
+    assert.equal(row.review?.score, 9.5);
+    assert.equal(row.review?.rounds, 1);
+  } finally {
+    cleanup();
+  }
+});

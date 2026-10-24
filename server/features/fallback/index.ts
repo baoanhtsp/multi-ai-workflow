@@ -21,6 +21,7 @@ import {
   type FallbackAgentInfo,
   type FallbackConfig,
 } from '../policy/lib/s4-core.ts';
+import { syncAttentionToInbox } from '../policy/lib/inbox-bridge.ts';
 
 export interface RecoveryItem {
   id: string;
@@ -660,10 +661,114 @@ export function ensureEngine(ctx: MawFeatureContext): void {
   if (!engineInterval) {
     engineInterval = setInterval(() => {
       const freshCtx = createFeatureContext(ctx.paths);
-      scanFinishedJobs(freshCtx).catch(() => {});
+      scanFinishedJobs(freshCtx)
+        .then(() => syncAttentionToInbox(freshCtx).catch(() => {}))
+        .catch(() => {});
     }, 5000);
     engineInterval.unref();
   }
+}
+
+export async function applyRecoveryItem(
+  ctx: MawFeatureContext,
+  id: string,
+  customAgent?: string
+): Promise<{ ok: boolean; item: RecoveryItem; job_id: string }> {
+  let itemToApply: RecoveryItem | null = null;
+  let runBody: Record<string, unknown> | null = null;
+
+  await withRecoveryLock(async () => {
+    const fallbackDir = ctx.paths.featureDataDir('fallback');
+    const recFile = path.win32.join(fallbackDir, 'recovery.json');
+    const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+
+    const item = recData.items.find((it) => it.id === id);
+    if (!item) {
+      throw new ApiValidationError(`Recovery item '${id}' not found.`, 404);
+    }
+
+    if (
+      item.status !== 'waiting' &&
+      item.status !== 'suggested' &&
+      item.status !== 'failed' &&
+      item.status !== 'gave_up'
+    ) {
+      throw new ApiValidationError(`Item '${id}' cannot be applied (status: ${item.status}).`, 409);
+    }
+
+    item.status = 'starting';
+    writeJsonAtomic(recFile, recData);
+
+    const targetAgent = customAgent || item.fallback_agent || item.agent;
+    const jobsDir = ctx.paths.jobsDir;
+    const sourceMetaFile = path.win32.join(jobsDir, `${item.source_job_id}.json`);
+    const promptFile = path.win32.join(jobsDir, `${item.source_job_id}.prompt.txt`);
+
+    let meta: Record<string, unknown> = {};
+    if (fs.existsSync(sourceMetaFile)) {
+      try {
+        meta = JSON.parse(fs.readFileSync(sourceMetaFile, 'utf8')) as Record<string, unknown>;
+      } catch {
+        meta = {};
+      }
+    }
+
+    const validAgentIds = new Set(ctx.registry.agents.map((a) => a.id.toLowerCase()));
+    runBody = rebuildRunBody(meta, promptFile);
+    if (
+      targetAgent &&
+      targetAgent !== item.agent &&
+      item.agent !== 'unknown' &&
+      validAgentIds.has(item.agent) &&
+      validAgentIds.has(targetAgent)
+    ) {
+      runBody = replaceAgent(runBody, item.agent, targetAgent);
+    }
+    itemToApply = item;
+  });
+
+  if (!itemToApply || !runBody) {
+    throw new ApiValidationError('Could not prepare recovery request.', 500);
+  }
+
+  let newJobId: string;
+  try {
+    const res = await ctx.startJob(runBody);
+    newJobId = String(res.job_id ?? '');
+  } catch (err) {
+    await withRecoveryLock(async () => {
+      const fallbackDir = ctx.paths.featureDataDir('fallback');
+      const recFile = path.win32.join(fallbackDir, 'recovery.json');
+      const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+      const item = recData.items.find((it) => it.id === id);
+      if (item) {
+        item.status = 'failed';
+        item.error = err instanceof Error ? err.message : String(err);
+        writeJsonAtomic(recFile, recData);
+      }
+    });
+    throw new ApiValidationError(`Failed to start recovery job: ${err instanceof Error ? err.message : String(err)}`, 500);
+  }
+
+  await withRecoveryLock(async () => {
+    const fallbackDir = ctx.paths.featureDataDir('fallback');
+    const recFile = path.win32.join(fallbackDir, 'recovery.json');
+    const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+    const item = recData.items.find((it) => it.id === id);
+    if (item) {
+      item.status = 'started';
+      item.new_job_id = newJobId;
+      if (customAgent) item.fallback_agent = customAgent;
+      writeJsonAtomic(recFile, recData);
+      appendS4Audit(fallbackDir, 'recovery_apply', { id, new_job_id: newJobId, agent: customAgent || item.fallback_agent });
+    }
+  });
+
+  return {
+    ok: true,
+    item: itemToApply,
+    job_id: newJobId,
+  };
 }
 
 export const feature: MawFeature = {
@@ -848,97 +953,7 @@ export const feature: MawFeature = {
         if (!id) {
           throw new ApiValidationError("Missing 'id' parameter.", 400);
         }
-
-        let itemToApply: RecoveryItem | null = null;
-        let runBody: Record<string, unknown> | null = null;
-
-        await withRecoveryLock(async () => {
-          const fallbackDir = ctx.paths.featureDataDir('fallback');
-          const recFile = path.win32.join(fallbackDir, 'recovery.json');
-          const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
-
-          const item = recData.items.find((it) => it.id === id);
-          if (!item) {
-            throw new ApiValidationError(`Recovery item '${id}' not found.`, 404);
-          }
-
-          if (item.status !== 'waiting' && item.status !== 'suggested') {
-            throw new ApiValidationError(`Item '${id}' cannot be applied (status: ${item.status}).`, 409);
-          }
-
-          item.status = 'starting';
-          writeJsonAtomic(recFile, recData);
-
-          const targetAgent = customAgent || item.fallback_agent || item.agent;
-          const jobsDir = ctx.paths.jobsDir;
-          const sourceMetaFile = path.win32.join(jobsDir, `${item.source_job_id}.json`);
-          const promptFile = path.win32.join(jobsDir, `${item.source_job_id}.prompt.txt`);
-
-          let meta: Record<string, unknown> = {};
-          if (fs.existsSync(sourceMetaFile)) {
-            try {
-              meta = JSON.parse(fs.readFileSync(sourceMetaFile, 'utf8')) as Record<string, unknown>;
-            } catch {
-              meta = {};
-            }
-          }
-
-          const validAgentIds = new Set(ctx.registry.agents.map((a) => a.id.toLowerCase()));
-          runBody = rebuildRunBody(meta, promptFile);
-          if (
-            targetAgent &&
-            targetAgent !== item.agent &&
-            item.agent !== 'unknown' &&
-            validAgentIds.has(item.agent) &&
-            validAgentIds.has(targetAgent)
-          ) {
-            runBody = replaceAgent(runBody, item.agent, targetAgent);
-          }
-          itemToApply = item;
-        });
-
-        if (!itemToApply || !runBody) {
-          throw new ApiValidationError('Could not prepare recovery request.', 500);
-        }
-
-        let newJobId: string;
-        try {
-          const res = await ctx.startJob(runBody);
-          newJobId = String(res.job_id ?? '');
-        } catch (err) {
-          await withRecoveryLock(async () => {
-            const fallbackDir = ctx.paths.featureDataDir('fallback');
-            const recFile = path.win32.join(fallbackDir, 'recovery.json');
-            const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
-            const item = recData.items.find((it) => it.id === id);
-            if (item) {
-              item.status = 'failed';
-              item.error = err instanceof Error ? err.message : String(err);
-              writeJsonAtomic(recFile, recData);
-            }
-          });
-          throw new ApiValidationError(`Failed to start recovery job: ${err instanceof Error ? err.message : String(err)}`, 500);
-        }
-
-        await withRecoveryLock(async () => {
-          const fallbackDir = ctx.paths.featureDataDir('fallback');
-          const recFile = path.win32.join(fallbackDir, 'recovery.json');
-          const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
-          const item = recData.items.find((it) => it.id === id);
-          if (item) {
-            item.status = 'started';
-            item.new_job_id = newJobId;
-            if (customAgent) item.fallback_agent = customAgent;
-            writeJsonAtomic(recFile, recData);
-            appendS4Audit(fallbackDir, 'recovery_apply', { id, new_job_id: newJobId, agent: customAgent || item.fallback_agent });
-          }
-        });
-
-        return {
-          ok: true,
-          item: itemToApply,
-          job_id: newJobId,
-        };
+        return await applyRecoveryItem(ctx, id, customAgent);
       },
     },
     fallback_cooldown_clear: {

@@ -400,3 +400,40 @@ test('suggest_team regression: candidates[] sorted descending by finalScore, and
     cleanup();
   }
 });
+
+test('scoreboard: incorporates S5 human review verdicts for un-ledgered jobs within window', () => {
+  const { paths, cleanup } = createTempScoreboardEnv();
+  try {
+    const registry = loadAgentRegistry(paths);
+
+    // Empty ledger
+    const budgetDir = paths.featureDataDir('budget');
+    fs.mkdirSync(budgetDir, { recursive: true });
+    fs.writeFileSync(path.join(budgetDir, 'ledger.jsonl'), '', 'utf8');
+
+    // S5 human verdicts
+    const reviewDir = path.join(paths.mawHome, 'data', 'review');
+    fs.mkdirSync(reviewDir, { recursive: true });
+    const now = new Date();
+    const verdict = {
+      ts: new Date(now.getTime() - 60000).toISOString(),
+      job_id: 'job_human_external',
+      agent: 'claude',
+      role: 'backend',
+      verdict: 'APPROVED',
+      score: 8.5,
+      note: 'Verified by human reviewer',
+    };
+    fs.writeFileSync(path.join(reviewDir, 'verdicts.jsonl'), JSON.stringify(verdict) + '\n', 'utf8');
+
+    const result = computeScoreboard(paths, registry, { days: 7 });
+    const stat = result.rows.find((s) => s.agent === 'claude' && s.role === 'backend');
+
+    assert.ok(stat, 'claude:backend stat should exist from human review');
+    assert.equal(stat.reviewed, 1);
+    assert.equal(stat.avg_score, 8.5);
+    assert.equal(stat.approval_rate, 1);
+  } finally {
+    cleanup();
+  }
+});

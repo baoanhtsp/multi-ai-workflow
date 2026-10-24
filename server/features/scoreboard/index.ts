@@ -38,7 +38,20 @@ function getCacheKey(ctx: MawFeatureContext, days: number, role = '', project = 
     }
   }
 
-  return `${ledgerSize}_${auditSize}_${ledgerMtime}_${auditMtime}_${days}_${role}_${project}`;
+  const verdictsFile = path.win32.join(ctx.paths.mawHome, 'data', 'review', 'verdicts.jsonl');
+  let verdictsSize = 0;
+  let verdictsMtime = 0;
+  if (fs.existsSync(verdictsFile)) {
+    try {
+      const st = fs.statSync(verdictsFile);
+      verdictsSize = st.size;
+      verdictsMtime = Math.floor(st.mtimeMs);
+    } catch {
+      // Ignore
+    }
+  }
+
+  return `${ledgerSize}_${auditSize}_${verdictsSize}_${ledgerMtime}_${auditMtime}_${verdictsMtime}_${days}_${role}_${project}`;
 }
 
 interface ScoreboardCacheEntry {

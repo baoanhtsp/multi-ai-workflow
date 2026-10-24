@@ -5,6 +5,7 @@ import type { LoadedRegistry } from '../../../lib/registry.ts';
 import {
   isPathInsideProject,
   readAuditRows,
+  readHumanVerdicts,
   readJsonSafe,
   writeJsonAtomic,
   type S4AuditEntry,
@@ -146,7 +147,9 @@ export function computeScoreboard(
   const cutoffMs = nowMs - days * 24 * 60 * 60 * 1000;
 
   const jobs = readLedgerJobs(paths);
+  const ledgerJobIds = new Set(jobs.map((j) => j.job_id).filter(Boolean));
   const { rows: auditRows } = readAuditRows(paths.auditFile, 0);
+  const humanVerdicts = readHumanVerdicts(paths.mawHome);
 
   // Group raw stats by `${agent}:${role}`
   const statsMap = new Map<string, RawStat>();
@@ -256,6 +259,37 @@ export function computeScoreboard(
         if (job.review && typeof job.review.rounds === 'number' && job.review.rounds > 1) {
           s.fixRounds.push(job.review.rounds - 1);
         }
+      }
+    }
+  }
+
+  // 1b. Process S5 human review verdicts for jobs not in ledger (Part B)
+  for (const hv of humanVerdicts) {
+    if (ledgerJobIds.has(hv.job_id)) continue;
+    const finishTime = hv.ts;
+    if (finishTime) {
+      const ms = new Date(finishTime).getTime();
+      if (!Number.isNaN(ms) && ms < cutoffMs) {
+        continue;
+      }
+    }
+    if (filterProject && hv.project_path) {
+      if (!isPathInsideProject(hv.project_path, filterProject)) {
+        continue;
+      }
+    }
+    const agent = (hv.agent || '').trim().toLowerCase();
+    const role = (hv.role || 'backend').trim().toLowerCase();
+    if (agent) {
+      const s = getOrCreateStat(agent, role);
+      s.reviewed++;
+      updateLastAt(s, finishTime);
+      const sc = typeof hv.score === 'number' ? hv.score : Number.parseFloat(String(hv.score ?? ''));
+      if (Number.isFinite(sc)) {
+        s.scores.push(sc);
+      }
+      if ((hv.verdict || '').toUpperCase() === 'APPROVED') {
+        s.approved++;
       }
     }
   }
