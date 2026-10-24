@@ -325,6 +325,82 @@ test('files feature end-to-end: tree, dotfiles, .git excluded, path traversal, r
     'Expected non-existent file inside junction escape to be rejected with 400'
   );
 
+  // Windows .git aliases: NTFS stream syntax, trailing dot, stream in path, and 8.3 GIT~1
+  const windowsAliases = [
+    '.git::$INDEX_ALLOCATION',
+    '.git.',
+    'src:stream',
+  ];
+
+  for (const alias of windowsAliases) {
+    await assert.rejects(
+      async () => {
+        await filesFeature.routes.files_tree.handler(
+          fakeCtx as any,
+          {
+            ...fakeCtx,
+            url: new URL(`http://127.0.0.1/api?action=files_tree&project_path=${encodeURIComponent(projectDir)}&dir=${encodeURIComponent(alias)}`),
+            query: new URLSearchParams({ project_path: projectDir, dir: alias }),
+            body: {},
+            req: {} as any,
+            res: {} as any,
+            ctx: fakeCtx,
+          }
+        );
+      },
+      (err: any) => err instanceof ApiValidationError && err.statusCode === 400,
+      `Expected ${alias} to be rejected with 400`
+    );
+  }
+
+  // Conditional 8.3 GIT~1 test
+  let gitShortNameResolves = false;
+  try {
+    const candidateReal = fs.realpathSync(path.win32.join(projectDir, 'GIT~1'));
+    if (candidateReal.toLowerCase().endsWith('.git')) {
+      gitShortNameResolves = true;
+    }
+  } catch {
+    gitShortNameResolves = false;
+  }
+
+  if (gitShortNameResolves) {
+    await assert.rejects(
+      async () => {
+        await filesFeature.routes.files_tree.handler(
+          fakeCtx as any,
+          {
+            ...fakeCtx,
+            url: new URL(`http://127.0.0.1/api?action=files_tree&project_path=${encodeURIComponent(projectDir)}&dir=GIT~1`),
+            query: new URLSearchParams({ project_path: projectDir, dir: 'GIT~1' }),
+            body: {},
+            req: {} as any,
+            res: {} as any,
+            ctx: fakeCtx,
+          }
+        );
+      },
+      (err: any) => err instanceof ApiValidationError && err.statusCode === 400,
+      'Expected GIT~1 8.3 short name to be rejected with 400'
+    );
+  }
+
+  // Normal nested path still accepted
+  const normalNestedRead = (await filesFeature.routes.files_read.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL(`http://127.0.0.1/api?action=files_read&project_path=${encodeURIComponent(projectDir)}&path=src/sub.ts`),
+      query: new URLSearchParams({ project_path: projectDir, path: 'src/sub.ts' }),
+      body: {},
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+  assert.equal(normalNestedRead.ok, true);
+  assert.equal(normalNestedRead.content, 'export const x = 1;\n');
+
   // 4. GET files_read: BOM strip, binary file, too_large file
   // BOM strip
   const bomReadRes = (await filesFeature.routes.files_read.handler(

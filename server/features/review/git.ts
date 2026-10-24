@@ -14,7 +14,7 @@ import {
 } from './diff.ts';
 
 export function validateSafeRelativePath(projectPath: string, relPath: string): string {
-  if (typeof relPath !== 'string' || relPath.includes('\0')) {
+  if (typeof relPath !== 'string' || relPath.includes('\0') || relPath.includes(':')) {
     throw new ApiValidationError('Invalid path.', 400);
   }
   const trimmed = relPath.trim();
@@ -31,7 +31,15 @@ export function validateSafeRelativePath(projectPath: string, relPath: string): 
 
   const normalized = trimmed.replace(/\//g, '\\');
   const parts = normalized.split('\\');
-  if (parts.some((p) => p === '..' || p.toLowerCase() === '.git')) {
+  if (
+    parts.some(
+      (p) =>
+        p === '..' ||
+        p.toLowerCase() === '.git' ||
+        p.endsWith('.') ||
+        p.endsWith(' ')
+    )
+  ) {
     throw new ApiValidationError('Invalid path.', 400);
   }
 
@@ -59,6 +67,11 @@ export function validateSafeRelativePath(projectPath: string, relPath: string): 
     if (!normTarget.startsWith(normBase + '\\') && normTarget !== normBase) {
       throw new ApiValidationError('Invalid path.', 400);
     }
+    const relFromProject = path.win32.relative(realProject, realTarget);
+    const realSegments = relFromProject.split('\\');
+    if (realSegments.some((s) => s.toLowerCase() === '.git')) {
+      throw new ApiValidationError('Invalid path.', 400);
+    }
   } else {
     // Only fall back to ancestor walk when realpathSync threw ENOENT (file does not yet exist)
     let cur = path.win32.dirname(targetCandidate);
@@ -76,6 +89,11 @@ export function validateSafeRelativePath(projectPath: string, relPath: string): 
       if (realCur !== null) {
         const normRealCur = realCur.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
         if (!normRealCur.startsWith(normBase + '\\') && normRealCur !== normBase) {
+          throw new ApiValidationError('Invalid path.', 400);
+        }
+        const relFromProject = path.win32.relative(realProject, realCur);
+        const realSegments = relFromProject.split('\\');
+        if (realSegments.some((s) => s.toLowerCase() === '.git')) {
           throw new ApiValidationError('Invalid path.', 400);
         }
         ancestorFound = true;
