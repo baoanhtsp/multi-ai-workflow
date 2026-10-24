@@ -119,7 +119,10 @@ $expectedFiles = @(
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-council-review.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\save-agentapi-env.ps1"),
     (Join-Path $env:USERPROFILE ".claude\CLAUDE.md"),
-    (Join-Path $env:USERPROFILE ".claude\commands\antigravity.md")
+    (Join-Path $env:USERPROFILE ".claude\commands\antigravity.md"),
+    (Join-Path $env:USERPROFILE ".codex\AGENTS.md"),
+    (Join-Path $env:USERPROFILE ".codex\skills\multi-ai-leader\SKILL.md"),
+    (Join-Path $env:USERPROFILE ".codex\skills\multi-ai-leader\agents\openai.yaml")
 )
 
 foreach ($f in $expectedFiles) {

@@ -19,11 +19,16 @@ $geminiTemplatesDir = Join-Path $geminiSkillDir "templates"
 $claudeDir = Join-Path $env:USERPROFILE ".claude"
 $claudeCommandsDir = Join-Path $claudeDir "commands"
 
+$codexDir = Join-Path $env:USERPROFILE ".codex"
+$codexSkillDir = Join-Path $codexDir "skills\multi-ai-leader"
+$codexSkillAgentsDir = Join-Path $codexSkillDir "agents"
+
 # 1. Create target directories
 New-Item -ItemType Directory -Force -Path $geminiRulesDir | Out-Null
 New-Item -ItemType Directory -Force -Path $geminiScriptsDir | Out-Null
 New-Item -ItemType Directory -Force -Path $geminiTemplatesDir | Out-Null
 New-Item -ItemType Directory -Force -Path $claudeCommandsDir | Out-Null
+New-Item -ItemType Directory -Force -Path $codexSkillAgentsDir | Out-Null
 
 # 2. Helper to replace hardcoded C:\Users\Admin with current user's $env:USERPROFILE
 function Copy-WithUserPath([string]$src, [string]$dest) {
@@ -55,8 +60,14 @@ if (Test-Path "$repoRoot\templates\SPEC.template.md") {
 Copy-WithUserPath "$repoRoot\claude\CLAUDE.md" "$claudeDir\CLAUDE.md"
 Copy-WithUserPath "$repoRoot\claude\commands\antigravity.md" "$claudeCommandsDir\antigravity.md"
 
+# 5. Install OpenAI Codex Global Memory & Skill ($multi-ai-leader)
+Copy-WithUserPath "$repoRoot\codex\AGENTS.md" "$codexDir\AGENTS.md"
+Copy-WithUserPath "$repoRoot\codex\skills\multi-ai-leader\SKILL.md" "$codexSkillDir\SKILL.md"
+Copy-WithUserPath "$repoRoot\codex\skills\multi-ai-leader\agents\openai.yaml" "$codexSkillAgentsDir\openai.yaml"
+
 Write-Host "`n[OK] Installed Antigravity Global Rules -> $geminiRulesDir\claude-leader-workflow.md" -ForegroundColor Green
 Write-Host "[OK] Installed Antigravity Skill (/claude-leader) -> $geminiSkillDir\SKILL.md" -ForegroundColor Green
 Write-Host "[OK] Installed Orchestration Scripts -> $geminiScriptsDir\" -ForegroundColor Green
 Write-Host "[OK] Installed Claude Code Memory & (/antigravity) -> $claudeDir\" -ForegroundColor Green
-Write-Host "`nDone! Restart or open a new conversation in Antigravity / Claude Code to use." -ForegroundColor Yellow
+Write-Host "[OK] Installed OpenAI Codex Memory & Skill (`$multi-ai-leader) -> $codexDir\" -ForegroundColor Green
+Write-Host "`nDone! Restart or open a new conversation in Antigravity / Claude Code / Codex to use." -ForegroundColor Yellow
