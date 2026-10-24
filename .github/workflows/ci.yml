@@ -1,0 +1,99 @@
+name: PowerShell Syntax & Installer CI
+
+on:
+  push:
+    branches:
+      - master
+      - main
+  pull_request:
+    branches:
+      - master
+      - main
+
+jobs:
+  validate-and-test:
+    name: Validate PowerShell AST & 1-Click Installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Validate PowerShell Scripts Syntax
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $scripts = Get-ChildItem -Path . -Recurse -Filter "*.ps1" -File
+          if (-not $scripts) {
+              throw "No PowerShell (*.ps1) scripts found in repository."
+          }
+
+          $hasSyntaxErrors = $false
+          foreach ($script in $scripts) {
+              $errors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$null, [ref]$errors)
+              if ($errors -and $errors.Count -gt 0) {
+                  $hasSyntaxErrors = $true
+                  Write-Host "❌ Syntax error(s) in $($script.FullName):" -ForegroundColor Red
+                  foreach ($err in $errors) {
+                      Write-Host "  Line $($err.Extent.StartLineNumber): $($err.Message)" -ForegroundColor Red
+                  }
+              } else {
+                  Write-Host "✅ Syntax OK: $($script.FullName)" -ForegroundColor Green
+              }
+          }
+
+          if ($hasSyntaxErrors) {
+              throw "PowerShell syntax validation failed."
+          }
+
+      - name: Verify Required Repository Structure
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $requiredFiles = @(
+              "README.md",
+              "LICENSE",
+              "install.ps1",
+              "doctor.ps1",
+              "templates/SPEC.template.md",
+              "antigravity/rules/claude-leader-workflow.md",
+              "antigravity/skills/claude-leader/SKILL.md",
+              "claude/CLAUDE.md",
+              "claude/commands/antigravity.md"
+          )
+
+          $missing = @()
+          foreach ($relPath in $requiredFiles) {
+              if (-not (Test-Path -LiteralPath $relPath -PathType Leaf)) {
+                  $missing += $relPath
+                  Write-Host "❌ Missing required file: $relPath" -ForegroundColor Red
+              } else {
+                  Write-Host "✅ Found required file: $relPath" -ForegroundColor Green
+              }
+          }
+
+          if ($missing.Count -gt 0) {
+              throw "Repository structure verification failed. Missing: $($missing -join ', ')"
+          }
+
+      - name: Test 1-Click Installer (install.ps1)
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          powershell -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
+          if ($LASTEXITCODE -ne 0) {
+              throw "install.ps1 exited with code $LASTEXITCODE"
+          }
+
+          $expectedTargets = @(
+              "$env:USERPROFILE\.gemini\config\skills\claude-leader\SKILL.md",
+              "$env:USERPROFILE\.claude\CLAUDE.md"
+          )
+
+          foreach ($target in $expectedTargets) {
+              if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
+                  throw "Installer verification failed: expected file not created at $target"
+              }
+              Write-Host "✅ Verified installed file: $target" -ForegroundColor Green
+          }
