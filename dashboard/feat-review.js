@@ -491,8 +491,9 @@
     syncParams();
     try {
       // Same diff options as the view, so the server finds the same hunk ids.
-      const r = await api('review_hunk', body({ path, hunk_id: hunkId || null, action, confirm: action === 'reject' ? true : undefined,
-        context: V.ctx, ignore_ws: V.ws }));
+      // file_id lets the server refuse a whole-file action on a file that changed since it was shown.
+      const r = await api('review_hunk', body({ path, hunk_id: hunkId || null, file_id: hunkId ? undefined : f?.id,
+        action, confirm: action === 'reject' ? true : undefined, context: V.ctx, ignore_ws: V.ws }));
       const st = session().states[path] ||= { file: null, hunks: {} };
       st.hunks ||= {};
       const mark = action === 'accept' ? 'accepted' : 'rejected';

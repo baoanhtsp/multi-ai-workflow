@@ -56,7 +56,8 @@ Common query params: `context` (0–20, default 3), `ignore_ws` (`1` ⇒ `-w`), 
 ```
 
 **`POST review_hunk { project_path, source, ref, base, path, hunk_id|null, action: "accept"|"reject"|"reset", confirm? }`**
-- The server re-runs the diff for that `path` and finds the hunk by id (`hunk_id: null` = the whole file). Not found ⇒ `409 "The diff changed; reload it."`.
+- The server re-runs the diff for that `path` (same `context` / `ignore_ws` as the view) and finds the hunk by id. `hunk_id: null` = the whole file and then `file_id` (each file in `review_diff` has `id` = sha1 of its raw diff, 12 hex) is required. Not found / different ⇒ `409 "The diff changed; reload it."`.
+- The safety snapshot fails closed: any git error ⇒ `409` before the working tree is touched.
 - `accept` / `reset`: only the review state changes (no git change).
 - `reject` (`confirm: true` required, `writable` required else `409`):
   1. **Safety snapshot** of `target_path` including untracked files: temp index (`GIT_INDEX_FILE=<tmp>` env), `git read-tree HEAD` (skip with no HEAD), `git add -A`, `git write-tree`, `git commit-tree <tree> [-p HEAD] -m "maw review safety <ts>"`, `git update-ref refs/maw/checkpoints/review-<yyyymmddHHMMSS>-<4 hex>/1 <commit>`. The real index is never touched.
@@ -208,7 +209,11 @@ Role outside the role set ⇒ `backend`; legacy `claude|codex` modes map to agen
 - Dialog: job summary + session ref, strategy chips (disabled ones show why), message box (Ctrl+Enter sends), optional model / effort for continue, the steer history of the chain (status badges, cancel for queued), and a live tail of the newest child job (polls `job_status`).
 - `MAW.ext.steer.open(job_id)` for S6.
 
-## 4. Requests to Tech Lead
+## 4. Accepted residual risks (local, single-user tool)
+- `files_read` / `files_tree` re-validate the canonical path right before opening it, but a junction swapped in between that check and the open could still be followed. The agents that could do this already have full file-system access, so it gives them nothing new.
+- Two simultaneous "Send feedback" submissions for one review can start two fix jobs (the UI disables the button while a request runs).
+
+## 5. Requests to Tech Lead
 0. **Feature routes with two methods**: allow a feature action to declare `GET` and `POST` (e.g. `methods: ['GET', 'POST']`), so read / write pairs like `files_config` do not have to be POST-only.
 1. **Tests**: let `npm test` also run `server/features/*/*.test.ts` (`node --test server/tests/*.test.ts server/features/*/*.test.ts`), so feature tests stay inside each stream's paths.
 2. **`MAW.watchJob(job_id)`** in `index.html`: attach the live job box (log, SSE, cancel, job actions) to an existing job id, so steer / fix jobs can be followed in the main log box. Until then the steer dialog shows its own tail.
