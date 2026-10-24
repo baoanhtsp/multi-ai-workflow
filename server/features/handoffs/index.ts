@@ -146,6 +146,9 @@ export const feature: MawFeature = {
               400
             );
           }
+          if (leadAgent.deleted_at !== null) {
+            throw new ApiValidationError('Agent deleted.', 409);
+          }
 
           let teamId = leadAgent.team_id;
           let memberAgent = agentsData.agents.find(
@@ -188,6 +191,17 @@ export const feature: MawFeature = {
                 a.workdir.toLowerCase() === leadAgent.workdir.toLowerCase() &&
                 (a.team_role === toRole || a.team_role === to || a.name.toLowerCase() === to.toLowerCase() || a.id === to)
             );
+          }
+
+          if (!memberAgent) {
+            const wasDeleted = agentsData.agents.find(
+              (a) =>
+                a.deleted_at !== null &&
+                (a.id === to || a.name.toLowerCase() === to.toLowerCase() || a.team_role === to || a.team_role === toRole)
+            );
+            if (wasDeleted) {
+              throw new ApiValidationError(`Target member agent '${to}' is deleted.`, 409);
+            }
           }
 
           const handoffsDir = ctx.paths.featureDataDir('handoffs');
@@ -347,6 +361,8 @@ export const feature: MawFeature = {
           handoff.parse_error = '';
           handoff.scope_violations = [];
           handoff.base_commit = undefined;
+          handoff.dirty_baseline = undefined;
+          handoff.baseline_error = undefined;
           handoff.lead_notified_at = undefined;
 
           await writeJsonStore(handoffsFile, handoffsData);

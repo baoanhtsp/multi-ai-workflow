@@ -1,4 +1,16 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { runCommand } from '../../../lib/proc.ts';
+
+export function hasGitRepo(dirPath: string): boolean {
+  if (!dirPath) return false;
+  const gitMarker = path.win32.join(dirPath, '.git');
+  try {
+    return fs.existsSync(gitMarker);
+  } catch {
+    return false;
+  }
+}
 
 export interface WorktreeChangedFilesResult {
   ok: boolean;
@@ -7,6 +19,13 @@ export interface WorktreeChangedFilesResult {
 }
 
 export async function getBaseCommit(worktreePath: string): Promise<string | null> {
+  const res = await getBaseCommitResult(worktreePath);
+  return res.commit;
+}
+
+export async function getBaseCommitResult(
+  worktreePath: string
+): Promise<{ ok: boolean; commit: string | null; error?: string }> {
   try {
     const res = await runCommand(
       'git.exe',
@@ -15,11 +34,11 @@ export async function getBaseCommit(worktreePath: string): Promise<string | null
     );
     if (res.code === 0 && res.stdout) {
       const commit = res.stdout.trim();
-      return commit || null;
+      return { ok: true, commit: commit || null };
     }
-    return null;
-  } catch {
-    return null;
+    return { ok: false, commit: null, error: res.stderr || 'rev-parse failed' };
+  } catch (err: unknown) {
+    return { ok: false, commit: null, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -169,6 +188,13 @@ export async function getNonIsolatedChangedFiles(
     if (!(file in baseMap)) {
       changed.add(file);
     } else if (baseMap[file] !== hash) {
+      changed.add(file);
+    }
+  }
+
+  // Item 2: Also count files that were dirty at baseline and became clean (reverted/deleted) as changed
+  for (const file of Object.keys(baseMap)) {
+    if (!(file in current.files)) {
       changed.add(file);
     }
   }

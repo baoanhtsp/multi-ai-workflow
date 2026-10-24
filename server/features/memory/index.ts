@@ -10,6 +10,7 @@ import {
   type MemoryEntry,
 } from '../agents-ws/lib/markdown-memory.ts';
 import { withS6State } from '../agents-ws/lib/mutex.ts';
+import { assertSafeProjectMawWrite } from '../agents-ws/lib/security.ts';
 import { appendAuditLog } from '../agents-ws/lib/store.ts';
 import type { MemoryContextResult } from './types.ts';
 
@@ -26,9 +27,15 @@ export async function addMemoryEntry(
     pinned?: boolean;
     source?: string;
     agent?: string;
-  }
+  },
+  projectsRoot?: string
 ): Promise<MemoryEntry> {
   return withS6State(async () => {
+    assertSafeProjectMawWrite(
+      projectPath,
+      path.join('.maw', 'memory', 'decisions.md'),
+      projectsRoot
+    );
     const filePath = getDecisionsFilePath(projectPath);
     let preamble = '# Project decisions\n';
     let entries: MemoryEntry[] = [];
@@ -222,14 +229,18 @@ export const feature: MawFeature = {
           }
         }
 
-        const newEntry = await addMemoryEntry(validPath, {
-          title,
-          body: entryBody,
-          tags,
-          pinned: Boolean(body.pinned),
-          source: typeof body.source === 'string' ? body.source.trim() : '',
-          agent: typeof body.agent === 'string' ? body.agent.trim() : '',
-        });
+        const newEntry = await addMemoryEntry(
+          validPath,
+          {
+            title,
+            body: entryBody,
+            tags,
+            pinned: Boolean(body.pinned),
+            source: typeof body.source === 'string' ? body.source.trim() : '',
+            agent: typeof body.agent === 'string' ? body.agent.trim() : '',
+          },
+          ctx.paths.projectsRoot
+        );
 
         return {
           ok: true,
@@ -309,6 +320,11 @@ export const feature: MawFeature = {
             target.tags = tags;
           }
 
+          assertSafeProjectMawWrite(
+            validPath,
+            path.join('.maw', 'memory', 'decisions.md'),
+            ctx.paths.projectsRoot
+          );
           const rendered = renderDecisionsMarkdown(preamble, entries);
           fs.writeFileSync(filePath, rendered, 'utf8');
 
@@ -350,6 +366,11 @@ export const feature: MawFeature = {
           }
 
           entries.splice(index, 1);
+          assertSafeProjectMawWrite(
+            validPath,
+            path.join('.maw', 'memory', 'decisions.md'),
+            ctx.paths.projectsRoot
+          );
           const rendered = renderDecisionsMarkdown(preamble, entries);
           fs.writeFileSync(filePath, rendered, 'utf8');
 

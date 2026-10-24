@@ -8,6 +8,7 @@ import { readConversationMessages, tick } from '../chat/tick.ts';
 import type { Conversation } from '../chat/types.ts';
 import type { Handoff } from '../handoffs/types.ts';
 import { AGENT_ID_REGEX, generateAgentId, generateGroupId, GROUP_ID_REGEX } from './lib/ids.ts';
+import { allowedModels } from './lib/models.ts';
 import { withS6State } from './lib/mutex.ts';
 import { appendAuditLog, readJsonStore, writeJsonStore } from './lib/store.ts';
 import type {
@@ -56,18 +57,12 @@ async function getCachedGitInfo(workdir: string): Promise<AgentGitStatus> {
 async function getPlatformsList(ctx: MawFeatureContext, forceRefresh = false): Promise<PlatformInfo[]> {
   const registry = ctx.registry;
   const versions = await getDetectedToolVersions(ctx.paths.userProfile);
-  const codexModels = getCodexModels(ctx.paths.userProfile);
   const enabledAgents = registry.agents;
   const detectedMap = await detectRegistryAgents(ctx.paths, enabledAgents, versions);
 
   return enabledAgents.map((entry) => {
     const det = detectedMap.get(entry.id) ?? { installed: false, version: null };
-    const models = [...entry.models];
-    if (entry.id === 'codex') {
-      for (const cm of codexModels) {
-        if (!models.includes(cm)) models.push(cm);
-      }
-    }
+    const models = allowedModels(ctx, entry.id);
     return {
       id: entry.id,
       label: entry.label,
@@ -107,9 +102,10 @@ function validateAgentFields(agent: Agent, ctx: MawFeatureContext): void {
   }
 
   const model = String(agent.model ?? '').trim();
-  if (model && !registryAgent.models.includes(model)) {
+  const allowed = allowedModels(ctx, platform);
+  if (model && !allowed.includes(model)) {
     throw new ApiValidationError(
-      `Invalid model '${model}' for platform '${platform}'. Allowed: ${registryAgent.models.join(', ')}.`,
+      `Invalid model '${model}' for platform '${platform}'. Allowed: ${allowed.join(', ')}.`,
       400
     );
   }

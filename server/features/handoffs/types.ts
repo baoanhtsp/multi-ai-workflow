@@ -39,5 +39,6 @@ export interface Handoff {
   attempts: number;
   base_commit?: string;
   dirty_baseline?: Record<string, string>;
+  baseline_error?: boolean;
   lead_notified_at?: string;
 }

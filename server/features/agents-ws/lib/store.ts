@@ -62,24 +62,31 @@ export async function writeJsonStore<T>(filePath: string, data: T): Promise<void
 
     let renamed = false;
     let attempts = 0;
-    while (!renamed && attempts < 5) {
+    // Item 5: Never copy onto live file. Retry rename with backoff up to ~1s, then throw.
+    const maxAttempts = 10;
+    let lastError: unknown = null;
+
+    while (!renamed && attempts < maxAttempts) {
       try {
         fs.renameSync(tempFile, filePath);
         renamed = true;
       } catch (err: unknown) {
+        lastError = err;
         attempts++;
-        if (attempts >= 5) {
-          try {
-            fs.copyFileSync(tempFile, filePath);
-            fs.unlinkSync(tempFile);
-            renamed = true;
-          } catch {
-            throw err;
-          }
-        } else {
-          await new Promise((r) => setTimeout(r, 10));
+        if (attempts < maxAttempts) {
+          const delayMs = Math.min(20 * attempts, 150);
+          await new Promise((r) => setTimeout(r, delayMs));
         }
       }
+    }
+
+    if (!renamed) {
+      try {
+        if (fs.existsSync(tempFile)) {
+          fs.unlinkSync(tempFile);
+        }
+      } catch {}
+      throw lastError instanceof Error ? lastError : new Error(String(lastError));
     }
   });
 }

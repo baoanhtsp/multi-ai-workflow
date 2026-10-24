@@ -6,8 +6,10 @@ import type { MawFeature } from '../../lib/feature.ts';
 import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { CONVERSATION_ID_REGEX, generateConversationId, generateMessageId, generateQueueId } from '../agents-ws/lib/ids.ts';
+import { allowedModels } from '../agents-ws/lib/models.ts';
 import { withS6State } from '../agents-ws/lib/mutex.ts';
 import { getMaxMessageCharsForAgent } from '../agents-ws/lib/prompt.ts';
+import { assertSafeProjectMawWrite } from '../agents-ws/lib/security.ts';
 import { appendAuditLog, readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent } from '../agents-ws/types.ts';
 import {
@@ -313,6 +315,9 @@ export const feature: MawFeature = {
           if (!agent) {
             throw new ApiValidationError(`Agent '${conv.agent_id}' not found.`, 404);
           }
+          if (agent.deleted_at !== null) {
+            throw new ApiValidationError('Agent deleted.', 409);
+          }
 
           const maxAllowedChars = getMaxMessageCharsForAgent({
             name: agent.name,
@@ -352,9 +357,10 @@ export const feature: MawFeature = {
             }
           }
 
-          if (targetModel && !registryAgent.models.includes(targetModel)) {
+          const allowed = allowedModels(ctx, targetPlatform);
+          if (targetModel && !allowed.includes(targetModel)) {
             throw new ApiValidationError(
-              `Invalid model '${targetModel}'. Allowed: ${registryAgent.models.join(', ')}.`,
+              `Invalid model '${targetModel}'. Allowed: ${allowed.join(', ')}.`,
               400
             );
           }
@@ -409,6 +415,8 @@ export const feature: MawFeature = {
               if (buf.length > 150 * 1024) {
                 throw new ApiValidationError(`Attachment '${name}' exceeds 150 KB limit.`, 400);
               }
+              const subPath = path.join('.maw', 'attachments', conv.id, `${i + 1}-${name}`);
+              assertSafeProjectMawWrite(agent.workdir, subPath, ctx.paths.projectsRoot);
               const savePath = path.win32.join(attachDir, `${i + 1}-${name}`);
               fs.writeFileSync(savePath, buf);
               const relPath = `.maw/attachments/${conv.id}/${i + 1}-${name}`;

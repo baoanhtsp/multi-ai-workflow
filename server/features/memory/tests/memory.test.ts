@@ -167,3 +167,36 @@ test('memory: [memory] getMemoryContext excludes unpinned entries with score 0',
   assert.ok(searchRes.text.includes('Code style guidelines'));
   assert.ok(!searchRes.text.includes('Database connection pooling'));
 });
+
+test('memory: [Item 3] memory_add rejects junction escape on .maw with 400', async () => {
+  const { makeReq, testProj } = setupTestContext();
+
+  const outsideDir = path.join(os.tmpdir(), 'evil-mem-outside-' + Date.now());
+  fs.mkdirSync(outsideDir, { recursive: true });
+  const dotMaw = path.join(testProj, '.maw');
+
+  let junctionCreated = false;
+  try {
+    fs.symlinkSync(outsideDir, dotMaw, 'junction');
+    junctionCreated = true;
+  } catch {}
+
+  if (junctionCreated) {
+    try {
+      const addReq = makeReq({
+        project_path: testProj,
+        title: 'ADR with junction escape',
+        body: 'This should be refused with 400',
+      });
+      await assert.rejects(
+        async () => {
+          await feature.routes['memory_add']!.handler(addReq, addReq);
+        },
+        (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+      );
+    } finally {
+      try { fs.unlinkSync(dotMaw); } catch {}
+      try { fs.rmdirSync(outsideDir); } catch {}
+    }
+  }
+});

@@ -407,3 +407,108 @@ test('teams: [Item 4] apply Full Team in two projects -> two team ids, two group
   }
 });
 
+test('teams: [Item 6] team_save accepts detected Codex model in shared.model and override.model', async () => {
+  const { makeReq, testProj, paths } = setupTestContext();
+
+  const codexDir = path.join(paths.userProfile, '.codex');
+  fs.mkdirSync(codexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, 'models_cache.json'),
+    JSON.stringify({ models: [{ slug: 'gpt-5-codex-team' }] }),
+    'utf8'
+  );
+
+  const req = makeReq({
+    project_path: testProj,
+    team: {
+      ...BUILTIN_FULL_TEMPLATE.team,
+      shared: {
+        ...BUILTIN_FULL_TEMPLATE.team.shared,
+        platform: 'codex',
+        model: 'gpt-5-codex-team',
+        workdir: testProj,
+      },
+      roles: BUILTIN_FULL_TEMPLATE.team.roles.map((r, i) =>
+        i === 0
+          ? {
+              ...r,
+              override: {
+                ...r.override,
+                platform: 'codex',
+                model: 'gpt-5-codex-team',
+              },
+            }
+          : r
+      ),
+    },
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+
+  const res = (await feature.routes['team_save']!.handler(req, req)) as any;
+  assert.equal(res.ok, true);
+  assert.equal(res.team.shared.model, 'gpt-5-codex-team');
+  assert.equal(res.team.roles[0].override.model, 'gpt-5-codex-team');
+});
+
+test('teams: [Item 3] team_save and team_import reject junction escape on .maw with 400', async () => {
+  const { makeReq, testProj } = setupTestContext();
+
+  const outsideDir = path.join(os.tmpdir(), 'evil-team-outside-' + Date.now());
+  fs.mkdirSync(outsideDir, { recursive: true });
+  const dotMaw = path.join(testProj, '.maw');
+
+  let junctionCreated = false;
+  try {
+    fs.symlinkSync(outsideDir, dotMaw, 'junction');
+    junctionCreated = true;
+  } catch {}
+
+  if (junctionCreated) {
+    try {
+      const saveReq = makeReq({
+        project_path: testProj,
+        team: {
+          ...BUILTIN_FULL_TEMPLATE.team,
+          shared: {
+            ...BUILTIN_FULL_TEMPLATE.team.shared,
+            workdir: testProj,
+          },
+        },
+        roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+      });
+
+      await assert.rejects(
+        async () => {
+          await feature.routes['team_save']!.handler(saveReq, saveReq);
+        },
+        (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+      );
+
+      const importReq = makeReq({
+        project_path: testProj,
+        bundle: {
+          kind: 'maw-team',
+          version: 1,
+          team: {
+            ...BUILTIN_FULL_TEMPLATE.team,
+            shared: {
+              ...BUILTIN_FULL_TEMPLATE.team.shared,
+              workdir: testProj,
+            },
+          },
+          roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+        },
+      });
+      await assert.rejects(
+        async () => {
+          await feature.routes['team_import']!.handler(importReq, importReq);
+        },
+        (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+      );
+    } finally {
+      try { fs.unlinkSync(dotMaw); } catch {}
+      try { fs.rmdirSync(outsideDir); } catch {}
+    }
+  }
+});
+

@@ -11,7 +11,7 @@ import { feature as agentsFeature } from '../../agents-ws/index.ts';
 import { isS6StateLocked, s6StateStorage, withS6State } from '../../agents-ws/lib/mutex.ts';
 import { buildPrompt } from '../../agents-ws/lib/prompt.ts';
 import { feature } from '../index.ts';
-import { ensureTickStarted, resetTickTimerForTest, tick } from '../tick.ts';
+import { ensureTickStarted, readConversationMessages, resetTickTimerForTest, tick } from '../tick.ts';
 
 function setupChatTestContext() {
   const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), 'maw space chat test '));
@@ -1011,6 +1011,180 @@ test('chat: [Item 7] compaction prompt truncates history messages to 3000 chars 
     false,
     'Prompt must not contain more than 3000 chars of the message'
   );
+});
+
+test('chat: [Item 4] chat_send rejects soft-deleted agent with 409', async () => {
+  const { makeReq, testProj, baseCtx } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: {
+      name: 'Agent to delete',
+      platform: 'codex',
+      model: '',
+      workdir: testProj,
+    },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const agentId = agRes.agent.id;
+
+  const convReq = makeReq({ agent_id: agentId });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // Soft-delete the agent
+  const delReq = makeReq({ id: agentId });
+  await agentsFeature.routes['ws_agent_delete']!.handler(delReq, delReq);
+
+  // Attempt chat_send
+  await assert.rejects(
+    async () => {
+      const sendReq = makeReq({ conversation_id: convId, text: 'Hello after delete' });
+      await feature.routes['chat_send']!.handler(sendReq, sendReq);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409 && err.message.includes('deleted')
+  );
+});
+
+test('chat: [Item 4] queue runner drops queued turn for soft-deleted agent with system message', async () => {
+  const { makeReq, testProj, baseCtx } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: {
+      name: 'Agent queued delete',
+      platform: 'codex',
+      model: '',
+      workdir: testProj,
+    },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const agentId = agRes.agent.id;
+
+  const convReq = makeReq({ agent_id: agentId });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // Manually push an item into the conversation queue
+  const chatDir = baseCtx.paths.featureDataDir('chat');
+  const convsFile = path.win32.join(chatDir, 'conversations.json');
+  const convsData = JSON.parse(fs.readFileSync(convsFile, 'utf8'));
+  const conv = convsData.conversations.find((c: any) => c.id === convId);
+  assert.ok(conv);
+  conv.queue.push({
+    id: 'q_test1',
+    text: 'Queued turn before delete',
+    ts: new Date(Date.now() - 5000).toISOString(),
+  });
+  fs.writeFileSync(convsFile, JSON.stringify(convsData), 'utf8');
+
+  // Soft delete agent
+  const delReq = makeReq({ id: agentId });
+  await agentsFeature.routes['ws_agent_delete']!.handler(delReq, delReq);
+
+  // Run tick to process queue
+  await tick(baseCtx);
+
+  // Verify queue was dropped
+  const convsDataAfter = JSON.parse(fs.readFileSync(convsFile, 'utf8'));
+  const convAfter = convsDataAfter.conversations.find((c: any) => c.id === convId);
+  assert.equal(convAfter.queue.length, 0, 'Queue item must be dropped');
+
+  // Verify system message was appended
+  const msgs = readConversationMessages(chatDir, convId);
+  const sysMsg = msgs.find((m) => m.role === 'system' && m.text.includes('Agent deleted'));
+  assert.ok(sysMsg, 'System message explaining queue drop must be recorded');
+});
+
+test('chat: [Item 6] chat_send accepts detected Codex model from getCodexModels', async () => {
+  const { makeReq, testProj, baseCtx } = setupChatTestContext();
+
+  // Write detected model to models_cache.json in userProfile
+  const codexDir = path.join(baseCtx.paths.userProfile, '.codex');
+  fs.mkdirSync(codexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, 'models_cache.json'),
+    JSON.stringify({ models: [{ slug: 'gpt-5-codex-chat' }] }),
+    'utf8'
+  );
+
+  const agReq = makeReq({
+    agent: {
+      name: 'Codex Chat Agent',
+      platform: 'codex',
+      model: '',
+      workdir: testProj,
+    },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const agentId = agRes.agent.id;
+
+  const convReq = makeReq({ agent_id: agentId });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // Send message specifying the detected model
+  const sendReq = makeReq({
+    conversation_id: convId,
+    text: 'Testing detected model send',
+    platform: 'codex',
+    model: 'gpt-5-codex-chat',
+  });
+  const sendRes = (await feature.routes['chat_send']!.handler(sendReq, sendReq)) as any;
+  assert.equal(sendRes.ok, true);
+  const getRes = (await feature.routes['chat_get']!.handler(makeReq({}, { conversation_id: convId }), makeReq())) as any;
+  assert.equal(getRes.conversation.model, 'gpt-5-codex-chat');
+});
+
+test('chat: [Item 3] chat_send rejects attachment write if .maw/attachments escapes via junction', async () => {
+  const { makeReq, testProj, baseCtx } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: {
+      name: 'Attachment Agent',
+      platform: 'claude',
+      model: '',
+      workdir: testProj,
+    },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const agentId = agRes.agent.id;
+
+  const convReq = makeReq({ agent_id: agentId });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // Create junction from .maw to outside dir
+  const outsideDir = path.join(os.tmpdir(), 'evil-att-outside-' + Date.now());
+  fs.mkdirSync(outsideDir, { recursive: true });
+  const dotMaw = path.join(testProj, '.maw');
+  let junctionCreated = false;
+  try {
+    fs.symlinkSync(outsideDir, dotMaw, 'junction');
+    junctionCreated = true;
+  } catch {}
+
+  if (junctionCreated) {
+    try {
+      const sendReq = makeReq({
+        conversation_id: convId,
+        text: 'Message with evil attachment',
+        attachments: [
+          {
+            name: 'test.png',
+            data_url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP6zwAAAgcBApocMXEAAAAASUVORK5CYII=',
+          },
+        ],
+      });
+      await assert.rejects(
+        async () => {
+          await feature.routes['chat_send']!.handler(sendReq, sendReq);
+        },
+        (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+      );
+    } finally {
+      try { fs.unlinkSync(dotMaw); } catch {}
+      try { fs.rmdirSync(outsideDir); } catch {}
+    }
+  }
 });
 
 

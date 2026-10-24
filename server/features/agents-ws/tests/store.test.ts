@@ -7,6 +7,8 @@ import { createFeatureContext, type MawFeatureRequest } from '../../../lib/featu
 import { resolveServerPaths } from '../../../lib/paths.ts';
 import { ApiValidationError } from '../../../lib/validate.ts';
 import { feature } from '../index.ts';
+import { assertSafeProjectMawWrite } from '../lib/security.ts';
+import { writeJsonStore } from '../lib/store.ts';
 
 function setupTestContext() {
   const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), 'maw space test '));
@@ -259,5 +261,113 @@ test('store: [Item 3] corrupt store file is renamed to .corrupt-<timestamp>, aud
   const corruptAudit = auditLines.find((e) => e.action === 'store_corrupt' && e.target === 'agents.json');
   assert.ok(corruptAudit, 'audit log must record store_corrupt event for agents.json');
   assert.ok(corruptAudit.detail.backup.includes(corruptFile));
+});
+
+test('store: [Item 5] writeJsonStore never copies onto live file, retries with backoff and throws on lock, old file stays intact', async () => {
+  const { paths } = setupTestContext();
+  const testDir = paths.featureDataDir('agents-ws');
+  fs.mkdirSync(testDir, { recursive: true });
+  const liveFile = path.win32.join(testDir, 'locked-store.json');
+
+  const originalContent = { version: 1, items: ['original'] };
+  fs.writeFileSync(liveFile, JSON.stringify(originalContent, null, 2), 'utf8');
+
+  const origRenameSync = fs.renameSync;
+  let attempts = 0;
+  fs.renameSync = (oldP: fs.PathLike, newP: fs.PathLike) => {
+    attempts++;
+    const err = new Error('EBUSY: resource locked or busy');
+    (err as any).code = 'EBUSY';
+    throw err;
+  };
+
+  try {
+    await assert.rejects(
+      async () => {
+        await writeJsonStore(liveFile, { version: 2, items: ['corrupted-attempt'] });
+      },
+      /EBUSY/
+    );
+  } finally {
+    fs.renameSync = origRenameSync;
+  }
+
+  assert.ok(attempts >= 10, `Expected at least 10 attempts, got ${attempts}`);
+  const preservedContent = JSON.parse(fs.readFileSync(liveFile, 'utf8'));
+  assert.deepEqual(preservedContent, originalContent, 'Live file must remain intact and not overwritten');
+});
+
+test('store: [Item 3] assertSafeProjectMawWrite blocks symlink / junction escape', async () => {
+  const { testProj, paths } = setupTestContext();
+  const evilOutsideDir = path.join(os.tmpdir(), 'evil-maw-' + Date.now());
+  fs.mkdirSync(evilOutsideDir, { recursive: true });
+
+  const dotMaw = path.join(testProj, '.maw');
+  let junctionCreated = false;
+  try {
+    fs.symlinkSync(evilOutsideDir, dotMaw, 'junction');
+    junctionCreated = true;
+  } catch {
+    // If privileges don't allow creating junctions, test path component traversal
+  }
+
+  if (junctionCreated) {
+    try {
+      assert.throws(
+        () => {
+          assertSafeProjectMawWrite(testProj, path.join('.maw', 'team.json'), paths.projectsRoot);
+        },
+        (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+      );
+    } finally {
+      try { fs.unlinkSync(dotMaw); } catch {}
+      try { fs.rmdirSync(evilOutsideDir); } catch {}
+    }
+  } else {
+    // Non-junction boundary escape test
+    assert.throws(
+      () => {
+        assertSafeProjectMawWrite(testProj, '..\\outside.json', paths.projectsRoot);
+      },
+      (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+    );
+  }
+});
+
+test('store: [Item 6] ws_platforms and ws_agent_save accept detected Codex models from getCodexModels', async () => {
+  const { makeReq, testProj, paths } = setupTestContext();
+
+  // Create models_cache.json in userProfile/.codex to simulate detected models
+  const codexDir = path.join(paths.userProfile, '.codex');
+  fs.mkdirSync(codexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, 'models_cache.json'),
+    JSON.stringify({ models: [{ slug: 'gpt-5-codex-detected' }] }),
+    'utf8'
+  );
+
+  // 1. ws_platforms returns detected model
+  const platReq = makeReq();
+  const platRes = (await feature.routes['ws_platforms']!.handler(platReq, platReq)) as any;
+  assert.equal(platRes.ok, true);
+  const codexPlat = platRes.platforms.find((p: any) => p.id === 'codex');
+  assert.ok(codexPlat, 'codex platform must be present');
+  assert.ok(
+    codexPlat.models.includes('gpt-5-codex-detected'),
+    'ws_platforms must include detected codex model'
+  );
+
+  // 2. ws_agent_save accepts this model
+  const saveReq = makeReq({
+    agent: {
+      name: 'Codex Detected Model Agent',
+      platform: 'codex',
+      model: 'gpt-5-codex-detected',
+      workdir: testProj,
+    },
+  });
+  const saveRes = (await feature.routes['ws_agent_save']!.handler(saveReq, saveReq)) as any;
+  assert.equal(saveRes.ok, true);
+  assert.equal(saveRes.agent.model, 'gpt-5-codex-detected');
 });
 

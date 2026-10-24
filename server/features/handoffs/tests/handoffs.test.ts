@@ -8,7 +8,8 @@ import { createFeatureContext, type MawFeatureRequest } from '../../../lib/featu
 import { resolveServerPaths } from '../../../lib/paths.ts';
 import { runCommand } from '../../../lib/proc.ts';
 import { ApiValidationError } from '../../../lib/validate.ts';
-import { getBaseCommit, getWorktreeChangedFiles } from '../../agents-ws/lib/git.ts';
+import { feature as agentsFeature } from '../../agents-ws/index.ts';
+import { getBaseCommit, getNonIsolatedChangedFiles, getWorktreeChangedFiles } from '../../agents-ws/lib/git.ts';
 import { feature as chatFeature } from '../../chat/index.ts';
 import { setWorktreeFeatureCheckerForTest, tick } from '../../chat/tick.ts';
 import { BUILTIN_FULL_TEMPLATE } from '../../teams/defaults.ts';
@@ -949,6 +950,215 @@ test('handoffs: [Item 4] SPEC Guard error in isolated path marks handoff needs_r
   assert.ok(
     h.parse_error && h.parse_error.includes('SPEC Guard could not run'),
     `parse_error must indicate SPEC Guard failure, got: ${h.parse_error}`
+  );
+});
+
+test('handoffs: [Item 1] parallel dispatch only with confirmed isolation; unconfirmed isolation runs one at a time', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply, setNextJobStatus, setNextWorktree } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: {
+      ...BUILTIN_FULL_TEMPLATE.team,
+      shared: {
+        ...BUILTIN_FULL_TEMPLATE.team.shared,
+        workdir: testProj,
+        max_parallel: 2,
+      },
+    },
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  // Make sure worktrees feature is reported as available
+  setWorktreeFeatureCheckerForTest(() => true);
+
+  // Job 1 stays running without confirmed worktree
+  setNextJobStatus('RUNNING');
+  setNextWorktree('');
+
+  // Dispatch handoff 1 (starts and becomes running)
+  const dispReq1 = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Task 1',
+  });
+  const dispRes1 = (await feature.routes['handoff_dispatch']!.handler(dispReq1, dispReq1)) as any;
+
+  // Dispatch handoff 2 while job 1 is running unconfirmed
+  const dispReq2 = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'testing',
+    task: 'Task 2',
+  });
+  const dispRes2 = (await feature.routes['handoff_dispatch']!.handler(dispReq2, dispReq2)) as any;
+
+  const listRes1 = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const h1 = listRes1.handoffs.find((h: any) => h.id === dispRes1.handoff.id);
+  const h2 = listRes1.handoffs.find((h: any) => h.id === dispRes2.handoff.id);
+
+  assert.equal(h1.status, 'running', 'H1 must be running');
+  assert.equal(h1.isolated, false, 'H1 must NOT be isolated since job meta had no worktree');
+  assert.equal(h2.status, 'started', 'H2 must remain started while unconfirmed H1 is running');
+
+  // Finish H1 by updating its job meta and log
+  const jobMetaFile = path.win32.join(baseCtx.paths.jobsDir, `${h1.job_id}.json`);
+  const jobLogFile = path.win32.join(baseCtx.paths.jobsDir, `${h1.job_id}.log`);
+  fs.writeFileSync(jobMetaFile, JSON.stringify({ status: 'DONE', exit_code: 0 }), 'utf8');
+  fs.writeFileSync(jobLogFile, `
+--------------------------------------------------
+[Connected] Model: test-model
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Finished H1",
+  "files_changed": []
+}
+\`\`\`
+[Completed | Tokens: 250 in / 100 out | Cost: $0.0080]
+=== [JOB_FINISHED exit_code=0] ===
+`, 'utf8');
+
+  await tick(baseCtx); // H1 finishes, and H2 starts!
+
+  const listRes2 = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const h1After = listRes2.handoffs.find((h: any) => h.id === dispRes1.handoff.id);
+  const h2After = listRes2.handoffs.find((h: any) => h.id === dispRes2.handoff.id);
+  assert.equal(h1After.status, 'completed');
+  assert.equal(h2After.status, 'running', 'H2 now runs after H1 completes');
+});
+
+test('handoffs: [Item 2] write-scope checks fail closed: git baseline failure marks handoff needs_review with parse_error', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply } = setupHandoffTestContext();
+
+  // Initialize git repo in testProj WITHOUT initial commit (rev-parse HEAD will fail)
+  await runCommand('git.exe', ['-C', testProj, 'init']);
+  await runCommand('git.exe', ['-C', testProj, 'config', 'user.name', 'Tester']);
+  await runCommand('git.exe', ['-C', testProj, 'config', 'user.email', 'test@example.com']);
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: {
+      ...BUILTIN_FULL_TEMPLATE.team,
+      shared: {
+        ...BUILTIN_FULL_TEMPLATE.team.shared,
+        workdir: testProj,
+      },
+    },
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  setNextReply(`
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Completed task",
+  "files_changed": []
+}
+\`\`\`
+`);
+
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Task with baseline failure',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  const handoffId = dispRes.handoff.id;
+
+  // Tick 1 was run inside dispatch. Run tick to process completion.
+  await tick(baseCtx);
+
+  const listRes = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const h = listRes.handoffs.find((item: any) => item.id === handoffId);
+  assert.ok(h);
+  assert.equal(h.status, 'needs_review', 'Handoff must be needs_review when baseline error is flagged');
+  assert.equal(h.parse_error, 'could not list changed files');
+});
+
+test('handoffs: [Item 2] non-isolated write-scope checks count files dirty at baseline that became clean as changed', async () => {
+  const tempRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'maw-dirty-clean-'));
+  await runCommand('git.exe', ['-C', tempRepo, 'init']);
+  await runCommand('git.exe', ['-C', tempRepo, 'config', 'user.name', 'Tester']);
+  await runCommand('git.exe', ['-C', tempRepo, 'config', 'user.email', 'test@example.com']);
+  fs.writeFileSync(path.join(tempRepo, 'init.txt'), 'init\n');
+  await runCommand('git.exe', ['-C', tempRepo, 'add', '.']);
+  await runCommand('git.exe', ['-C', tempRepo, 'commit', '-m', 'init commit']);
+
+  const baseCommit = await getBaseCommit(tempRepo);
+  assert.ok(baseCommit);
+
+  // Baseline has dirty file 'reverted.txt'
+  const baseline = {
+    'reverted.txt': 'hash_12345',
+  };
+
+  // Currently, reverted.txt is not dirty (clean / reverted to committed state or deleted)
+  const changedRes = await getNonIsolatedChangedFiles(tempRepo, baseCommit, baseline);
+  assert.equal(changedRes.ok, true);
+  assert.ok(
+    changedRes.files.includes('reverted.txt'),
+    'Files dirty at baseline that became clean must be counted as changed'
+  );
+});
+
+test('handoffs: [Item 4] handoff_dispatch rejects soft-deleted agent with 409', async () => {
+  const { makeReq, testProj } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: {
+      ...BUILTIN_FULL_TEMPLATE.team,
+      shared: {
+        ...BUILTIN_FULL_TEMPLATE.team.shared,
+        workdir: testProj,
+      },
+    },
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+  const workerAgent = applyRes.agents.find((a: any) => a.team_role === 'worker');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  // Soft-delete worker agent
+  const delReq = makeReq({ id: workerAgent.id });
+  await agentsFeature.routes['ws_agent_delete']!.handler(delReq, delReq);
+
+  // Attempt dispatch to deleted agent
+  await assert.rejects(
+    async () => {
+      const dispReq = makeReq({
+        lead_conversation_id: leadConvId,
+        to: workerAgent.id,
+        task: 'Task for deleted agent',
+      });
+      await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409
   );
 });
 

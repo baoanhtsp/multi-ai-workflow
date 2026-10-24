@@ -6,9 +6,11 @@ import type { MawFeatureContext } from '../../lib/feature.ts';
 import { isFileSafe } from '../../lib/paths.ts';
 import {
   getBaseCommit,
+  getBaseCommitResult,
   getDirtyFilesWithHashes,
   getNonIsolatedChangedFiles,
   getWorktreeChangedFiles,
+  hasGitRepo,
   type WorktreeChangedFilesResult,
 } from '../agents-ws/lib/git.ts';
 import { matchesAnyScope } from '../agents-ws/lib/glob.ts';
@@ -835,14 +837,17 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         let finalStatus: HandoffStatus = h.result.status;
         const targetAgent = agentsData.agents.find((a) => a.id === h.to);
         const checkDir = h.worktree || targetAgent?.workdir || '';
-        if (checkDir) {
+        if (checkDir && hasGitRepo(checkDir)) {
           let changedRes: WorktreeChangedFilesResult;
-          if (h.isolated && h.worktree) {
+          // Item 2 (Pass 4): Write-scope checks must fail closed: if git baseline or end-of-job listing cannot be collected, go to needs_review
+          if (h.baseline_error) {
+            changedRes = { ok: false, files: [], error: 'could not list changed files' };
+          } else if (h.isolated && h.worktree) {
             changedRes = await getWorktreeChangedFiles(h.worktree, h.base_commit);
           } else if (h.base_commit || h.dirty_baseline) {
             changedRes = await getNonIsolatedChangedFiles(checkDir, h.base_commit, h.dirty_baseline);
           } else {
-            changedRes = { ok: true, files: [] };
+            changedRes = { ok: false, files: [], error: 'could not list changed files' };
           }
 
           if (!changedRes.ok) {
@@ -969,6 +974,14 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         break;
       }
 
+      // Item 1 (Codex Pass 4): Parallel dispatch only with CONFIRMED isolation:
+      // If ANY running handoff for this team does not carry confirmed isolation (h.isolated && h.worktree),
+      // we must run one at a time and cannot dispatch another handoff!
+      const teamRunning = handoffsList.filter((item) => item.status === 'running' && item.team_id === h.team_id);
+      if (teamRunning.length > 0 && !teamRunning.every((item) => item.isolated && item.worktree)) {
+        break;
+      }
+
       let memberAgent = agentsData.agents.find((a) => a.id === h.to && a.deleted_at === null);
       if (!memberAgent) {
         memberAgent = agentsData.agents.find(
@@ -987,11 +1000,19 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       if (memberAgent) {
         h.to = memberAgent.id;
       } else {
+        const wasDeleted = agentsData.agents.find(
+          (a) =>
+            a.deleted_at !== null &&
+            (a.id === h.to || a.name.toLowerCase() === h.to.toLowerCase() || a.team_role === h.to_role)
+        );
+        const errMsg = wasDeleted
+          ? `Member agent '${h.to}' is deleted.`
+          : `Member agent '${h.to}' not found.`;
         await finalizeHandoff(
           ctx,
           h,
           'failed',
-          { error: `Member agent '${h.to}' not found.` },
+          { error: errMsg },
           convsData,
           handoffsData
         );
@@ -1120,12 +1141,20 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       // Record base_commit and dirty_baseline (for non-isolated attributing)
       let baseCommit: string | null = null;
       let dirtyBaseline: Record<string, string> | undefined;
-      if (memberAgent.workdir) {
-        baseCommit = await getBaseCommit(memberAgent.workdir);
+      let baselineError = false;
+      if (memberAgent.workdir && hasGitRepo(memberAgent.workdir)) {
+        const commitRes = await getBaseCommitResult(memberAgent.workdir);
+        if (!commitRes.ok) {
+          baselineError = true;
+        } else {
+          baseCommit = commitRes.commit;
+        }
         if (!isolate) {
           const dirtyRes = await getDirtyFilesWithHashes(memberAgent.workdir);
           if (dirtyRes.ok) {
             dirtyBaseline = dirtyRes.files;
+          } else {
+            baselineError = true;
           }
         }
       }
@@ -1152,6 +1181,32 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         if (dirtyBaseline) {
           h.dirty_baseline = dirtyBaseline;
         }
+        if (baselineError) {
+          h.baseline_error = true;
+        }
+
+        // Item 1 (Codex Pass 4): Parallel dispatch only with CONFIRMED isolation:
+        // read job meta; only when it carries a `worktree` treat the member/team as isolated.
+        // Otherwise (or until confirmed) run that team's handoffs one at a time and use the shared-folder attribution path.
+        let isConfirmedIsolated = false;
+        if (h.job_id) {
+          const jobMetaFile = path.win32.join(ctx.paths.jobsDir, `${h.job_id}.json`);
+          if (isFileSafe(jobMetaFile)) {
+            try {
+              const meta = JSON.parse(fs.readFileSync(jobMetaFile, 'utf8')) as JobMeta & { worktree?: string };
+              if (meta.worktree) {
+                h.worktree = meta.worktree;
+                h.isolated = true;
+                isConfirmedIsolated = true;
+              }
+            } catch {}
+          }
+        }
+        if (!isConfirmedIsolated) {
+          h.isolated = false;
+          h.worktree = '';
+        }
+
         runningCount++;
         handoffsDirty = true;
 
@@ -1161,6 +1216,11 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         if (lastM && lastM.id === memberTaskMsg.id) {
           lastM.job_id = h.job_id;
           updateConversationMessages(chatDir, memberConv.id, memberMsgs);
+        }
+
+        if (!isConfirmedIsolated) {
+          // Team is not isolated in separate worktrees; run one at a time
+          break;
         }
       } catch (err: unknown) {
         // Item 8: start error routes through finalizeHandoff
@@ -1188,7 +1248,31 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
     convsDirty = true;
 
     const agent = agentsData.agents.find((a) => a.id === conv.agent_id);
-    if (!agent) {
+    if (!agent || agent.deleted_at !== null) {
+      conv.seq++;
+      const sysMsg: Message = {
+        seq: conv.seq,
+        id: generateMessageId(),
+        role: 'system',
+        text: 'Agent deleted. Queued message was dropped.',
+        ts: new Date().toISOString(),
+        platform: conv.platform || agent?.platform || '',
+        model: conv.model,
+        effort: conv.effort,
+        actual_model: '',
+        job_id: '',
+        status: 'failed',
+        cost_usd: null,
+        tokens_in: null,
+        tokens_out: null,
+        duration_sec: null,
+        attachments: [],
+        handoff_id: '',
+        steered: false,
+        system_generated: true,
+      };
+      appendConversationMessage(chatDir, conv.id, sysMsg);
+      conv.updated_at = new Date().toISOString();
       continue;
     }
 

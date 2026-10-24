@@ -16,7 +16,9 @@ import {
   renderRoleMarkdown,
   type RoleSections,
 } from '../agents-ws/lib/markdown-roles.ts';
+import { allowedModels } from '../agents-ws/lib/models.ts';
 import { withS6State } from '../agents-ws/lib/mutex.ts';
+import { assertSafeProjectMawWrite } from '../agents-ws/lib/security.ts';
 import { appendAuditLog, readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent, Group } from '../agents-ws/types.ts';
 import { BUILTIN_EMPTY_TEMPLATE, BUILTIN_FULL_TEMPLATE } from './defaults.ts';
@@ -69,7 +71,8 @@ export function validateTeam(
   }
 
   const model = String(rawShared.model ?? '').trim();
-  if (model && !regAgent.models.includes(model)) {
+  const allowed = allowedModels(ctx, platform);
+  if (model && !allowed.includes(model)) {
     throw new ApiValidationError(`Invalid shared.model '${model}' for platform '${platform}'.`, 400);
   }
 
@@ -192,7 +195,8 @@ export function validateTeam(
 
       if (r.override.model) {
         const ovModel = String(r.override.model).trim();
-        if (!ovAgent.models.includes(ovModel)) {
+        const allowedOv = allowedModels(ctx, ovAgent.id);
+        if (!allowedOv.includes(ovModel)) {
           throw new ApiValidationError(`Invalid override.model '${ovModel}' for role '${key}'.`, 400);
         }
         override.model = ovModel;
@@ -392,6 +396,12 @@ export const feature: MawFeature = {
           });
           const team = validated.team;
           const rawRolesMd = validated.rolesMd ?? {};
+          // Item 3: Prevent symlink / junction escape on .maw
+          assertSafeProjectMawWrite(validPath, path.join('.maw', 'team.json'), ctx.paths.projectsRoot);
+          for (const role of team.roles) {
+            assertSafeProjectMawWrite(validPath, path.join('.maw', 'roles', `${role.key}.md`), ctx.paths.projectsRoot);
+          }
+
           const rolesDir = getRolesDir(validPath);
           if (!fs.existsSync(rolesDir)) {
             fs.mkdirSync(rolesDir, { recursive: true });
@@ -656,6 +666,12 @@ export const feature: MawFeature = {
             id: generateTeamId(),
             roles: validated.team.roles.map((r) => ({ ...r, agent_id: '' })),
           };
+
+          // Item 3: Prevent symlink / junction escape on .maw
+          assertSafeProjectMawWrite(validPath, path.join('.maw', 'team.json'), ctx.paths.projectsRoot);
+          for (const role of newTeam.roles) {
+            assertSafeProjectMawWrite(validPath, path.join('.maw', 'roles', `${role.key}.md`), ctx.paths.projectsRoot);
+          }
 
           const rolesDir = getRolesDir(validPath);
           if (!fs.existsSync(rolesDir)) {
