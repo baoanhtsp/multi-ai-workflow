@@ -114,3 +114,49 @@ test('handoff-block: parseStructuredHandoffResult fallback on invalid or missing
     assert.equal(badStatus.fallbackResult.status, 'failed');
   }
 });
+
+test('handoff-block: [Item 2] incomplete structured result requires summary, files_changed, evidence, blockers', () => {
+  // {"status":"completed"} missing summary
+  const missingSummary = parseStructuredHandoffResult('```json\n{"status":"completed"}\n```', null);
+  assert.equal(missingSummary.ok, false);
+  if (!missingSummary.ok) {
+    assert.match(missingSummary.error, /"summary"/);
+  }
+
+  // missing files_changed
+  const missingFiles = parseStructuredHandoffResult(
+    '```json\n{"status":"completed","summary":"done"}\n```',
+    null
+  );
+  assert.equal(missingFiles.ok, false);
+  if (!missingFiles.ok) {
+    assert.match(missingFiles.error, /"files_changed"/);
+  }
+
+  // missing evidence
+  const missingEvidence = parseStructuredHandoffResult(
+    '```json\n{"status":"completed","summary":"done","files_changed":[]}\n```',
+    null
+  );
+  assert.equal(missingEvidence.ok, false);
+  if (!missingEvidence.ok) {
+    assert.match(missingEvidence.error, /"evidence"/);
+  }
+
+  // missing blockers
+  const missingBlockers = parseStructuredHandoffResult(
+    '```json\n{"status":"completed","summary":"done","files_changed":[],"evidence":""}\n```',
+    null
+  );
+  assert.equal(missingBlockers.ok, false);
+  if (!missingBlockers.ok) {
+    assert.match(missingBlockers.error, /"blockers"/);
+  }
+
+  // all valid
+  const allValid = parseStructuredHandoffResult(
+    '```json\n{"status":"completed","summary":"done","files_changed":[],"evidence":"","blockers":[]}\n```',
+    null
+  );
+  assert.equal(allValid.ok, true);
+});

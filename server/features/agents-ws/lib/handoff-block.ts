@@ -143,25 +143,50 @@ export function parseStructuredHandoffResult(
   }
   const status = statusRaw as 'completed' | 'failed' | 'blocked';
 
-  const summary = String(obj.summary ?? '').trim().slice(0, 1500);
-
-  let files_changed: string[] = [];
-  if (Array.isArray(obj.files_changed)) {
-    files_changed = obj.files_changed
-      .map((x) => String(x ?? '').trim())
-      .filter((x) => x.length > 0 && x.length <= 500)
-      .slice(0, 200);
+  // Item 2 (Codex Pass 6): Structured result must be complete:
+  // require summary (non-empty string), files_changed (array), evidence (string, may be empty), blockers (array);
+  // missing or wrong-typed -> needs_review with a parse_error naming the field.
+  if (typeof obj.summary !== 'string' || obj.summary.trim() === '') {
+    return {
+      ok: false,
+      error: 'Missing or invalid "summary" property in result (must be a non-empty string).',
+      fallbackResult,
+    };
   }
+  const summary = obj.summary.trim().slice(0, 1500);
 
-  const evidence = String(obj.evidence ?? '').trim().slice(0, 3000);
-
-  let blockers: string[] = [];
-  if (Array.isArray(obj.blockers)) {
-    blockers = obj.blockers
-      .map((x) => String(x ?? '').trim())
-      .filter((x) => x.length > 0 && x.length <= 500)
-      .slice(0, 20);
+  if (!Array.isArray(obj.files_changed)) {
+    return {
+      ok: false,
+      error: 'Missing or invalid "files_changed" property in result (must be an array).',
+      fallbackResult,
+    };
   }
+  const files_changed: string[] = obj.files_changed
+    .map((x) => String(x ?? '').trim())
+    .filter((x) => x.length > 0 && x.length <= 500)
+    .slice(0, 200);
+
+  if (typeof obj.evidence !== 'string') {
+    return {
+      ok: false,
+      error: 'Missing or invalid "evidence" property in result (must be a string).',
+      fallbackResult,
+    };
+  }
+  const evidence = obj.evidence.trim().slice(0, 3000);
+
+  if (!Array.isArray(obj.blockers)) {
+    return {
+      ok: false,
+      error: 'Missing or invalid "blockers" property in result (must be an array).',
+      fallbackResult,
+    };
+  }
+  const blockers: string[] = obj.blockers
+    .map((x) => String(x ?? '').trim())
+    .filter((x) => x.length > 0 && x.length <= 500)
+    .slice(0, 20);
 
   let selfCost: number | null = null;
   if (typeof obj.cost === 'number' && !Number.isNaN(obj.cost)) {

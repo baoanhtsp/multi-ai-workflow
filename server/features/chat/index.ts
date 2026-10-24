@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { handleCancelJob } from '../../actions/jobs.ts';
 import type { MawFeature } from '../../lib/feature.ts';
+import { isFileSafe } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { CONVERSATION_ID_REGEX, generateConversationId, generateMessageId, generateQueueId } from '../agents-ws/lib/ids.ts';
@@ -12,6 +13,7 @@ import { getMaxMessageCharsForAgent } from '../agents-ws/lib/prompt.ts';
 import { assertSafeProjectMawWrite } from '../agents-ws/lib/security.ts';
 import { appendAuditLog, readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent } from '../agents-ws/types.ts';
+import type { Team } from '../teams/types.ts';
 import {
   appendConversationMessage,
   ensureTickStarted,
@@ -319,14 +321,6 @@ export const feature: MawFeature = {
             throw new ApiValidationError('Agent deleted.', 409);
           }
 
-          const maxAllowedChars = getMaxMessageCharsForAgent({
-            name: agent.name,
-            team_role: agent.team_role,
-          });
-          if (text.length > maxAllowedChars) {
-            throw new ApiValidationError(`Message too long for this agent (max ${maxAllowedChars} chars)`, 400);
-          }
-
           const platformSpecified = Boolean(body.platform && String(body.platform).trim());
           const targetPlatform = String(body.platform ?? conv.platform ?? agent.platform).trim().toLowerCase();
           const registryAgent = ctx.registry.agents.find((a) => a.id === targetPlatform);
@@ -372,7 +366,7 @@ export const feature: MawFeature = {
             );
           }
 
-          // Handle attachments (Item 18)
+          // Handle attachments (Item 18 & Codex Pass 6 Item 3: run safe check BEFORE any mkdir/write)
           const rawAttachments = body.attachments;
           const savedAttachments: Array<{ name: string; path: string }> = [];
 
@@ -387,10 +381,11 @@ export const feature: MawFeature = {
               throw new ApiValidationError('Maximum 3 attachments allowed.', 400);
             }
 
-            const attachDir = path.win32.join(agent.workdir, '.maw', 'attachments', conv.id);
-            if (!fs.existsSync(attachDir)) {
-              fs.mkdirSync(attachDir, { recursive: true });
-            }
+            // Item 3 (Codex Pass 6): Run safe-path check BEFORE any mkdir or write
+            assertSafeProjectMawWrite(agent.workdir, path.join('.maw', 'attachments'), ctx.paths.projectsRoot);
+            assertSafeProjectMawWrite(agent.workdir, path.join('.maw', 'attachments', conv.id), ctx.paths.projectsRoot);
+
+            const validatedAttachments: Array<{ name: string; buf: Buffer; subPath: string; relPath: string }> = [];
 
             for (let i = 0; i < rawAttachments.length; i++) {
               const att = rawAttachments[i];
@@ -417,11 +412,51 @@ export const feature: MawFeature = {
               }
               const subPath = path.join('.maw', 'attachments', conv.id, `${i + 1}-${name}`);
               assertSafeProjectMawWrite(agent.workdir, subPath, ctx.paths.projectsRoot);
-              const savePath = path.win32.join(attachDir, `${i + 1}-${name}`);
-              fs.writeFileSync(savePath, buf);
               const relPath = `.maw/attachments/${conv.id}/${i + 1}-${name}`;
-              savedAttachments.push({ name, path: relPath });
+              validatedAttachments.push({ name, buf, subPath, relPath });
             }
+
+            // ONLY after all validations and safe-path checks pass, create directory and write files
+            const attachDir = path.win32.join(agent.workdir, '.maw', 'attachments', conv.id);
+            if (!fs.existsSync(attachDir)) {
+              fs.mkdirSync(attachDir, { recursive: true });
+            }
+
+            for (let i = 0; i < validatedAttachments.length; i++) {
+              const item = validatedAttachments[i]!;
+              const savePath = path.win32.join(attachDir, `${i + 1}-${item.name}`);
+              fs.writeFileSync(savePath, item.buf);
+              savedAttachments.push({ name: item.name, path: item.relPath });
+            }
+          }
+
+          // Item 1 (Codex Pass 6): Prompt budget accounting for fixed sections (agent, hooks, attachments, dispatch)
+          let mayDelegate = false;
+          if (agent.team_id && agent.workdir) {
+            const teamFile = path.win32.join(agent.workdir, '.maw', 'team.json');
+            if (isFileSafe(teamFile)) {
+              try {
+                const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
+                const myRole = team.roles.find((r) => r.key === agent.team_role || r.agent_id === agent.id);
+                mayDelegate = Boolean(myRole?.may_delegate);
+              } catch {}
+            }
+          }
+
+          const attachLines = savedAttachments.map((a) => `Attached image: ${a.path || a.name}`);
+          const maxAllowedChars = getMaxMessageCharsForAgent(
+            {
+              name: agent.name,
+              team_role: agent.team_role,
+              hooks: agent.hooks,
+              may_delegate: mayDelegate,
+            },
+            {
+              attachmentLines: attachLines,
+            }
+          );
+          if (text.length > maxAllowedChars) {
+            throw new ApiValidationError(`Message too long for this agent (max ${maxAllowedChars} chars)`, 400);
           }
 
           // Auto-set title from first message if title was default

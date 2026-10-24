@@ -42,11 +42,47 @@ export interface BuildPromptOptions {
   maxChars?: number; // default 17000
 }
 
-export function getMaxMessageCharsForAgent(agent: PromptAgentInfo, maxBudget = 17000): number {
-  const minimalAgentHeader = `# Agent\nName: ${agent.name}` + (agent.team_role ? `\nTeam role: ${agent.team_role}` : '');
-  const minimalMessageHeader = '# Message\n\n';
-  const fixedMinLen = minimalAgentHeader.length + 2 + minimalMessageHeader.length;
-  return Math.max(0, maxBudget - fixedMinLen);
+export interface GetMaxMessageCharsOptions {
+  attachmentLines?: string[];
+  maxBudget?: number;
+}
+
+export function getMaxMessageCharsForAgent(
+  agent: PromptAgentInfo,
+  options?: GetMaxMessageCharsOptions | number
+): number {
+  const maxBudget = typeof options === 'number' ? options : (options?.maxBudget ?? 17000);
+  const attachmentLines = typeof options === 'object' ? options.attachmentLines : undefined;
+
+  // 1. Agent section after maximal trimming
+  const minimalAgentHeader =
+    '# Agent\nName: ' + agent.name + (agent.team_role ? '\nTeam role: ' + agent.team_role : '');
+
+  // 2. Fixed message section wrapper (hooks, attachments, headers)
+  const messageParts: string[] = ['# Message'];
+  if (agent.hooks?.before && agent.hooks.before.trim()) {
+    messageParts.push(agent.hooks.before.trim());
+  }
+  if (attachmentLines && attachmentLines.length > 0) {
+    messageParts.push(attachmentLines.join('\n'));
+  }
+  if (agent.hooks?.after && agent.hooks.after.trim()) {
+    messageParts.push(agent.hooks.after.trim());
+  }
+  const messageFixedWrapper = messageParts.join('\n\n');
+
+  const fixedSections: string[] = [minimalAgentHeader, messageFixedWrapper];
+
+  // 3. Dispatch tool instructions for Lead (if may_delegate)
+  if (agent.may_delegate) {
+    const minimalDispatch =
+      '# Dispatch Tool\nTo delegate tasks to members, end your reply with exactly one fenced handoff block:\n```handoff\n{ "handoffs": [ { "to": "<role_key>", "task": "<task description>", "acceptance": "<criteria>", "thread": "" } ] }\n```\nDo not do members\' work yourself. Results come back as [Handoff <id>] messages.';
+    fixedSections.push(minimalDispatch);
+  }
+
+  // When message text is present, it is added to messageParts with '\n\n' separator (+2 chars)
+  const fixedTotal = fixedSections.join('\n\n').length + 2;
+  return Math.max(0, maxBudget - fixedTotal);
 }
 
 export function buildPrompt(opts: BuildPromptOptions): string {

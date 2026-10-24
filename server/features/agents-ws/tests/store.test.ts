@@ -416,3 +416,102 @@ test('git: [Item 3] getDirtyFilesWithHashes returns verification failure error w
   }
 });
 
+test('store: [Item 4] ws_agent_delete returns 409 while agent has active handoff (started or running)', async () => {
+  const { makeReq, testProj, paths } = setupTestContext();
+
+  // Create an agent
+  const saveReq = makeReq({
+    agent: {
+      name: 'Active Lead',
+      platform: 'codex',
+      workdir: testProj,
+      team_role: 'lead',
+    },
+  });
+  const saveRes = (await feature.routes['ws_agent_save']!.handler(saveReq, saveReq)) as any;
+  const agentId = saveRes.agent.id;
+
+  // Add an active handoff where this agent is lead
+  const handoffsDir = paths.featureDataDir('handoffs');
+  fs.mkdirSync(handoffsDir, { recursive: true });
+  const handoffsFile = path.join(handoffsDir, 'handoffs.json');
+  fs.writeFileSync(
+    handoffsFile,
+    JSON.stringify({
+      version: 1,
+      handoffs: [
+        {
+          id: 'h_test123',
+          lead_agent_id: agentId,
+          from: agentId,
+          to: 'worker',
+          status: 'running',
+        },
+      ],
+    }),
+    'utf8'
+  );
+
+  // Attempt to delete agent -> should throw 409
+  const delReq = makeReq({ id: agentId });
+  await assert.rejects(
+    async () => {
+      await feature.routes['ws_agent_delete']!.handler(delReq, delReq);
+    },
+    (err: any) => {
+      assert.equal(err.statusCode, 409);
+      assert.match(err.message, /handoff is running or started/);
+      return true;
+    }
+  );
+
+  // Now change handoff status to completed
+  fs.writeFileSync(
+    handoffsFile,
+    JSON.stringify({
+      version: 1,
+      handoffs: [
+        {
+          id: 'h_test123',
+          lead_agent_id: agentId,
+          from: agentId,
+          to: 'worker',
+          status: 'completed',
+        },
+      ],
+    }),
+    'utf8'
+  );
+
+  // Now delete succeeds
+  const delRes = (await feature.routes['ws_agent_delete']!.handler(delReq, delReq)) as any;
+  assert.equal(delRes.ok, true);
+  assert.equal(delRes.id, agentId);
+});
+
+test('store: [Item 6] ws_platforms?refresh=1 clears cache and re-detects', async () => {
+  const { makeReq, tempBase } = setupTestContext();
+
+  // Seed tempDir cache file with a dummy version
+  const toolCache = path.join(tempBase, 'maw_tool_versions_cache_v4.json');
+  fs.writeFileSync(toolCache, JSON.stringify({ claude: '0.0.0-dummy', codex: '0.0.0-dummy' }), 'utf8');
+
+  // Normal call reports cached
+  const normalReq = makeReq();
+  const normalRes = (await feature.routes['ws_platforms']!.handler(normalReq, normalReq)) as any;
+  assert.equal(normalRes.ok, true);
+  assert.equal(normalRes.cached, true);
+
+  // Call with refresh=1
+  const refreshReq = makeReq({}, { refresh: '1' });
+  const refreshRes = (await feature.routes['ws_platforms']!.handler(refreshReq, refreshReq)) as any;
+  assert.equal(refreshRes.ok, true);
+  assert.equal(refreshRes.cached, false);
+
+  // Verify that if a new toolCache was created by fresh detection, it does not contain the old dummy version
+  if (fs.existsSync(toolCache)) {
+    const freshData = JSON.parse(fs.readFileSync(toolCache, 'utf8'));
+    assert.notEqual(freshData.claude, '0.0.0-dummy');
+  }
+});
+

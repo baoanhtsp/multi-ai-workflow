@@ -862,7 +862,9 @@ test('handoffs: [Item 2] FAILED job with completed json block becomes failed wit
 {
   "status": "completed",
   "summary": "Finished all work successfully",
-  "files_changed": []
+  "files_changed": [],
+  "evidence": "Completed cleanly",
+  "blockers": []
 }
 \`\`\`
 `);
@@ -935,7 +937,9 @@ test('handoffs: [Item 4] SPEC Guard error in isolated path marks handoff needs_r
 {
   "status": "completed",
   "summary": "Completed isolated work",
-  "files_changed": []
+  "files_changed": [],
+  "evidence": "",
+  "blockers": []
 }
 \`\`\`
 `);
@@ -1030,7 +1034,9 @@ test('handoffs: [Item 1] parallel dispatch only with confirmed isolation; unconf
 {
   "status": "completed",
   "summary": "Finished H1",
-  "files_changed": []
+  "files_changed": [],
+  "evidence": "",
+  "blockers": []
 }
 \`\`\`
 [Completed | Tokens: 250 in / 100 out | Cost: $0.0080]
@@ -1080,7 +1086,9 @@ test('handoffs: [Item 2] write-scope checks fail closed: git baseline failure ma
 {
   "status": "completed",
   "summary": "Completed task",
-  "files_changed": []
+  "files_changed": [],
+  "evidence": "",
+  "blockers": []
 }
 \`\`\`
 `);
@@ -1203,7 +1211,9 @@ test('handoffs: [Item 1] outside git scope checks mark needs_review for non-** r
 {
   "status": "completed",
   "summary": "Scoped task inside scope",
-  "files_changed": ["specs/plan.md"]
+  "files_changed": ["specs/plan.md"],
+  "evidence": "",
+  "blockers": []
 }
 \`\`\`
 `);
@@ -1227,7 +1237,9 @@ test('handoffs: [Item 1] outside git scope checks mark needs_review for non-** r
 {
   "status": "completed",
   "summary": "Violating task",
-  "files_changed": ["src/app.ts"]
+  "files_changed": ["src/app.ts"],
+  "evidence": "",
+  "blockers": []
 }
 \`\`\`
 `);
@@ -1251,7 +1263,9 @@ test('handoffs: [Item 1] outside git scope checks mark needs_review for non-** r
 {
   "status": "completed",
   "summary": "Read-only review",
-  "files_changed": []
+  "files_changed": [],
+  "evidence": "",
+  "blockers": []
 }
 \`\`\`
 `);
@@ -1274,7 +1288,9 @@ test('handoffs: [Item 1] outside git scope checks mark needs_review for non-** r
 {
   "status": "completed",
   "summary": "Unconstrained task",
-  "files_changed": ["any/file.ts"]
+  "files_changed": ["any/file.ts"],
+  "evidence": "",
+  "blockers": []
 }
 \`\`\`
 `);
@@ -1378,6 +1394,133 @@ test('handoffs: [Item 5] handoff_dispatch requires dispatching agent role to hav
       err.statusCode === 403 &&
       err.message.includes('may_delegate: false')
   );
+});
+
+test('handoffs: [Item 5] working_style drives member conversation (persistent, per_task with thread, new_chat_per_task)', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  setNextReply(`
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Done",
+  "files_changed": [],
+  "evidence": "",
+  "blockers": []
+}
+\`\`\`
+`);
+
+  // 1. Persistent style (deputy)
+  const d1Req = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'deputy',
+    task: 'Deputy task 1',
+  });
+  const d1Res = (await feature.routes['handoff_dispatch']!.handler(d1Req, d1Req)) as any;
+  await tick(baseCtx); // starts d1 and creates conversation
+  await tick(baseCtx); // finishes d1
+
+  const d2Req = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'deputy',
+    task: 'Deputy task 2',
+  });
+  const d2Res = (await feature.routes['handoff_dispatch']!.handler(d2Req, d2Req)) as any;
+  await tick(baseCtx); // starts d2
+  await tick(baseCtx); // finishes d2
+
+  const listResDep = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const depH1 = listResDep.handoffs.find((h: any) => h.id === d1Res.handoff.id);
+  const depH2 = listResDep.handoffs.find((h: any) => h.id === d2Res.handoff.id);
+  assert.ok(depH1.member_conversation_id);
+  assert.equal(depH1.member_conversation_id, depH2.member_conversation_id, 'persistent style reuses same conversation');
+
+  const getConvDep = (await chatFeature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: depH1.member_conversation_id }),
+    makeReq()
+  )) as any;
+  assert.equal(getConvDep.conversation.title, 'Deputy — handoffs', 'persistent conversation has "<Role> — handoffs" title');
+
+  // 2. per_task style (worker)
+  const w1Req = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Worker task 1',
+  });
+  const w1Res = (await feature.routes['handoff_dispatch']!.handler(w1Req, w1Req)) as any;
+  await tick(baseCtx);
+  await tick(baseCtx);
+
+  // w2 names w1 in thread
+  const w2Req = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Worker task 2 continuation',
+    thread: w1Res.handoff.id,
+  });
+  const w2Res = (await feature.routes['handoff_dispatch']!.handler(w2Req, w2Req)) as any;
+  await tick(baseCtx);
+  await tick(baseCtx);
+
+  // w3 has no thread
+  const w3Req = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Worker task 3 independent',
+  });
+  const w3Res = (await feature.routes['handoff_dispatch']!.handler(w3Req, w3Req)) as any;
+  await tick(baseCtx);
+  await tick(baseCtx);
+
+  const listResWork = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const workH1 = listResWork.handoffs.find((h: any) => h.id === w1Res.handoff.id);
+  const workH2 = listResWork.handoffs.find((h: any) => h.id === w2Res.handoff.id);
+  const workH3 = listResWork.handoffs.find((h: any) => h.id === w3Res.handoff.id);
+
+  assert.equal(workH2.thread, workH1.id, 'thread is kept on the record');
+  assert.equal(workH1.member_conversation_id, workH2.member_conversation_id, 'per_task reuses conversation when thread matches');
+  assert.notEqual(workH1.member_conversation_id, workH3.member_conversation_id, 'per_task creates new conversation when no thread');
+
+  // 3. new_chat_per_task style (testing)
+  const t1Req = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'testing',
+    task: 'Testing task 1',
+  });
+  const t1Res = (await feature.routes['handoff_dispatch']!.handler(t1Req, t1Req)) as any;
+  await tick(baseCtx);
+  await tick(baseCtx);
+
+  const t2Req = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'testing',
+    task: 'Testing task 2',
+    thread: t1Res.handoff.id,
+  });
+  const t2Res = (await feature.routes['handoff_dispatch']!.handler(t2Req, t2Req)) as any;
+  await tick(baseCtx);
+  await tick(baseCtx);
+
+  const listResTest = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const testH1 = listResTest.handoffs.find((h: any) => h.id === t1Res.handoff.id);
+  const testH2 = listResTest.handoffs.find((h: any) => h.id === t2Res.handoff.id);
+  assert.notEqual(testH1.member_conversation_id, testH2.member_conversation_id, 'new_chat_per_task always creates a new conversation');
 });
 
 

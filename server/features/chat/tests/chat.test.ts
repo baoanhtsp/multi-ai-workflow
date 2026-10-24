@@ -1195,11 +1195,51 @@ test('chat: [Item 3] chat_send rejects attachment write if .maw/attachments esca
         },
         (err: any) => err instanceof ApiValidationError && err.statusCode === 400
       );
+      assert.equal(fs.readdirSync(outsideDir).length, 0, 'No files or folders created outside project on rejected attachment');
     } finally {
       try { fs.unlinkSync(dotMaw); } catch {}
       try { fs.rmdirSync(outsideDir); } catch {}
     }
   }
+});
+
+test('chat: [Item 1] prompt budget with 15000-char message + two 2000-char hooks rejects with 400 and max N chars', async () => {
+  const { makeReq, testProj } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: {
+      name: 'HookAgent',
+      platform: 'claude',
+      workdir: testProj,
+      hooks: {
+        before: 'B'.repeat(2000),
+        after: 'A'.repeat(2000),
+      },
+    },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const agentId = agRes.agent.id;
+
+  const convReq = makeReq({ agent_id: agentId });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  const message15k = 'M'.repeat(15000);
+  const sendReq = makeReq({
+    conversation_id: convId,
+    text: message15k,
+  });
+
+  await assert.rejects(
+    async () => {
+      await feature.routes['chat_send']!.handler(sendReq, sendReq);
+    },
+    (err: any) => {
+      assert.equal(err.statusCode, 400);
+      assert.match(err.message, /Message too long for this agent \(max \d+ chars\)/);
+      return true;
+    }
+  );
 });
 
 

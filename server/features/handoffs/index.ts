@@ -109,6 +109,7 @@ export const feature: MawFeature = {
           const to = String(body.to ?? '').trim();
           const task = String(body.task ?? '').trim();
           const acceptance = String(body.acceptance ?? '').trim().slice(0, 1000);
+          const thread = body.thread !== undefined && body.thread !== null ? String(body.thread).trim().slice(0, 60) : '';
 
           if (!leadConvId) {
             throw new ApiValidationError('Missing lead_conversation_id.', 400);
@@ -258,6 +259,7 @@ export const feature: MawFeature = {
             parse_error: '',
             scope_violations: [],
             attempts: 0,
+            thread: thread || undefined,
           };
 
           handoffsData.handoffs.unshift(newHandoff);

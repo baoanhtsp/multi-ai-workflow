@@ -1,7 +1,8 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { getProjectGitInfo } from '../../actions/git.ts';
 import type { MawFeature, MawFeatureContext } from '../../lib/feature.ts';
-import { resolveProjectPath } from '../../lib/paths.ts';
+import { getTempDir, resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { detectRegistryAgents, getCodexModels, getDetectedToolVersions } from '../../lib/versions.ts';
 import { readConversationMessages, tick } from '../chat/tick.ts';
@@ -30,6 +31,11 @@ const AUTH_PATTERNS = [
 ];
 
 const gitCache = new Map<string, { ts: number; git: AgentGitStatus }>();
+let cachedPlatformsData: { ts: number; platforms: PlatformInfo[] } | null = null;
+
+export function clearPlatformsCache(): void {
+  cachedPlatformsData = null;
+}
 
 async function getCachedGitInfo(workdir: string): Promise<AgentGitStatus> {
   const norm = workdir.replace(/\//g, '\\').toLowerCase();
@@ -348,11 +354,61 @@ export const feature: MawFeature = {
       method: 'GET',
       handler: async (ctx) => {
         const refresh = ctx.query?.get('refresh') === '1';
-        const platforms = await getPlatformsList(ctx, refresh);
+        let isCached = false;
+        let platforms: PlatformInfo[];
+
+        if (refresh) {
+          // Item 6 (Codex Pass 6): Bypass detection cache, clear S6-side in-memory cache and tempDir cache files
+          cachedPlatformsData = null;
+          const tempDir = getTempDir();
+          let clearedAll = true;
+
+          try {
+            const toolCache = path.win32.join(tempDir, 'maw_tool_versions_cache_v4.json');
+            if (fs.existsSync(toolCache)) {
+              fs.unlinkSync(toolCache);
+            }
+          } catch {
+            clearedAll = false;
+          }
+
+          try {
+            const agentCache = path.win32.join(tempDir, 'maw_agents_detect_cache_v4.json');
+            if (fs.existsSync(agentCache)) {
+              fs.unlinkSync(agentCache);
+            }
+          } catch {
+            clearedAll = false;
+          }
+
+          try {
+            platforms = await getPlatformsList(ctx, true);
+            cachedPlatformsData = { ts: Date.now(), platforms };
+            isCached = !clearedAll;
+          } catch (err) {
+            if (cachedPlatformsData) {
+              platforms = cachedPlatformsData.platforms;
+              isCached = true;
+            } else {
+              throw err;
+            }
+          }
+        } else {
+          const now = Date.now();
+          if (cachedPlatformsData && now - cachedPlatformsData.ts < 30000) {
+            platforms = cachedPlatformsData.platforms;
+            isCached = true;
+          } else {
+            platforms = await getPlatformsList(ctx, false);
+            cachedPlatformsData = { ts: now, platforms };
+            isCached = true;
+          }
+        }
+
         return {
           ok: true,
           platforms,
-          cached: !refresh,
+          cached: isCached,
         };
       },
     },
@@ -496,6 +552,25 @@ export const feature: MawFeature = {
           );
           if (isBusy) {
             throw new ApiValidationError('Cannot delete agent while a turn is running.', 409);
+          }
+
+          // Item 4 (Codex Pass 6): Cannot delete agent while having a handoff in status 'started' or 'running' (as member or Lead)
+          const handoffsDir = ctx.paths.featureDataDir('handoffs');
+          const handoffsFile = path.win32.join(handoffsDir, 'handoffs.json');
+          const handoffsData = await readJsonStore<{ version: number; handoffs: Handoff[] }>(handoffsFile, {
+            version: 1,
+            handoffs: [],
+          });
+
+          const hasActiveHandoff = handoffsData.handoffs.some((h) => {
+            const isLead = h.lead_agent_id === id || h.from === id;
+            const isMember =
+              h.to === id ||
+              Boolean(agent.team_role && (h.to === agent.team_role || h.to_role === agent.team_role));
+            return (isLead || isMember) && (h.status === 'started' || h.status === 'running');
+          });
+          if (hasActiveHandoff) {
+            throw new ApiValidationError('Cannot delete agent while a handoff is running or started.', 409);
           }
 
           const deleted_at = new Date().toISOString();

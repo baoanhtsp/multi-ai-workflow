@@ -4,6 +4,7 @@ import { handleCancelJob, refreshJobMetaStatus, type JobMeta } from '../../actio
 import { handleSpecGuard } from '../../actions/specGuard.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
 import { isFileSafe } from '../../lib/paths.ts';
+import { ApiValidationError } from '../../lib/validate.ts';
 import {
   getBaseCommit,
   getBaseCommitResult,
@@ -26,7 +27,7 @@ import {
 import { parseJobLog } from '../agents-ws/lib/logparse.ts';
 import { parseRoleMarkdown, type RoleSections } from '../agents-ws/lib/markdown-roles.ts';
 import { s6StateStorage, withS6State } from '../agents-ws/lib/mutex.ts';
-import { buildPrompt, type PromptMemberInfo } from '../agents-ws/lib/prompt.ts';
+import { buildPrompt, getMaxMessageCharsForAgent, type PromptMemberInfo } from '../agents-ws/lib/prompt.ts';
 import { readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent } from '../agents-ws/types.ts';
 import type { Handoff, HandoffStatus } from '../handoffs/types.ts';
@@ -678,6 +679,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
                     parse_error: '',
                     scope_violations: [],
                     attempts: 0,
+                    thread: item.thread ? String(item.thread).trim().slice(0, 60) : undefined,
                   };
 
                   handoffsData.handoffs.unshift(hRecord);
@@ -1041,15 +1043,78 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         continue;
       }
 
+      // Item 5 (Codex Pass 6): Working style (persistent | per_task | new_chat_per_task) drives member conversation
+      let workingStyle: 'persistent' | 'per_task' | 'new_chat_per_task' = 'per_task';
+      let roleDisplayName = memberAgent.name;
+
+      if (memberAgent.workdir) {
+        const teamFile = path.win32.join(memberAgent.workdir, '.maw', 'team.json');
+        if (isFileSafe(teamFile)) {
+          try {
+            const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
+            const r = team.roles.find(
+              (x) =>
+                x.agent_id === memberAgent.id ||
+                x.key === memberAgent.team_role ||
+                x.key === h.to_role ||
+                x.key === h.to
+            );
+            if (r) {
+              if (r.working_style) {
+                workingStyle = r.working_style;
+              }
+              if (r.name) {
+                roleDisplayName = r.name;
+              }
+            }
+          } catch {}
+        }
+      }
+
       let memberConv: Conversation | undefined;
       if (h.member_conversation_id) {
-        memberConv = convsData.conversations.find((c) => c.id === h.member_conversation_id);
+        memberConv = convsData.conversations.find((c) => c.id === h.member_conversation_id && c.deleted_at === null);
       }
+
       if (!memberConv) {
+        if (workingStyle === 'persistent') {
+          // persistent: reuse member agent's single persistent handoff conversation (create once, title "<Role> — handoffs")
+          memberConv = convsData.conversations.find(
+            (c) => c.agent_id === memberAgent.id && c.kind === 'handoff' && c.deleted_at === null
+          );
+        } else if (workingStyle === 'per_task') {
+          // per_task: new conversation per handoff, BUT a handoff whose thread names an earlier handoff of same member reuses that handoff's member_conversation_id
+          if (h.thread) {
+            const earlier = handoffsData.handoffs.find(
+              (other) =>
+                other.id === h.thread &&
+                other.member_conversation_id &&
+                (other.to === memberAgent.id ||
+                  other.to === memberAgent.team_role ||
+                  other.to_role === memberAgent.team_role ||
+                  other.to_role === h.to_role ||
+                  other.to === h.to)
+            );
+            if (earlier?.member_conversation_id) {
+              memberConv = convsData.conversations.find(
+                (c) => c.id === earlier.member_conversation_id && c.deleted_at === null
+              );
+            }
+          }
+        }
+        // new_chat_per_task: always creates a new conversation
+      }
+
+      if (!memberConv) {
+        const defaultTitle =
+          workingStyle === 'persistent'
+            ? `${roleDisplayName} — handoffs`
+            : `Handoff: ${h.task.slice(0, 40)}`;
+
         memberConv = {
           id: generateConversationId(),
           agent_id: memberAgent.id,
-          title: `Handoff: ${h.task.slice(0, 40)}`,
+          title: defaultTitle,
           kind: 'handoff',
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
@@ -1533,6 +1598,23 @@ export async function startTurnJob(
     teamMembers,
     attachmentLines: (item.attachments ?? []).map((a) => `Attached image: ${a.path || a.name}`),
   });
+
+  // Item 1 (Codex Pass 6): If final buildPrompt result exceeds 17000, abort before starting job
+  if (promptText.length > 17000) {
+    const attachLines = (item.attachments ?? []).map((a) => `Attached image: ${a.path || a.name}`);
+    const maxAllowedChars = getMaxMessageCharsForAgent(
+      {
+        name: agent.name,
+        team_role: agent.team_role,
+        hooks: agent.hooks,
+        may_delegate: mayDelegate,
+      },
+      {
+        attachmentLines: attachLines,
+      }
+    );
+    throw new ApiValidationError(`Message too long for this agent (max ${maxAllowedChars} chars)`, 400);
+  }
 
   // Item 4: new_session helper
   const newSession = newSessionFor(ctx, targetPlatform);
