@@ -1042,7 +1042,11 @@ async function main(): Promise<void> {
 
           if (!gate.green) {
             const failedItems = gate.items.filter(
-              (it) => it.state === 'fail' || it.state === 'timeout'
+              (it) =>
+                it.state === 'fail' ||
+                it.state === 'timeout' ||
+                it.state === 'stale' ||
+                it.state === 'pending'
             );
             const failDetails = failedItems.map((it) => `${it.id} (${it.detail})`).join(', ');
             const reason = `Test gate red: ${failDetails || 'checks failed'} [S4:gate]`;

@@ -5,6 +5,8 @@ BeforeAll {
     $script:origUser = $env:USERPROFILE
     $script:origMaw = $env:MAW_HOME
     $script:origRuntime = $env:MAW_S4_RUNTIME
+    $script:origTemp = $env:TEMP
+    $script:origTmp = $env:TMP
 
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
     $script:hooksRoot = Join-Path $script:repoRoot "antigravity\skills\claude-leader\scripts\hooks"
@@ -18,6 +20,8 @@ AfterAll {
     $env:USERPROFILE = $script:origUser
     $env:MAW_HOME = $script:origMaw
     $env:MAW_S4_RUNTIME = $script:origRuntime
+    $env:TEMP = $script:origTemp
+    $env:TMP = $script:origTmp
 }
 
 Describe "S4 Hook Wrappers" {
@@ -75,8 +79,10 @@ Describe "S4 Hook Wrappers" {
             $env:MAW_TEAM_RUN_ID = $null
             $env:MAW_S4_AUDIT_OFFSET = $null
 
-            $script:tempDir = Join-Path $env:TEMP ("maw_pester_s4_" + [guid]::NewGuid().ToString("N"))
+            $script:tempDir = Join-Path $script:origTemp ("maw_pester_s4_" + [guid]::NewGuid().ToString("N"))
             New-Item -ItemType Directory -Force -Path $script:tempDir | Out-Null
+            $env:TEMP = $script:tempDir
+            $env:TMP = $script:tempDir
             $script:tempMawHome = Join-Path $script:tempDir ".maw"
             $script:tempUser = Join-Path $script:tempDir "user"
             $script:tempBudgetDir = Join-Path $script:tempMawHome "data\budget"
@@ -130,6 +136,8 @@ Describe "S4 Hook Wrappers" {
             $env:MAW_S4_RUNTIME = $script:origRuntime
             $env:MAW_HOME = $script:origMaw
             $env:USERPROFILE = $script:origUser
+            $env:TEMP = $script:origTemp
+            $env:TMP = $script:origTmp
             if (Test-Path -LiteralPath $script:tempDir) {
                 Remove-Item -LiteralPath $script:tempDir -Recurse -Force -ErrorAction SilentlyContinue
             }

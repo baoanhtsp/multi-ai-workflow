@@ -571,63 +571,90 @@ export function suggestTeam(
       continue;
     }
 
-    // Sort scored candidates:
-    // Highest final score. If |diff| < 0.02, tie-break by cost_per_approved, then registry default, then id
-    const regDefault = regDefaultsTeam[role] || registry.defaults.implementer || '';
-
+    // Sort scored candidates strictly by descending finalScore.
     scoredCandidates.sort((a, b) => {
       const diff = b.finalScore - a.finalScore;
-      if (Math.abs(diff) >= 0.02) {
-        return diff;
-      }
-
-      // Tie break 1: lower cost_per_approved_usd (if null, mean cost per task)
-      const costA =
-        a.cost_per_approved_usd !== null
-          ? a.cost_per_approved_usd
-          : a.tasks > 0
-          ? a.cost_usd / a.tasks
-          : 999;
-      const costB =
-        b.cost_per_approved_usd !== null
-          ? b.cost_per_approved_usd
-          : b.tasks > 0
-          ? b.cost_usd / b.tasks
-          : 999;
-
-      if (Math.abs(costA - costB) > 0.01) {
-        return costA - costB;
-      }
-
-      // Tie break 2: registry default
-      if (a.agent.toLowerCase() === regDefault.toLowerCase()) return -1;
-      if (b.agent.toLowerCase() === regDefault.toLowerCase()) return 1;
-
-      // Tie break 3: id alphabetical
+      if (Math.abs(diff) > 0.0001) return diff;
+      if (b.tasks !== a.tasks) return b.tasks - a.tasks;
       return a.agent.localeCompare(b.agent);
     });
 
-    const best = scoredCandidates[0]!;
-    team[role] = best.agent;
+    const regDefault = regDefaultsTeam[role] || registry.defaults.implementer || '';
+    const top = scoredCandidates[0]!;
+    const tied = scoredCandidates.filter((c) => top.finalScore - c.finalScore < 0.02);
+
+    let chosen = top;
+    let tieBreakReason: string | null = null;
+
+    if (tied.length > 1) {
+      // Tie-break 1: lower cost_per_approved_usd (if null, mean cost per task)
+      let minCostCand = tied[0]!;
+      let minCostVal =
+        minCostCand.cost_per_approved_usd !== null
+          ? minCostCand.cost_per_approved_usd
+          : minCostCand.tasks > 0
+          ? minCostCand.cost_usd / minCostCand.tasks
+          : 999;
+
+      for (let i = 1; i < tied.length; i++) {
+        const c = tied[i]!;
+        const costVal =
+          c.cost_per_approved_usd !== null
+            ? c.cost_per_approved_usd
+            : c.tasks > 0
+            ? c.cost_usd / c.tasks
+            : 999;
+        if (costVal < minCostVal) {
+          minCostVal = costVal;
+          minCostCand = c;
+        }
+      }
+
+      const topCostVal =
+        top.cost_per_approved_usd !== null
+          ? top.cost_per_approved_usd
+          : top.tasks > 0
+          ? top.cost_usd / top.tasks
+          : 999;
+
+      if (topCostVal - minCostVal > 0.01) {
+        chosen = minCostCand;
+        tieBreakReason = 'tie-break: lower cost';
+      } else if (regDefault) {
+        // Tie-break 2: registry default
+        const defCand = tied.find(
+          (c) => c.agent.toLowerCase() === regDefault.toLowerCase()
+        );
+        if (defCand && defCand.agent.toLowerCase() !== top.agent.toLowerCase()) {
+          chosen = defCand;
+          tieBreakReason = 'tie-break: registry default';
+        }
+      }
+    }
+
+    team[role] = chosen.agent;
 
     let reasonParts: string[] = [];
-    if (best.approval_rate !== null) {
-      reasonParts.push(`approval ${Math.round(best.approval_rate * 100)}%`);
+    if (chosen.approval_rate !== null) {
+      reasonParts.push(`approval ${Math.round(chosen.approval_rate * 100)}%`);
     }
-    if (best.avg_score !== null) {
-      reasonParts.push(`avg ${best.avg_score}`);
+    if (chosen.avg_score !== null) {
+      reasonParts.push(`avg ${chosen.avg_score}`);
     }
-    if (best.cost_per_approved_usd !== null) {
-      reasonParts.push(`$${best.cost_per_approved_usd.toFixed(2)}/approved`);
+    if (chosen.cost_per_approved_usd !== null) {
+      reasonParts.push(`$${chosen.cost_per_approved_usd.toFixed(2)}/approved`);
+    }
+    if (tieBreakReason) {
+      reasonParts.push(tieBreakReason);
     }
     if (reasonParts.length === 0) {
       reasonParts = ['registry default'];
     }
 
     details[role] = {
-      agent: best.agent,
-      score: best.finalScore,
-      confidence: best.confidence,
+      agent: chosen.agent,
+      score: chosen.finalScore,
+      confidence: chosen.confidence,
       reason: reasonParts.join(' · '),
       candidates: scoredCandidates.map((c) => ({
         agent: c.agent,

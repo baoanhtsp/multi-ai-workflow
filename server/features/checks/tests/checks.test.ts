@@ -25,6 +25,13 @@ function createTempProject(): { dir: string; cleanup: () => void } {
     `maw_test_checks_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
   );
   fs.mkdirSync(dir, { recursive: true });
+  const tempDir = path.win32.join(dir, 'temp');
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const oldTemp = process.env.TEMP;
+  const oldTmp = process.env.TMP;
+  process.env.TEMP = tempDir;
+  process.env.TMP = tempDir;
 
   // Init git repo
   try {
@@ -48,6 +55,8 @@ function createTempProject(): { dir: string; cleanup: () => void } {
   }
 
   const cleanup = () => {
+    process.env.TEMP = oldTemp;
+    process.env.TMP = oldTmp;
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch {
@@ -296,7 +305,7 @@ test('TODO scanning: scans tracked files, excludes binary and large files, respe
   }
 });
 
-test('gate staleness: check result is stale after file modification changing HEAD or dirty signature', async () => {
+test('gate staleness: required check has state stale and gate not green, non-required has state warn and gate green', async () => {
   const { dir, cleanup } = createTempProject();
   try {
     const paths = resolveServerPaths({
@@ -318,6 +327,7 @@ test('gate staleness: check result is stale after file modification changing HEA
       version: 1,
       checks: [
         { id: 'my_test', label: 'My Test', command: [process.execPath, checkScript], required: true },
+        { id: 'optional_test', label: 'Optional Test', command: [process.execPath, checkScript], required: false },
       ],
       spec_guard: false,
       min_review_score: 0,
@@ -337,6 +347,17 @@ test('gate staleness: check result is stale after file modification changing HEA
         head: gitInfo.head,
         dirty_signature: 'clean',
       },
+      {
+        id: 'optional_test',
+        label: 'Optional Test',
+        state: 'pass' as const,
+        exit_code: 0,
+        duration_ms: 50,
+        output_tail: 'PASS',
+        at: new Date().toISOString(),
+        head: gitInfo.head,
+        dirty_signature: 'clean',
+      },
     ];
 
     const gate1 = await computeGate(paths, dir, config, results, true, true);
@@ -346,12 +367,82 @@ test('gate staleness: check result is stale after file modification changing HEA
     fs.writeFileSync(path.join(dir, 'new_file.txt'), 'dirty content', 'utf8');
     child_process.execFileSync('git', ['add', 'new_file.txt'], { cwd: dir, windowsHide: true });
 
-    // Gate recomputed: check result should now be 'warn' (stale)
+    // Gate recomputed: required check is 'stale' (gate red), optional check is 'warn'
     const gate2 = await computeGate(paths, dir, config, results, true, true);
-    const checkItem = gate2.items.find((it) => it.id === 'my_test');
-    assert.ok(checkItem);
-    assert.equal(checkItem.state, 'warn');
-    assert.ok(checkItem.detail.includes('stale'));
+    const reqItem = gate2.items.find((it) => it.id === 'my_test');
+    assert.ok(reqItem);
+    assert.equal(reqItem.state, 'stale', 'required stale check must have state stale');
+    assert.ok(reqItem.detail.includes('stale'));
+
+    const optItem = gate2.items.find((it) => it.id === 'optional_test');
+    assert.ok(optItem);
+    assert.equal(optItem.state, 'warn', 'non-required stale check must have state warn');
+
+    assert.equal(gate2.green, false, 'gate must not be green when required check is stale');
+
+    // 3. If only optional check is configured and stale, gate remains green
+    const optOnlyConfig = {
+      version: 1,
+      checks: [
+        { id: 'optional_test', label: 'Optional Test', command: [process.execPath, checkScript], required: false },
+      ],
+      spec_guard: false,
+      min_review_score: 0,
+      todo_max: 10,
+    };
+    const gateOpt = await computeGate(paths, dir, optOnlyConfig, results, true, true);
+    assert.equal(gateOpt.green, true, 'gate should be green when only non-required check is stale (warn)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('gate unrun: required check has state pending (gate not green), non-required has state warn (gate green)', async () => {
+  const { dir, cleanup } = createTempProject();
+  try {
+    const paths = resolveServerPaths({
+      repoRoot: dir,
+      userProfile: path.join(dir, 'user'),
+      mawHome: path.join(dir, '.maw_home'),
+    });
+
+    const config = {
+      version: 1,
+      checks: [
+        { id: 'req_unrun', label: 'Required Unrun', command: ['node', '-v'], required: true },
+        { id: 'opt_unrun', label: 'Optional Unrun', command: ['node', '-v'], required: false },
+      ],
+      spec_guard: false,
+      min_review_score: 0,
+      todo_max: 10,
+    };
+
+    // No results at all
+    const gate = await computeGate(paths, dir, config, [], true, true);
+    const reqItem = gate.items.find((it) => it.id === 'req_unrun');
+    assert.ok(reqItem);
+    assert.equal(reqItem.state, 'pending');
+    assert.equal(reqItem.detail, 'never run');
+
+    const optItem = gate.items.find((it) => it.id === 'opt_unrun');
+    assert.ok(optItem);
+    assert.equal(optItem.state, 'warn');
+    assert.equal(optItem.detail, 'never run');
+
+    assert.equal(gate.green, false, 'gate must not be green when required check is pending');
+
+    // If only optional check is unrun, gate is green
+    const optOnlyConfig = {
+      version: 1,
+      checks: [
+        { id: 'opt_unrun', label: 'Optional Unrun', command: ['node', '-v'], required: false },
+      ],
+      spec_guard: false,
+      min_review_score: 0,
+      todo_max: 10,
+    };
+    const gateOpt = await computeGate(paths, dir, optOnlyConfig, [], true, true);
+    assert.equal(gateOpt.green, true);
   } finally {
     cleanup();
   }

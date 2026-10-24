@@ -31,9 +31,16 @@ function createTempPolicyEnv() {
   const mawHome = path.join(tmp, '.maw');
   const userProfile = path.join(tmp, 'user');
   const jobsDir = path.join(tmp, 'maw_jobs');
+  const tempDir = path.join(tmp, 'temp');
   fs.mkdirSync(mawHome, { recursive: true });
   fs.mkdirSync(userProfile, { recursive: true });
   fs.mkdirSync(jobsDir, { recursive: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const oldTemp = process.env.TEMP;
+  const oldTmp = process.env.TMP;
+  process.env.TEMP = tempDir;
+  process.env.TMP = tempDir;
 
   const paths = resolveServerPaths({
     repoRoot: path.resolve(import.meta.dirname, '..', '..', '..', '..'),
@@ -41,6 +48,7 @@ function createTempPolicyEnv() {
     mawHome,
   });
   paths.jobsDir = jobsDir;
+  paths.tempDir = tempDir;
 
   const registry = loadAgentRegistry(paths);
   const startedJobs: Array<Record<string, unknown>> = [];
@@ -63,6 +71,8 @@ function createTempPolicyEnv() {
   };
 
   const cleanup = () => {
+    process.env.TEMP = oldTemp;
+    process.env.TMP = oldTmp;
     try {
       fs.rmSync(tmp, { recursive: true, force: true });
     } catch {
@@ -360,8 +370,15 @@ test('HTTP status codes regression (Item 1): real HTTP server returns 400 on inv
   fs.mkdirSync(tmp, { recursive: true });
   const mawHome = path.join(tmp, '.maw');
   const userProfile = path.join(tmp, 'user');
+  const tempDir = path.join(tmp, 'temp');
   fs.mkdirSync(mawHome, { recursive: true });
   fs.mkdirSync(userProfile, { recursive: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const oldTemp = process.env.TEMP;
+  const oldTmp = process.env.TMP;
+  process.env.TEMP = tempDir;
+  process.env.TMP = tempDir;
 
   const { createMawHttpServer } = await import('../../../http.ts');
   const { server } = createMawHttpServer({
@@ -470,6 +487,8 @@ test('HTTP status codes regression (Item 1): real HTTP server returns 400 on inv
     assert.equal(badRejectRes.statusCode, 409);
     assert.equal(badRejectRes.data.ok, false);
   } finally {
+    process.env.TEMP = oldTemp;
+    process.env.TMP = oldTmp;
     await new Promise<void>((resolve) => server.close(() => resolve()));
     try {
       fs.rmSync(tmp, { recursive: true, force: true });

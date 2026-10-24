@@ -19,16 +19,26 @@ function createTempScoreboardEnv() {
   fs.mkdirSync(tmp, { recursive: true });
   const mawHome = path.join(tmp, '.maw');
   const userProfile = path.join(tmp, 'user');
+  const tempDir = path.join(tmp, 'temp');
   fs.mkdirSync(mawHome, { recursive: true });
   fs.mkdirSync(userProfile, { recursive: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const oldTemp = process.env.TEMP;
+  const oldTmp = process.env.TMP;
+  process.env.TEMP = tempDir;
+  process.env.TMP = tempDir;
 
   const paths = resolveServerPaths({
     repoRoot: path.resolve(import.meta.dirname, '..', '..', '..', '..'),
     userProfile,
     mawHome,
   });
+  paths.tempDir = tempDir;
 
   const cleanup = () => {
+    process.env.TEMP = oldTemp;
+    process.env.TMP = oldTmp;
     try {
       fs.rmSync(tmp, { recursive: true, force: true });
     } catch {
@@ -249,6 +259,143 @@ test('suggest_team: computes score, confidence, handles tie-break, and falls bac
     assert.equal(withDataSuggestion.details.backend.confidence, 1);
     assert.ok(withDataSuggestion.details.backend.score > 0.8);
     assert.ok(withDataSuggestion.details.backend.reason.includes('approval 100%'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('suggest_team regression: candidates[] sorted descending by finalScore, and tie-break selects registry default or lower cost with explicit reason', () => {
+  const { paths, cleanup } = createTempScoreboardEnv();
+  try {
+    const registry = loadAgentRegistry(paths);
+    const budgetDir = paths.featureDataDir('budget');
+    fs.mkdirSync(budgetDir, { recursive: true });
+    const ledgerFile = path.join(budgetDir, 'ledger.jsonl');
+
+    const now = new Date();
+    // In registry defaults, frontend default is 'claude'.
+    // We create jobs for 'aider' and 'claude' for frontend role.
+    // We adjust metrics so:
+    // aider: 1 task, score 8.0, cost $1.00 -> finalScore ~ 0.505
+    // claude: 1 task, score 7.5, cost $1.00 -> finalScore ~ 0.495
+    // |Δ| = 0.010 < 0.02 (tie)
+    // Both have equal cost ($1.00). Claude is registry default for frontend.
+    // Result: claude must be chosen with 'tie-break: registry default'
+    // candidates[] must have aider first (0.505) and claude second (0.495)
+    const ledgerRows: LedgerJobRecord[] = [
+      {
+        job_id: 'job_aider_front',
+        mode: 'task',
+        agent: 'aider',
+        role: 'frontend',
+        status: 'DONE',
+        exit_code: 0,
+        started_at: new Date(now.getTime() - 20000).toISOString(),
+        finished_at: new Date(now.getTime() - 10000).toISOString(),
+        duration_s: 10,
+        cost_usd: 1.0,
+        review: { verdict: 'APPROVED', score: 8.0, rounds: 1 },
+      },
+      {
+        job_id: 'job_claude_front',
+        mode: 'task',
+        agent: 'claude',
+        role: 'frontend',
+        status: 'DONE',
+        exit_code: 0,
+        started_at: new Date(now.getTime() - 20000).toISOString(),
+        finished_at: new Date(now.getTime() - 10000).toISOString(),
+        duration_s: 10,
+        cost_usd: 1.0,
+        review: { verdict: 'APPROVED', score: 7.5, rounds: 1 },
+      },
+      // Backend test for lower cost tie-break:
+      // In registry, backend default is 'antigravity'.
+      // We test codex vs gemini (neither is registry default):
+      // codex: 1 task, score 8.0, cost $2.00
+      // gemini: 1 task, score 7.5, cost $0.10
+      // |Δ| < 0.02 (tie). Gemini cost is $0.10 vs Codex $2.00 (> $0.01 lower).
+      // Result: gemini chosen with 'tie-break: lower cost'
+      // candidates[] must have codex first and gemini second.
+      {
+        job_id: 'job_codex_back',
+        mode: 'task',
+        agent: 'codex',
+        role: 'backend',
+        status: 'DONE',
+        exit_code: 0,
+        started_at: new Date(now.getTime() - 20000).toISOString(),
+        finished_at: new Date(now.getTime() - 10000).toISOString(),
+        duration_s: 10,
+        cost_usd: 2.0,
+        review: { verdict: 'APPROVED', score: 8.0, rounds: 1 },
+      },
+      {
+        job_id: 'job_gemini_back',
+        mode: 'task',
+        agent: 'gemini',
+        role: 'backend',
+        status: 'DONE',
+        exit_code: 0,
+        started_at: new Date(now.getTime() - 20000).toISOString(),
+        finished_at: new Date(now.getTime() - 10000).toISOString(),
+        duration_s: 10,
+        cost_usd: 0.1,
+        review: { verdict: 'APPROVED', score: 7.5, rounds: 1 },
+      },
+    ];
+
+    fs.writeFileSync(
+      ledgerFile,
+      ledgerRows.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      'utf8'
+    );
+
+    const suggestion = suggestTeam(paths, registry, {
+      days: 30,
+      roles: ['frontend', 'backend'],
+    });
+
+    // 1. Verify Frontend: registry default tie-break
+    const frontDetail = suggestion.details.frontend;
+    assert.equal(suggestion.team.frontend, 'claude', 'claude should win frontend on registry default tie-break');
+    assert.equal(frontDetail.agent, 'claude');
+    assert.ok(
+      frontDetail.reason.includes('tie-break: registry default'),
+      `reason should contain 'tie-break: registry default', got: ${frontDetail.reason}`
+    );
+
+    // candidates[] must be strictly sorted by finalScore desc
+    for (let i = 0; i < frontDetail.candidates.length - 1; i++) {
+      assert.ok(
+        frontDetail.candidates[i]!.score >= frontDetail.candidates[i + 1]!.score,
+        'candidates must be sorted descending by score'
+      );
+    }
+    // Aider has higher score than claude, so aider must be candidates[0]
+    assert.equal(frontDetail.candidates[0]!.agent, 'aider');
+    const claudeCand = frontDetail.candidates.find((c) => c.agent === 'claude');
+    assert.ok(claudeCand);
+    assert.ok(frontDetail.candidates[0]!.score > claudeCand.score);
+
+    // 2. Verify Backend: lower cost tie-break
+    const backDetail = suggestion.details.backend;
+    assert.equal(suggestion.team.backend, 'gemini', 'gemini should win backend on lower cost tie-break');
+    assert.equal(backDetail.agent, 'gemini');
+    assert.ok(
+      backDetail.reason.includes('tie-break: lower cost'),
+      `reason should contain 'tie-break: lower cost', got: ${backDetail.reason}`
+    );
+
+    // candidates[] sorted descending by score
+    for (let i = 0; i < backDetail.candidates.length - 1; i++) {
+      assert.ok(
+        backDetail.candidates[i]!.score >= backDetail.candidates[i + 1]!.score,
+        'candidates must be sorted descending by score'
+      );
+    }
+    // Codex has higher score than gemini, so codex must be candidates[0]
+    assert.equal(backDetail.candidates[0]!.agent, 'codex');
   } finally {
     cleanup();
   }

@@ -25,8 +25,15 @@ function createTempEnv() {
   fs.mkdirSync(tmp, { recursive: true });
   const mawHome = path.win32.join(tmp, '.maw');
   const userProfile = path.win32.join(tmp, 'user');
+  const tempDir = path.win32.join(tmp, 'temp');
   fs.mkdirSync(mawHome, { recursive: true });
   fs.mkdirSync(userProfile, { recursive: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const oldTemp = process.env.TEMP;
+  const oldTmp = process.env.TMP;
+  process.env.TEMP = tempDir;
+  process.env.TMP = tempDir;
 
   const paths = resolveServerPaths({
     repoRoot: path.resolve(import.meta.dirname, '..', '..', '..', '..'),
@@ -35,6 +42,7 @@ function createTempEnv() {
   });
   const testJobsDir = path.win32.join(tmp, 'maw_jobs');
   paths.jobsDir = testJobsDir;
+  paths.tempDir = tempDir;
 
   const registry = loadAgentRegistry(paths);
   const ctx: MawFeatureContext = {
@@ -49,6 +57,8 @@ function createTempEnv() {
   };
 
   const cleanup = () => {
+    process.env.TEMP = oldTemp;
+    process.env.TMP = oldTmp;
     try {
       fs.rmSync(tmp, { recursive: true, force: true });
     } catch {

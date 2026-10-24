@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createFeatureContext, type MawFeature, type MawFeatureContext } from '../../lib/feature.ts';
+import { resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { detectRegistryAgents } from '../../lib/versions.ts';
 import {
@@ -73,6 +74,56 @@ function generateRecoveryId(): string {
   return `rec_${ts}_${hex}`;
 }
 
+let lastClaimsPruneMs = 0;
+
+export function pruneOldClaims(tempDir: string, nowMs: number): void {
+  if (nowMs - lastClaimsPruneMs < 3600 * 1000) {
+    return;
+  }
+  lastClaimsPruneMs = nowMs;
+  const claimsDir = path.win32.join(tempDir, 'maw_s4_claims');
+  try {
+    if (!fs.existsSync(claimsDir)) return;
+    const files = fs.readdirSync(claimsDir);
+    const maxAgeMs = 24 * 3600 * 1000;
+    for (const file of files) {
+      try {
+        const filePath = path.win32.join(claimsDir, file);
+        const stat = fs.statSync(filePath);
+        if (nowMs - stat.mtimeMs > maxAgeMs) {
+          fs.unlinkSync(filePath);
+        }
+      } catch {
+        // ignore per-file errors
+      }
+    }
+  } catch {
+    // ignore directory read errors
+  }
+}
+
+export function tryClaimJob(tempDir: string, jobId: string): boolean {
+  const claimsDir = path.win32.join(tempDir, 'maw_s4_claims');
+  try {
+    if (!fs.existsSync(claimsDir)) {
+      fs.mkdirSync(claimsDir, { recursive: true });
+    }
+  } catch {
+    // ignore
+  }
+  const claimPath = path.win32.join(claimsDir, jobId);
+  try {
+    const fd = fs.openSync(claimPath, 'wx');
+    fs.closeSync(fd);
+    return true;
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'code' in err && (err as { code: string }).code === 'EEXIST') {
+      return false;
+    }
+    return false;
+  }
+}
+
 export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
   await withRecoveryLock(async () => {
     const fallbackDir = ctx.paths.featureDataDir('fallback');
@@ -105,9 +156,28 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
     const nowMs = now.getTime();
     let changed = false;
 
+    pruneOldClaims(ctx.paths.tempDir, nowMs);
+
     for (const meta of jobs) {
       const jobId = String(meta.job_id ?? '').trim();
       if (!jobId || processedSet.has(jobId)) continue;
+
+      // Only consider jobs whose project_path resolves inside ctx.paths.projectsRoot; others marked processed silently.
+      const rawProj = String(meta.project_path ?? meta.project ?? meta.workdir ?? '').trim();
+      const resolvedProj = resolveProjectPath(rawProj, ctx.paths.projectsRoot);
+      if (!resolvedProj) {
+        processedSet.add(jobId);
+        changed = true;
+        continue;
+      }
+
+      const pushRecoveryItem = (item: RecoveryItem): boolean => {
+        if (!tryClaimJob(ctx.paths.tempDir, jobId)) {
+          return false;
+        }
+        recData.items.unshift(item);
+        return true;
+      };
 
       const status = String(meta.status ?? '');
       const exitCode = meta.exit_code !== undefined && meta.exit_code !== null ? Number(meta.exit_code) : null;
@@ -220,7 +290,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
             new_job_id: null,
             error: null,
           };
-          recData.items.unshift(item);
+          pushRecoveryItem(item);
         } else if (fbAgent) {
           const item: RecoveryItem = {
             id: generateRecoveryId(),
@@ -238,7 +308,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
             new_job_id: null,
             error: null,
           };
-          recData.items.unshift(item);
+          pushRecoveryItem(item);
         }
       } else if (classified.kind === 'usage_limit') {
         const lastStep = routingCfg.recovery.backoff_s[routingCfg.recovery.backoff_s.length - 1] ?? 1800;
@@ -282,7 +352,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
                 new_job_id: null,
                 error: null,
               };
-              recData.items.unshift(item);
+              pushRecoveryItem(item);
               continue;
             }
           }
@@ -307,7 +377,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
               new_job_id: null,
               error: null,
             };
-            recData.items.unshift(item);
+            pushRecoveryItem(item);
           } else {
             const item: RecoveryItem = {
               id: generateRecoveryId(),
@@ -325,7 +395,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
               new_job_id: null,
               error: null,
             };
-            recData.items.unshift(item);
+            pushRecoveryItem(item);
           }
         } else {
           const item: RecoveryItem = {
@@ -344,7 +414,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
             new_job_id: null,
             error: null,
           };
-          recData.items.unshift(item);
+          pushRecoveryItem(item);
         }
       } else if (classified.kind === 'transient') {
         const stepIndex = Math.min(attempt - 1, routingCfg.recovery.backoff_s.length - 1);
@@ -377,7 +447,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
             new_job_id: null,
             error: null,
           };
-          recData.items.unshift(item);
+          pushRecoveryItem(item);
         } else {
           const item: RecoveryItem = {
             id: generateRecoveryId(),
@@ -395,7 +465,7 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
             new_job_id: null,
             error: null,
           };
-          recData.items.unshift(item);
+          pushRecoveryItem(item);
         }
       }
     }

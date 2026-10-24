@@ -6,7 +6,12 @@ import test from 'node:test';
 import type { MawFeatureContext } from '../../../lib/feature.ts';
 import { resolveServerPaths } from '../../../lib/paths.ts';
 import { loadAgentRegistry } from '../../../lib/registry.ts';
-import { feature, scanFinishedJobs } from '../index.ts';
+import {
+  feature,
+  pruneOldClaims,
+  scanFinishedJobs,
+  tryClaimJob,
+} from '../index.ts';
 import {
   pickFallback,
   replaceAgent,
@@ -20,16 +25,28 @@ function createTempEnv() {
   const mawHome = path.win32.join(tmp, '.maw');
   const userProfile = path.win32.join(tmp, 'user');
   const jobsDir = path.win32.join(tmp, 'maw_jobs');
+  const tempDir = path.win32.join(tmp, 'temp');
+  const projectDir = path.win32.join(tmp, 'project');
   fs.mkdirSync(mawHome, { recursive: true });
   fs.mkdirSync(userProfile, { recursive: true });
   fs.mkdirSync(jobsDir, { recursive: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+  fs.mkdirSync(projectDir, { recursive: true });
+
+  const oldTemp = process.env.TEMP;
+  const oldTmp = process.env.TMP;
+  process.env.TEMP = tempDir;
+  process.env.TMP = tempDir;
 
   const paths = resolveServerPaths({
     repoRoot: path.resolve(import.meta.dirname, '..', '..', '..', '..'),
     userProfile,
     mawHome,
+    projectsRoot: tmp,
   });
   paths.jobsDir = jobsDir;
+  paths.tempDir = tempDir;
+  paths.projectsRoot = tmp;
 
   const registry = loadAgentRegistry(paths);
   const startedJobs: Array<Record<string, unknown>> = [];
@@ -48,6 +65,8 @@ function createTempEnv() {
   };
 
   const cleanup = () => {
+    process.env.TEMP = oldTemp;
+    process.env.TMP = oldTmp;
     try {
       fs.rmSync(tmp, { recursive: true, force: true });
     } catch {
@@ -55,7 +74,7 @@ function createTempEnv() {
     }
   };
 
-  return { tmp, paths, ctx, startedJobs, cleanup };
+  return { tmp, projectDir, paths, ctx, startedJobs, cleanup };
 }
 
 test('pickFallback: checks skip rules (self, disabled, cooldown, cap, capability)', () => {
@@ -232,7 +251,7 @@ test('replaceAgent: replaces agent across task, team, auto-gate, council modes',
 });
 
 test('recovery decisions table: transient backoff, usage_limit wait, max_attempts gave_up, and ignore cancelled', async () => {
-  const { paths, ctx, cleanup } = createTempEnv();
+  const { paths, projectDir, ctx, cleanup } = createTempEnv();
 
   try {
     const fallbackDir = paths.featureDataDir('fallback');
@@ -266,7 +285,7 @@ test('recovery decisions table: transient backoff, usage_limit wait, max_attempt
       agent: 'claude',
       role: 'backend',
       mode: 'task',
-      project_path: paths.projectsRoot,
+      project_path: projectDir,
     };
     fs.writeFileSync(path.win32.join(paths.jobsDir, 'job_transient_1.json'), JSON.stringify(job1Meta), 'utf8');
     fs.writeFileSync(path.win32.join(paths.jobsDir, 'job_transient_1.log'), 'HTTP 429 Too Many Requests\n', 'utf8');
@@ -308,7 +327,7 @@ test('recovery decisions table: transient backoff, usage_limit wait, max_attempt
       agent: 'claude',
       role: 'backend',
       mode: 'task',
-      project_path: paths.projectsRoot,
+      project_path: projectDir,
     };
     // Mark it as rerun of job1
     item1.new_job_id = 'job_transient_retry';
@@ -323,6 +342,94 @@ test('recovery decisions table: transient backoff, usage_limit wait, max_attempt
     const item3 = recData2.items.find((it: any) => it.source_job_id === 'job_transient_retry');
     assert.ok(item3 !== undefined);
     assert.equal(item3.status, 'gave_up', 'should give up when attempt >= max_attempts');
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression: foreign project job is skipped silently by scanFinishedJobs', async () => {
+  const { paths, ctx, cleanup } = createTempEnv();
+  try {
+    const fallbackDir = paths.featureDataDir('fallback');
+    fs.mkdirSync(fallbackDir, { recursive: true });
+
+    // Job with foreign project path outside projectsRoot
+    const foreignJobMeta = {
+      job_id: 'job_foreign_1',
+      status: 'FAILED',
+      exit_code: 1,
+      started_at: new Date(Date.now() - 5000).toISOString(),
+      finished_at: new Date().toISOString(),
+      agent: 'claude',
+      role: 'backend',
+      mode: 'task',
+      project_path: 'C:\\some_foreign_path_outside_root',
+    };
+    fs.writeFileSync(path.win32.join(paths.jobsDir, 'job_foreign_1.json'), JSON.stringify(foreignJobMeta), 'utf8');
+    fs.writeFileSync(path.win32.join(paths.jobsDir, 'job_foreign_1.log'), 'Error: crashed\n', 'utf8');
+
+    await scanFinishedJobs(ctx);
+
+    const recFile = path.win32.join(fallbackDir, 'recovery.json');
+    const recData = JSON.parse(fs.readFileSync(recFile, 'utf8'));
+
+    // Must be marked processed silently
+    assert.ok(recData.processed_jobs.includes('job_foreign_1'), 'job should be marked processed');
+    // Must NOT have created any recovery item
+    assert.equal(recData.items.length, 0, 'no recovery items should be created for foreign project');
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression: cross-process exclusive claim prevents duplicate recovery items and prunes old claims', async () => {
+  const { paths, projectDir, ctx, cleanup } = createTempEnv();
+  try {
+    const fallbackDir = paths.featureDataDir('fallback');
+    fs.mkdirSync(fallbackDir, { recursive: true });
+
+    // Test tryClaimJob directly
+    const firstClaim = tryClaimJob(paths.tempDir, 'claim_test_1');
+    assert.equal(firstClaim, true, 'first claim should succeed');
+    const secondClaim = tryClaimJob(paths.tempDir, 'claim_test_1');
+    assert.equal(secondClaim, false, 'second claim should fail with EEXIST');
+
+    // Simulate another process claiming job_claimed_before
+    tryClaimJob(paths.tempDir, 'job_claimed_before');
+
+    const claimedJobMeta = {
+      job_id: 'job_claimed_before',
+      status: 'FAILED',
+      exit_code: 1,
+      started_at: new Date(Date.now() - 5000).toISOString(),
+      finished_at: new Date().toISOString(),
+      agent: 'claude',
+      role: 'backend',
+      mode: 'task',
+      project_path: projectDir,
+    };
+    fs.writeFileSync(path.win32.join(paths.jobsDir, 'job_claimed_before.json'), JSON.stringify(claimedJobMeta), 'utf8');
+    fs.writeFileSync(path.win32.join(paths.jobsDir, 'job_claimed_before.log'), 'HTTP 429 Too Many Requests\n', 'utf8');
+
+    await scanFinishedJobs(ctx);
+
+    const recFile = path.win32.join(fallbackDir, 'recovery.json');
+    const recData = JSON.parse(fs.readFileSync(recFile, 'utf8'));
+
+    // Must be marked processed but no item added
+    assert.ok(recData.processed_jobs.includes('job_claimed_before'));
+    assert.equal(recData.items.length, 0, 'claimed job must not create recovery item');
+
+    // Test pruneOldClaims
+    const claimsDir = path.win32.join(paths.tempDir, 'maw_s4_claims');
+    const oldClaimPath = path.win32.join(claimsDir, 'old_claim_file');
+    fs.writeFileSync(oldClaimPath, 'old', 'utf8');
+    const oldTime = (Date.now() - 25 * 3600 * 1000) / 1000;
+    fs.utimesSync(oldClaimPath, oldTime, oldTime);
+
+    // Call prune with nowMs advancing 2 hours
+    pruneOldClaims(paths.tempDir, Date.now() + 7200 * 1000);
+    assert.equal(fs.existsSync(oldClaimPath), false, 'claims older than 24h should be pruned');
   } finally {
     cleanup();
   }

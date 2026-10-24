@@ -51,7 +51,16 @@ export interface CheckRunResult {
 export interface GateItem {
   id: string;
   label: string;
-  state: 'pass' | 'fail' | 'warn' | 'skip' | 'running' | 'untrusted' | 'timeout';
+  state:
+    | 'pass'
+    | 'fail'
+    | 'warn'
+    | 'skip'
+    | 'running'
+    | 'untrusted'
+    | 'timeout'
+    | 'stale'
+    | 'pending';
   detail: string;
   at: string;
 }
@@ -962,7 +971,7 @@ export async function computeGate(
       items.push({
         id: c.id,
         label: c.label || c.id,
-        state: c.required ? 'fail' : 'warn',
+        state: c.required ? 'pending' : 'warn',
         detail: 'never run',
         at: nowIso,
       });
@@ -989,7 +998,7 @@ export async function computeGate(
       items.push({
         id: c.id,
         label: c.label || c.id,
-        state: 'warn',
+        state: c.required ? 'stale' : 'warn',
         detail: 'stale, re-run',
         at: r.at || nowIso,
       });
@@ -997,7 +1006,7 @@ export async function computeGate(
       items.push({
         id: c.id,
         label: c.label || c.id,
-        state: c.required ? 'fail' : 'warn',
+        state: c.required ? 'timeout' : 'warn',
         detail: `timed out after ${c.timeout_s ?? 600}s`,
         at: r.at || nowIso,
       });
@@ -1212,7 +1221,13 @@ export async function computeGate(
   }
 
   const green = !items.some(
-    (it) => it.state === 'fail' || it.state === 'untrusted' || it.state === 'running'
+    (it) =>
+      it.state === 'fail' ||
+      it.state === 'timeout' ||
+      it.state === 'untrusted' ||
+      it.state === 'running' ||
+      it.state === 'stale' ||
+      it.state === 'pending'
   );
 
   return {
