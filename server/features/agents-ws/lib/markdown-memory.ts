@@ -31,6 +31,9 @@ export function parseDecisionsMarkdown(md: string): {
   let currentCommentMeta: Partial<MemoryEntry> = {};
   let currentBodyLines: string[] = [];
 
+  let inFence = false;
+  let fenceMarker = '';
+
   const flushCurrent = () => {
     if (currentId) {
       let body = currentBodyLines.join('\n').trim();
@@ -54,19 +57,34 @@ export function parseDecisionsMarkdown(md: string): {
     const line = lines[i]!;
     const trimmed = line.trim();
 
-    // Check ## ADR-xxxx
-    const headingMatch = /^##\s+(ADR-\d{4})(?:\s*[·:]\s*(.*))?$/i.exec(trimmed);
-    if (headingMatch) {
-      if (inEntry) {
-        flushCurrent();
-      } else {
-        inEntry = true;
+    // Track fenced code blocks (``` or ~~~)
+    if (!inFence) {
+      if (trimmed.startsWith('```') || trimmed.startsWith('~~~')) {
+        inFence = true;
+        fenceMarker = trimmed.slice(0, 3);
       }
-      currentId = headingMatch[1]!.toUpperCase();
-      currentTitle = (headingMatch[2] ?? '').trim();
-      currentCommentMeta = {};
-      currentBodyLines = [];
-      continue;
+    } else {
+      if (trimmed.startsWith(fenceMarker)) {
+        inFence = false;
+        fenceMarker = '';
+      }
+    }
+
+    // Check ## ADR-xxxx (only when outside code blocks)
+    if (!inFence) {
+      const headingMatch = /^##\s+(ADR-\d{4})(?:\s*[·:]\s*(.*))?$/i.exec(trimmed);
+      if (headingMatch) {
+        if (inEntry) {
+          flushCurrent();
+        } else {
+          inEntry = true;
+        }
+        currentId = headingMatch[1]!.toUpperCase();
+        currentTitle = (headingMatch[2] ?? '').trim();
+        currentCommentMeta = {};
+        currentBodyLines = [];
+        continue;
+      }
     }
 
     if (!inEntry) {
@@ -74,15 +92,17 @@ export function parseDecisionsMarkdown(md: string): {
       continue;
     }
 
-    // Check <!-- maw-memory {...} -->
-    const commentMatch = /<!--\s*maw-memory\s+({.*?})\s*-->/i.exec(trimmed);
-    if (commentMatch) {
-      try {
-        currentCommentMeta = JSON.parse(commentMatch[1]!) as Partial<MemoryEntry>;
-      } catch {
-        currentCommentMeta = {};
+    // Check <!-- maw-memory {...} --> (only directly under heading before body lines and outside fences)
+    if (!inFence && currentBodyLines.length === 0) {
+      const commentMatch = /<!--\s*maw-memory\s+({.*?})\s*-->/i.exec(trimmed);
+      if (commentMatch) {
+        try {
+          currentCommentMeta = JSON.parse(commentMatch[1]!) as Partial<MemoryEntry>;
+        } catch {
+          currentCommentMeta = {};
+        }
+        continue;
       }
-      continue;
     }
 
     currentBodyLines.push(line);

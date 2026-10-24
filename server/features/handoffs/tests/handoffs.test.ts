@@ -56,14 +56,14 @@ function setupHandoffTestContext() {
     const computedExitCode = nextExitCode !== null ? nextExitCode : (nextJobStatus === 'DONE' ? 0 : 1);
     const meta: Record<string, unknown> = {
       job_id: jobId,
-      pid: process.pid,
+      pid: nextJobStatus === 'RUNNING' ? 0 : 99999,
       mode: body.mode || 'task',
       agent: body.agent || 'codex',
       role: body.role || 'backend',
       status: nextJobStatus,
       exit_code: nextJobStatus === 'RUNNING' ? null : computedExitCode,
       started_at: new Date().toISOString(),
-      started_ts: Date.now(),
+      started_ts: Math.floor(Date.now() / 1000),
       project_path: body.project_path || testProj,
     };
     if (nextWorktree) {
@@ -293,7 +293,7 @@ test('handoffs: Invalid json block results in needs_review, retry and accept', a
 });
 
 test('handoffs: [finalize] cancel and accept append Lead message', async () => {
-  const { makeReq, testProj, baseCtx } = setupHandoffTestContext();
+  const { makeReq, testProj, baseCtx, setNextJobStatus } = setupHandoffTestContext();
 
   const saveTeamReq = makeReq({
     project_path: testProj,
@@ -310,6 +310,7 @@ test('handoffs: [finalize] cancel and accept append Lead message', async () => {
   const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
   const leadConvId = createConvRes.conversation.id;
 
+  setNextJobStatus('RUNNING');
   // Dispatch handoff
   const dispReq = makeReq({
     lead_conversation_id: leadConvId,
@@ -1168,6 +1169,214 @@ test('handoffs: [Item 4] handoff_dispatch rejects soft-deleted agent with 409', 
       await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq);
     },
     (err: any) => err instanceof ApiValidationError && err.statusCode === 409
+  );
+});
+
+test('handoffs: [Item 1] outside git scope checks mark needs_review for non-** roles and validate reported files', async () => {
+  const { makeReq, testProj, setNextReply, baseCtx } = setupHandoffTestContext();
+
+  // Non-git project (no git init)
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: {
+      ...BUILTIN_FULL_TEMPLATE.team,
+      shared: {
+        ...BUILTIN_FULL_TEMPLATE.team.shared,
+        workdir: testProj,
+      },
+    },
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  // 1. Scoped role (planner has write_scope: ['specs/**', 'docs/**']) reporting files inside scope -> still needs_review because outside git
+  setNextReply(`
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Scoped task inside scope",
+  "files_changed": ["specs/plan.md"]
+}
+\`\`\`
+`);
+  const dispReq1 = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'planner',
+    task: 'Scoped task',
+  });
+  const dispRes1 = (await feature.routes['handoff_dispatch']!.handler(dispReq1, dispReq1)) as any;
+  await tick(baseCtx);
+
+  const listRes1 = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const h1 = listRes1.handoffs.find((item: any) => item.id === dispRes1.handoff.id);
+  assert.equal(h1.status, 'needs_review');
+  assert.equal(h1.parse_error, 'changes could not be verified: not a git repository');
+  assert.deepEqual(h1.scope_violations, []);
+
+  // 2. Scoped role reporting files OUTSIDE scope -> both scope_violations and needs_review
+  setNextReply(`
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Violating task",
+  "files_changed": ["src/app.ts"]
+}
+\`\`\`
+`);
+  const dispReq2 = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'planner',
+    task: 'Violating task',
+  });
+  const dispRes2 = (await feature.routes['handoff_dispatch']!.handler(dispReq2, dispReq2)) as any;
+  await tick(baseCtx);
+
+  const listRes2 = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const h2 = listRes2.handoffs.find((item: any) => item.id === dispRes2.handoff.id);
+  assert.equal(h2.status, 'needs_review');
+  assert.equal(h2.parse_error, 'changes could not be verified: not a git repository');
+  assert.deepEqual(h2.scope_violations, ['src/app.ts']);
+
+  // 3. Read-only role (hacker with write_scope: []) reporting no changes -> still needs_review
+  setNextReply(`
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Read-only review",
+  "files_changed": []
+}
+\`\`\`
+`);
+  const dispReq3 = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'hacker',
+    task: 'Security review task',
+  });
+  const dispRes3 = (await feature.routes['handoff_dispatch']!.handler(dispReq3, dispReq3)) as any;
+  await tick(baseCtx);
+
+  const listRes3 = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const h3 = listRes3.handoffs.find((item: any) => item.id === dispRes3.handoff.id);
+  assert.equal(h3.status, 'needs_review');
+  assert.equal(h3.parse_error, 'changes could not be verified: not a git repository');
+
+  // 4. Unconstrained role (worker has write_scope: ["**"]) -> completes normally
+  setNextReply(`
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Unconstrained task",
+  "files_changed": ["any/file.ts"]
+}
+\`\`\`
+`);
+  const dispReq4 = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Worker task',
+  });
+  const dispRes4 = (await feature.routes['handoff_dispatch']!.handler(dispReq4, dispReq4)) as any;
+  await tick(baseCtx);
+
+  const listRes4 = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const h4 = listRes4.handoffs.find((item: any) => item.id === dispRes4.handoff.id);
+  assert.equal(h4.status, 'completed');
+});
+
+test('handoffs: [Item 2] handoff_cancel handles stop/cancel race when job already finished', async () => {
+  const { makeReq, testProj, setNextJobStatus, paths, baseCtx } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  setNextJobStatus('RUNNING');
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Race test task',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  const handoffId = dispRes.handoff.id;
+
+  // Job is started and running
+  await tick(baseCtx);
+
+  // Job transitions to DONE on disk before cancel is delivered
+  const listRes1 = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const h1 = listRes1.handoffs.find((item: any) => item.id === handoffId);
+  assert.equal(h1.status, 'running');
+  assert.ok(h1.job_id);
+
+  const metaFile = path.win32.join(paths.jobsDir, `${h1.job_id}.json`);
+  const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8'));
+  meta.status = 'DONE';
+  meta.exit_code = 0;
+  fs.writeFileSync(metaFile, JSON.stringify(meta), 'utf8');
+
+  // Cancel call when job is already finished
+  const cancelReq = makeReq({ id: handoffId });
+  const cancelRes = (await feature.routes['handoff_cancel']!.handler(cancelReq, cancelReq)) as any;
+  assert.equal(cancelRes.ok, true);
+  assert.equal(cancelRes.already_finished, true);
+
+  // Handoff was NOT marked cancelled; real result was finalized
+  const listRes2 = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const h2 = listRes2.handoffs.find((item: any) => item.id === handoffId);
+  assert.notEqual(h2.status, 'cancelled');
+});
+
+test('handoffs: [Item 5] handoff_dispatch requires dispatching agent role to have may_delegate: true', async () => {
+  const { makeReq, testProj } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+
+  // Worker agent has may_delegate: false
+  const workerAgent = applyRes.agents.find((a: any) => a.team_role === 'worker');
+  const workerConvReq = makeReq({ agent_id: workerAgent.id });
+  const workerConvRes = (await chatFeature.routes['chat_create']!.handler(workerConvReq, workerConvReq)) as any;
+
+  // Dispatch attempted from worker conversation
+  await assert.rejects(
+    async () => {
+      const dispReq = makeReq({
+        lead_conversation_id: workerConvRes.conversation.id,
+        to: 'reviewer',
+        task: 'Worker attempting to delegate',
+      });
+      await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq);
+    },
+    (err: any) =>
+      err instanceof ApiValidationError &&
+      err.statusCode === 403 &&
+      err.message.includes('may_delegate: false')
   );
 });
 

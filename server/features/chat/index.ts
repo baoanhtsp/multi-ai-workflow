@@ -654,20 +654,36 @@ export const feature: MawFeature = {
 
           const jobId = conv.active_job_id;
           let cancelSucceeded = false;
+          let alreadyFinished = false;
           try {
             await handleCancelJob({ job_id: jobId }, ctx.paths);
             cancelSucceeded = true;
           } catch (err: unknown) {
-            // Item 3: Only clear if handleCancelJob succeeded or reports job is no longer RUNNING (409 with terminal status)
+            // Item 2 (Pass 5): Stop / cancel race: when handleCancelJob answers 409 with a terminal status (DONE / FAILED / CANCELLED),
+            // do NOT clear active_job_id and do NOT mark the handoff cancelled — run tick() so the real result is recorded,
+            // and return { ok: true, already_finished: true }. Only a successful cancel finalizes as cancelled.
             if (
               err instanceof ApiValidationError &&
               err.statusCode === 409 &&
               typeof (err as unknown as Record<string, unknown>).status === 'string'
             ) {
-              cancelSucceeded = true;
+              const termStatus = String((err as unknown as Record<string, unknown>).status);
+              if (['DONE', 'FAILED', 'CANCELLED'].includes(termStatus)) {
+                alreadyFinished = true;
+              } else {
+                cancelSucceeded = true;
+              }
             } else {
               throw err;
             }
+          }
+
+          if (alreadyFinished) {
+            await tick(ctx);
+            return {
+              ok: true,
+              already_finished: true,
+            };
           }
 
           if (cancelSucceeded) {

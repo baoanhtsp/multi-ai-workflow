@@ -49,21 +49,24 @@ function setupChatTestContext() {
 
   baseCtx.startJob = async (body: Record<string, unknown>) => {
     const jobId = 'job_' + crypto.randomBytes(4).toString('hex');
+    const isRunning = nextJobStatus === 'RUNNING';
     const meta = {
       job_id: jobId,
-      pid: 99999,
+      pid: isRunning ? 0 : 99999,
       mode: body.mode || 'task',
       agent: body.agent || 'claude',
       role: body.role || 'backend',
       status: nextJobStatus,
-      exit_code: nextJobStatus === 'DONE' ? 0 : 1,
+      exit_code: isRunning ? null : (nextJobStatus === 'DONE' ? 0 : 1),
       started_at: new Date().toISOString(),
-      started_ts: Date.now(),
+      started_ts: Math.floor(Date.now() / 1000),
       project_path: body.project_path || testProj,
     };
     fs.writeFileSync(path.win32.join(paths.jobsDir, `${jobId}.json`), JSON.stringify(meta), 'utf8');
 
-    const log = `
+    const log = isRunning
+      ? `[Connected] Model: test-model\r\nJob actively running...\r\n`
+      : `
 --------------------------------------------------
 [Connected] Model: test-model
 ${nextReply}
@@ -112,7 +115,7 @@ ${nextReply}
 }
 
 test('chat: Full turn lifecycle, tick processing, busy queue and stop', async () => {
-  const { makeReq, testProj, baseCtx, setNextReply } = setupChatTestContext();
+  const { makeReq, testProj, baseCtx, setNextReply, setNextJobStatus } = setupChatTestContext();
 
   // 1. Create agent
   const agReq = makeReq({
@@ -179,6 +182,7 @@ test('chat: Full turn lifecycle, tick processing, busy queue and stop', async ()
   assert.ok(getRes2.messages.some((m: any) => m.text.includes('Second queued turn finished')));
 
   // 6. Stop active turn
+  setNextJobStatus('RUNNING');
   const sendReqStop = makeReq({ conversation_id: convId, text: 'Turn to stop' });
   await feature.routes['chat_send']!.handler(sendReqStop, sendReqStop);
 
@@ -452,7 +456,7 @@ test('chat: [concurrency] withS6State serializes concurrent operations', async (
 });
 
 test('chat: [Item 3] chat_stop handles cancellation success, 409 already terminated, and preserves tracking on unexpected error', async () => {
-  const { makeReq, testProj, paths } = setupChatTestContext();
+  const { makeReq, testProj, paths, setNextJobStatus } = setupChatTestContext();
 
   const agReq = makeReq({
     agent: { name: 'StopTestBot', platform: 'claude', workdir: testProj },
@@ -463,6 +467,7 @@ test('chat: [Item 3] chat_stop handles cancellation success, 409 already termina
   const convId = convRes.conversation.id;
 
   // Path 1: start a turn, job meta exists in RUNNING state -> chat_stop succeeds and clears active_job_id
+  setNextJobStatus('RUNNING');
   const sendRes = (await feature.routes['chat_send']!.handler(
     makeReq({ conversation_id: convId, text: 'Running task' }),
     makeReq()
@@ -481,7 +486,8 @@ test('chat: [Item 3] chat_stop handles cancellation success, 409 already termina
   assert.equal(getRes1.conversation.active_job_id, '', 'active_job_id cleared on successful cancel');
 
   // Path 2: Job meta is already in terminal state (DONE). handleCancelJob throws 409 with status.
-  // chat_stop should safely clear active_job_id because job is no longer running.
+  // chat_stop runs tick() and answers already_finished: true without clearing active_job_id prematurely.
+  setNextJobStatus('RUNNING');
   const sendRes2 = (await feature.routes['chat_send']!.handler(
     makeReq({ conversation_id: convId, text: 'Second task' }),
     makeReq()
@@ -494,7 +500,7 @@ test('chat: [Item 3] chat_stop handles cancellation success, 409 already termina
 
   const stopRes2 = (await feature.routes['chat_stop']!.handler(stopReq, stopReq)) as any;
   assert.equal(stopRes2.ok, true);
-  assert.equal(stopRes2.cancelled, jobId2);
+  assert.equal(stopRes2.already_finished, true);
 
   const getRes2 = (await feature.routes['chat_get']!.handler(
     makeReq({}, { conversation_id: convId }),

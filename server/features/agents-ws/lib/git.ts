@@ -62,9 +62,15 @@ export async function getDirtyFilesWithHashes(
     }
 
     const lines = statusRes.stdout.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    const toHash = lines.slice(0, 500);
+    if (lines.length > 500) {
+      return {
+        ok: false,
+        files: {},
+        error: `too many uncommitted files to verify (${lines.length})`,
+      };
+    }
 
-    for (const line of toHash) {
+    for (const line of lines) {
       const filePart = line.slice(3).trim();
       let relPath = filePart;
       if (filePart.includes(' -> ')) {

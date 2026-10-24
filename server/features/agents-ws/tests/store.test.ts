@@ -6,7 +6,9 @@ import test from 'node:test';
 import { createFeatureContext, type MawFeatureRequest } from '../../../lib/feature.ts';
 import { resolveServerPaths } from '../../../lib/paths.ts';
 import { ApiValidationError } from '../../../lib/validate.ts';
+import { runCommand } from '../../../lib/proc.ts';
 import { feature } from '../index.ts';
+import { getDirtyFilesWithHashes } from '../lib/git.ts';
 import { assertSafeProjectMawWrite } from '../lib/security.ts';
 import { writeJsonStore } from '../lib/store.ts';
 
@@ -378,5 +380,39 @@ test('store: [Item 6] ws_platforms and ws_agent_save accept detected Codex model
   const saveRes = (await feature.routes['ws_agent_save']!.handler(saveReq, saveReq)) as any;
   assert.equal(saveRes.ok, true);
   assert.equal(saveRes.agent.model, 'gpt-5-codex-detected');
+});
+
+test('git: [Item 3] getDirtyFilesWithHashes returns verification failure error when uncommitted files exceed 500', async () => {
+  const tempRepo = fs.mkdtempSync(path.join(ORIG_TMP, 'maw-dirty-cap-test-'));
+  try {
+    await runCommand('git.exe', ['-C', tempRepo, 'init']);
+    await runCommand('git.exe', ['-C', tempRepo, 'config', 'user.name', 'Tester']);
+    await runCommand('git.exe', ['-C', tempRepo, 'config', 'user.email', 'test@example.com']);
+
+    // Create 501 untracked files
+    for (let i = 0; i < 501; i++) {
+      fs.writeFileSync(path.join(tempRepo, `test_file_${i}.txt`), `content ${i}\n`, 'utf8');
+    }
+
+    const resOverCap = await getDirtyFilesWithHashes(tempRepo);
+    assert.equal(resOverCap.ok, false);
+    assert.ok(
+      resOverCap.error?.includes('too many uncommitted files to verify (501)'),
+      `Expected error to mention 501 files, got: ${resOverCap.error}`
+    );
+
+    // Remove files so count is 3 (well below 500)
+    for (let i = 3; i < 501; i++) {
+      fs.unlinkSync(path.join(tempRepo, `test_file_${i}.txt`));
+    }
+
+    const resUnderCap = await getDirtyFilesWithHashes(tempRepo);
+    assert.equal(resUnderCap.ok, true);
+    assert.equal(Object.keys(resUnderCap.files).length, 3);
+  } finally {
+    try {
+      fs.rmSync(tempRepo, { recursive: true, force: true });
+    } catch {}
+  }
 });
 

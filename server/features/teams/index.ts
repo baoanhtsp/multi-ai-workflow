@@ -458,7 +458,18 @@ export const feature: MawFeature = {
             throw new ApiValidationError('Team configuration not found. Please save a team first.', 404);
           }
 
-          const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
+          // Item 4 (Codex Pass 5): team_apply must re-validate the team.json it reads (validateTeam + safe .maw write check)
+          assertSafeProjectMawWrite(validPath, path.join('.maw', 'team.json'), ctx.paths.projectsRoot);
+
+          let rawTeam: unknown;
+          try {
+            rawTeam = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
+          } catch {
+            throw new ApiValidationError('Invalid team configuration JSON.', 400);
+          }
+
+          const validated = validateTeam(rawTeam, ctx);
+          const team = validated.team;
           const agentsDir = ctx.paths.featureDataDir('agents-ws');
           const groupsFile = path.win32.join(agentsDir, 'groups.json');
           const agentsFile = path.win32.join(agentsDir, 'agents.json');
@@ -490,9 +501,25 @@ export const feature: MawFeature = {
 
           for (let i = 0; i < enabledRoles.length; i++) {
             const role = enabledRoles[i]!;
-            const platform = role.override?.platform || team.shared.platform || 'claude';
-            const model = role.override?.model || team.shared.model || '';
-            const effort = role.override?.effort || team.shared.effort || '';
+            const platform = (role.override?.platform || team.shared.platform || 'claude').toLowerCase();
+            const allowed = allowedModels(ctx, platform);
+            const regAgent = ctx.registry.agents.find((a) => a.id === platform);
+            const allowedEfforts = regAgent?.efforts ?? [];
+
+            let model = '';
+            if (role.override?.model) {
+              model = role.override.model;
+            } else if (team.shared.model && allowed.includes(team.shared.model)) {
+              model = team.shared.model;
+            }
+
+            let effort = '';
+            if (role.override?.effort) {
+              effort = role.override.effort;
+            } else if (team.shared.effort && allowedEfforts.includes(team.shared.effort)) {
+              effort = team.shared.effort;
+            }
+
             const workdir = role.override?.workdir || team.shared.workdir || validPath;
 
             let agent: Agent | undefined;
@@ -579,6 +606,7 @@ export const feature: MawFeature = {
           }
 
           await writeJsonStore(agentsFile, agentsData);
+          assertSafeProjectMawWrite(validPath, path.join('.maw', 'team.json'), ctx.paths.projectsRoot);
           await writeJsonStore(teamFile, team);
 
           return {

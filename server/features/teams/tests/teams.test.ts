@@ -521,3 +521,57 @@ test('teams: [Item 3] team_save and team_import reject junction escape on .maw w
   }
 });
 
+test('teams: [Item 4] team_apply re-validates team.json and resolves model/effort against effective platform', async () => {
+  const { makeReq, testProj } = setupTestContext();
+
+  const saveReq = makeReq({
+    project_path: testProj,
+    team: {
+      ...BUILTIN_FULL_TEMPLATE.team,
+      shared: {
+        ...BUILTIN_FULL_TEMPLATE.team.shared,
+        platform: 'claude',
+        model: 'sonnet',
+        effort: '',
+        workdir: testProj,
+      },
+      roles: BUILTIN_FULL_TEMPLATE.team.roles.map((r) => {
+        if (r.key === 'worker') {
+          // Overrides platform to codex without overriding model/effort
+          return {
+            ...r,
+            override: { platform: 'codex' },
+          };
+        }
+        return r;
+      }),
+    },
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await feature.routes['team_save']!.handler(saveReq, saveReq);
+
+  // Apply team
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await feature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  assert.equal(applyRes.ok, true);
+
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+  assert.equal(leadAgent.platform, 'claude');
+  assert.equal(leadAgent.model, 'sonnet', 'Lead inherits shared claude model');
+
+  const workerAgent = applyRes.agents.find((a: any) => a.team_role === 'worker');
+  assert.equal(workerAgent.platform, 'codex');
+  assert.equal(workerAgent.model, '', 'Worker with effective platform codex does NOT inherit claude model');
+
+  // Verify invalid team.json on disk is rejected by team_apply re-validation
+  const teamFile = path.win32.join(testProj, '.maw', 'team.json');
+  fs.writeFileSync(teamFile, JSON.stringify({ invalid: 'no roles array' }), 'utf8');
+
+  await assert.rejects(
+    async () => {
+      await feature.routes['team_apply']!.handler(applyReq, applyReq);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+});
+

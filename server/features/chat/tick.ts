@@ -837,11 +837,24 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         let finalStatus: HandoffStatus = h.result.status;
         const targetAgent = agentsData.agents.find((a) => a.id === h.to);
         const checkDir = h.worktree || targetAgent?.workdir || '';
+
+        let writeScope: string[] = ['**'];
+        if (targetAgent?.workdir) {
+          const teamFile = path.win32.join(targetAgent.workdir, '.maw', 'team.json');
+          if (isFileSafe(teamFile)) {
+            try {
+              const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
+              const role = team.roles.find((r) => r.key === h.to_role);
+              writeScope = role?.override?.write_scope ?? team.shared.write_scope ?? ['**'];
+            } catch {}
+          }
+        }
+
         if (checkDir && hasGitRepo(checkDir)) {
           let changedRes: WorktreeChangedFilesResult;
           // Item 2 (Pass 4): Write-scope checks must fail closed: if git baseline or end-of-job listing cannot be collected, go to needs_review
           if (h.baseline_error) {
-            changedRes = { ok: false, files: [], error: 'could not list changed files' };
+            changedRes = { ok: false, files: [], error: h.baseline_error_message || 'could not list changed files' };
           } else if (h.isolated && h.worktree) {
             changedRes = await getWorktreeChangedFiles(h.worktree, h.base_commit);
           } else if (h.base_commit || h.dirty_baseline) {
@@ -851,22 +864,10 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
           }
 
           if (!changedRes.ok) {
-            h.parse_error = 'could not list changed files';
+            h.parse_error = changedRes.error || 'could not list changed files';
             finalStatus = 'needs_review';
           } else {
             const unionFiles = new Set([...changedRes.files, ...h.result.files_changed]);
-
-            let writeScope: string[] = ['**'];
-            if (targetAgent?.workdir) {
-              const teamFile = path.win32.join(targetAgent.workdir, '.maw', 'team.json');
-              if (isFileSafe(teamFile)) {
-                try {
-                  const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
-                  const role = team.roles.find((r) => r.key === h.to_role);
-                  writeScope = role?.override?.write_scope ?? team.shared.write_scope ?? ['**'];
-                } catch {}
-              }
-            }
 
             const violations: string[] = [];
             for (const f of unionFiles) {
@@ -909,6 +910,26 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
               h.scope_violations = violations;
               finalStatus = 'needs_review';
             }
+          }
+        } else {
+          // Item 1 (Codex Pass 5): Scope check outside git: when the member's folder is not a git repo,
+          // still validate the member's reported files_changed against write_scope, and since actual changes
+          // cannot be verified, mark the handoff needs_review ("changes could not be verified: not a git repository")
+          // for any role whose write_scope is not ["**"] (read-only roles always).
+          const violations: string[] = [];
+          for (const f of h.result.files_changed) {
+            if (!matchesAnyScope(f, writeScope)) {
+              violations.push(f);
+            }
+          }
+          if (violations.length > 0) {
+            h.scope_violations = violations;
+            finalStatus = 'needs_review';
+          }
+          const isUnconstrained = writeScope.length === 1 && writeScope[0] === '**';
+          if (!isUnconstrained) {
+            finalStatus = 'needs_review';
+            h.parse_error = 'changes could not be verified: not a git repository';
           }
         }
 
@@ -1142,6 +1163,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       let baseCommit: string | null = null;
       let dirtyBaseline: Record<string, string> | undefined;
       let baselineError = false;
+      let baselineErrorMessage = '';
       if (memberAgent.workdir && hasGitRepo(memberAgent.workdir)) {
         const commitRes = await getBaseCommitResult(memberAgent.workdir);
         if (!commitRes.ok) {
@@ -1155,6 +1177,9 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
             dirtyBaseline = dirtyRes.files;
           } else {
             baselineError = true;
+            if (dirtyRes.error) {
+              baselineErrorMessage = dirtyRes.error;
+            }
           }
         }
       }
@@ -1183,6 +1208,9 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         }
         if (baselineError) {
           h.baseline_error = true;
+          if (baselineErrorMessage) {
+            h.baseline_error_message = baselineErrorMessage;
+          }
         }
 
         // Item 1 (Codex Pass 4): Parallel dispatch only with CONFIRMED isolation:

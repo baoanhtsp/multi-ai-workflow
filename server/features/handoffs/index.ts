@@ -160,6 +160,7 @@ export const feature: MawFeature = {
 
           let toRole = to;
           let memberPlatform = memberAgent?.platform || 'codex';
+          let mayDelegate: boolean | null = null;
 
           if (leadAgent.workdir) {
             const teamFile = path.win32.join(leadAgent.workdir, '.maw', 'team.json');
@@ -168,6 +169,12 @@ export const feature: MawFeature = {
                 const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
                 if (team.id) {
                   teamId = team.id;
+                }
+                const leadRole = team.roles.find(
+                  (r) => r.key === leadAgent.team_role || r.agent_id === leadAgent.id
+                );
+                if (leadRole) {
+                  mayDelegate = Boolean(leadRole.may_delegate);
                 }
                 const r = team.roles.find(
                   (role) => role.key === to || role.name.toLowerCase() === to.toLowerCase() || role.agent_id === to
@@ -181,6 +188,18 @@ export const feature: MawFeature = {
                 memberPlatform = memberAgent?.platform || team.shared.platform || 'codex';
               } catch {}
             }
+          }
+
+          if (mayDelegate === null) {
+            mayDelegate = leadAgent.team_role === 'lead' || leadAgent.team_role === 'deputy';
+          }
+
+          // Item 5 (Codex Pass 5): handoff_dispatch must require the dispatching agent's role to have may_delegate: true (403/400 otherwise)
+          if (!mayDelegate) {
+            throw new ApiValidationError(
+              'Dispatching agent does not have permission to delegate (may_delegate: false).',
+              403
+            );
           }
 
           // Fallback: match by lead workdir + team_role if team ID changed (e.g. after import)
@@ -288,24 +307,40 @@ export const feature: MawFeature = {
           }
 
           let cancelSucceeded = false;
+          let alreadyFinished = false;
           if (handoff.status === 'running' && handoff.job_id) {
             try {
               await handleCancelJob({ job_id: handoff.job_id }, ctx.paths);
               cancelSucceeded = true;
             } catch (err: unknown) {
-              // Item 2: Only finalize as cancelled when cancel succeeded or job is no longer RUNNING
+              // Item 2 (Pass 5): Stop / cancel race: when handleCancelJob answers 409 with a terminal status (DONE / FAILED / CANCELLED),
+              // do NOT clear active_job_id and do NOT mark the handoff cancelled — run tick() so the real result is recorded,
+              // and return { ok: true, already_finished: true }. Only a successful cancel finalizes as cancelled.
               if (
                 err instanceof ApiValidationError &&
                 err.statusCode === 409 &&
                 typeof (err as unknown as Record<string, unknown>).status === 'string'
               ) {
-                cancelSucceeded = true;
+                const termStatus = String((err as unknown as Record<string, unknown>).status);
+                if (['DONE', 'FAILED', 'CANCELLED'].includes(termStatus)) {
+                  alreadyFinished = true;
+                } else {
+                  cancelSucceeded = true;
+                }
               } else {
                 throw err;
               }
             }
           } else {
             cancelSucceeded = true;
+          }
+
+          if (alreadyFinished) {
+            await tick(ctx);
+            return {
+              ok: true,
+              already_finished: true,
+            };
           }
 
           if (cancelSucceeded) {

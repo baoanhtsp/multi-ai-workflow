@@ -40,5 +40,6 @@ export interface Handoff {
   base_commit?: string;
   dirty_baseline?: Record<string, string>;
   baseline_error?: boolean;
+  baseline_error_message?: string;
   lead_notified_at?: string;
 }
