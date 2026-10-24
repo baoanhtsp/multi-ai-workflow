@@ -77,6 +77,8 @@ if (-not $claudeExe -or -not (Test-Path $claudeExe)) {
 }
 
 # 2. Configure Token-Optimal Flags per Role
+# NOTE: Never pass an empty string "" in @roleFlags to native .exe in PowerShell 5.1,
+# because PS 5.1 drops empty strings and shifts the next flag (--append-system-prompt) into --tools!
 $commonFlags = @(
     "-p",
     "--disable-slash-commands",
@@ -88,17 +90,22 @@ $sessionFlag = if ($ContinueSession) { "--continue" } else { "--no-session-persi
 
 switch ($Role) {
     "architect" {
+        # Opus: Architecture, API contract, SPEC.md authoring & UI design system seed
         $model  = if ($ModelOverride) { $ModelOverride } else { "opus" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "high" }
         $roleFlags = @(
             "--model", $model,
             "--effort", $effort,
-            "--tools", "",
-            "--append-system-prompt", "CRITICAL: All tools are disabled in this session to save tokens. Do NOT output <invoke> or attempt to call any tools (no Read, Grep, Glob, Bash). Provide your complete response directly based solely on the user prompt.",
+            "--tools", "Read,Edit,Write",
+            "--add-dir", $WorkDir,
+            "--append-system-prompt", "CRITICAL: Only Read, Edit, and Write tools are enabled. Do NOT use Grep, Glob, or Bash. Use the provided workspace snapshot to read key config files and write/update SPEC.md directly.",
+            "--permission-mode", "bypassPermissions",
+            "--dangerously-skip-permissions",
             $sessionFlag
         )
     }
     "frontend" {
+        # Sonnet: 100% Frontend implementation with restricted file tools only (no Bash/Grep wandering)
         $model  = if ($ModelOverride) { $ModelOverride } else { "sonnet" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "medium" }
         $roleFlags = @(
@@ -113,17 +120,22 @@ switch ($Role) {
         )
     }
     "reviewer" {
+        # Sonnet: Code review & scoring based on pre-collected git diff + test output
         $model  = if ($ModelOverride) { $ModelOverride } else { "sonnet" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "medium" }
         $roleFlags = @(
             "--model", $model,
             "--effort", $effort,
-            "--tools", "",
-            "--append-system-prompt", "CRITICAL: All tools are disabled in this session to save tokens. Do NOT output <invoke> or attempt to call any tools (no Read, Grep, Glob, Bash). Grade and review directly using ONLY the code/diff provided in the prompt.",
+            "--tools", "Read",
+            "--add-dir", $WorkDir,
+            "--append-system-prompt", "CRITICAL: Do NOT use Grep, Glob, Bash, Edit, or Write. Grade and review directly using the code/diff provided in the prompt.",
+            "--permission-mode", "bypassPermissions",
+            "--dangerously-skip-permissions",
             $sessionFlag
         )
     }
     "ui-tweak" {
+        # Haiku: Fast, low-cost minor UI adjustments, CSS fixes, or API variable alignment checks
         $model  = if ($ModelOverride) { $ModelOverride } else { "haiku" }
         $effort = if ($EffortOverride) { $EffortOverride } else { "low" }
         $roleFlags = @(
@@ -141,6 +153,17 @@ switch ($Role) {
 
 Push-Location $WorkDir
 try {
+    # Automatically attach compact workspace file snapshot for architect/frontend if not already in prompt
+    if ($Role -in @("architect", "frontend") -and (Test-Path $WorkDir)) {
+        $topItems = @(Get-ChildItem -Path $WorkDir -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notin @('.git', 'node_modules', 'vendor', '.idea', '.vscode') } |
+            ForEach-Object { if ($_.PSIsContainer) { "$($_.Name)/" } else { $_.Name } })
+        if ($topItems.Count -gt 0) {
+            $snapshot = "[Workspace Root ($WorkDir) Files]: " + ($topItems -join ", ")
+            $Prompt = "$snapshot`n`n$Prompt"
+        }
+    }
+
     if ($IncludeGitDiff) {
         $gitStatus = (git status -s 2>$null) -join "`n"
         $gitDiff = (git diff HEAD 2>$null) -join "`n"
@@ -160,9 +183,14 @@ try {
         exit 1
     }
 
+    Write-Output "[$(Get-Date -Format 'HH:mm:ss')] Invoking Claude Code (Role: $Role | Model: $model | Effort: $effort | WorkDir: $WorkDir)..."
     $allArgs = $commonFlags + $roleFlags
-    $outputLines = $Prompt | & $claudeExe @allArgs | Tee-Object -Variable capturedOut
-    $outputLines
+    $capturedOut = [System.Collections.Generic.List[string]]::new()
+    $Prompt | & $claudeExe @allArgs 2>&1 | ForEach-Object {
+        $line = $_.ToString()
+        $capturedOut.Add($line)
+        Write-Output $line
+    }
 
     try {
         $auditFile = Join-Path $env:USERPROFILE ".gemini\antigravity\multi-ai-audit.jsonl"
