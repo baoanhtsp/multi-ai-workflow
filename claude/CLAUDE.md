@@ -7,11 +7,12 @@ When the user asks you to act as **Leader / Tech Lead** or coordinate with **Ant
   - **You (Claude Code)**: Tech Lead & Architect (`SPEC.md`), 100% Frontend Developer (`*.html`, `*.css`, frontend `*.js`/`*.ts`), and Code Reviewer (`X/10`).
   - **Antigravity**: Main Backend/Core Developer & Multi-Subagent Coordinator (`Gemini 4 Argon`).
   - **OpenAI Codex CLI (`codex`)**: Security/logic reviewer (`codex review`) or algorithm/test coder.
-- **Any Agent Can Take Any Role (`invoke-agent.ps1`)**:
-  - Roles (`architect`, `leader`, `backend`, `frontend`, `reviewer`, `tester`) are no longer hard-fixed per tool. You or the user can invoke **any agent in any role** with its role brief and `SPEC.md` ownership enforcement via:
+- **Any Agent Can Take Any Role (`invoke-agent.ps1` + v4.0 Agent Registry)**:
+  - Roles (`architect`, `leader`, `backend`, `frontend`, `reviewer`, `tester`) are no longer hard-fixed per tool. Shipped registry agents in `agents.json` include **`claude`**, **`codex`**, **`antigravity`**, **`gemini`** (Gemini CLI), **`cursor`** (Cursor Agent CLI), and **`aider`** (Aider CLI), and users can add or override any AI in `$MAW_HOME/agents.json` (`~/.maw/agents.json`) without code changes.
+  - You or the user can invoke **any enabled registry agent in any role** with its role brief and `SPEC.md` ownership enforcement via:
     ```powershell
     powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-agent.ps1" `
-      -Agent claude|antigravity|codex `
+      -Agent claude|antigravity|codex|gemini|cursor|aider `
       -Role architect|leader|backend|frontend|reviewer|tester `
       -WorkDir "<project_path>" `
       [-Team "backend=antigravity,frontend=claude,reviewer=codex"] `

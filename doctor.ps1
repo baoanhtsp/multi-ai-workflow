@@ -71,7 +71,7 @@ if ($claudeExe -and (Test-Path -LiteralPath $claudeExe)) {
 }
 
 # 3. OpenAI Codex CLI
-Write-Host "`n[3/6] OpenAI Codex CLI" -ForegroundColor Yellow
+Write-Host "`n[3/6] OpenAI Codex CLI & v4.0 Agent Registry" -ForegroundColor Yellow
 $codexExe = $null
 $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
 if ($codexCmd) {
@@ -88,6 +88,72 @@ if ($codexExe -and (Test-Path -LiteralPath $codexExe)) {
     Write-Host "  [OK] codex CLI found: $codexExe ($codexVer)" -ForegroundColor Green
 } else {
     Write-Host "  [FAIL] codex CLI NOT found in PATH or $env:APPDATA\npm\codex.ps1" -ForegroundColor Red
+}
+
+$regLibPath = Join-Path $PSScriptRoot "antigravity\skills\claude-leader\scripts\lib\maw-registry.ps1"
+if (-not (Test-Path -LiteralPath $regLibPath)) {
+    $regLibPath = Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\lib\maw-registry.ps1"
+}
+if (Test-Path -LiteralPath $regLibPath) {
+    . $regLibPath
+    $scriptsDirForReg = Split-Path -Parent (Split-Path -Parent $regLibPath)
+    $regData = Get-AgentRegistry -ScriptsDir $scriptsDirForReg -IncludeDisabled
+    Write-Host "`n  --- Registered AI Agents (v4.0 Registry) ---" -ForegroundColor Cyan
+    foreach ($ag in $regData.all_agents) {
+        $agInstalled = $false
+        $agVer = "n/a"
+        if ($ag.id -eq "claude") {
+            $agInstalled = [bool]($claudeExe -and (Test-Path -LiteralPath $claudeExe))
+            if ($agInstalled) { $agVer = $claudeVer }
+        } elseif ($ag.id -eq "codex") {
+            $agInstalled = [bool]($codexExe -and (Test-Path -LiteralPath $codexExe))
+            if ($agInstalled) { $agVer = $codexVer }
+        } elseif ($ag.id -eq "antigravity") {
+            $agInstalled = Test-Path -LiteralPath $agentApi
+            $agVer = if ($agInstalled) { "agentapi.bat" } else { "missing" }
+        } else {
+            $detCmdName = if ($ag.detect -and $ag.detect.command) { [string]$ag.detect.command } else { [string]$ag.id }
+            $detCmd = Get-Command $detCmdName -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($detCmd) {
+                $agInstalled = $true
+                $vArgs = if ($ag.detect -and $ag.detect.version_args) { @($ag.detect.version_args) } else { @("--version") }
+                if ($vArgs.Count -gt 0) {
+                    try {
+                        $srcPath = [string]$detCmd.Source
+                        if ($srcPath -match '\.ps1$' -and (Test-Path -LiteralPath ($srcPath -replace '\.ps1$', '.cmd'))) {
+                            $srcCmd = $srcPath -replace '\.ps1$', '.cmd'
+                            $agVer = ((& cmd.exe /d /s /c "`"$srcCmd`" $($vArgs -join ' ')" 2>$null) -join " ").Trim()
+                        } else {
+                            $agVer = ((& $detCmd.Source @vArgs 2>$null) -join " ").Trim()
+                        }
+                        if (-not $agVer) { $agVer = "installed" }
+                    } catch {
+                        $agVer = "installed"
+                    }
+                } else {
+                    $agVer = "installed"
+                }
+            }
+        }
+
+        $hint = ""
+        if ($ag.id -eq "gemini") {
+            $hint = " | Sign-in hint: run 'gemini' once, or set GEMINI_API_KEY"
+        } elseif ($ag.id -eq "cursor") {
+            $hint = " | Hint: install Cursor Agent CLI ('cursor-agent')"
+        } elseif ($ag.id -eq "aider") {
+            $hint = " | Hint: pip install aider-chat"
+        }
+
+        $statusTag = if (-not $ag.enabled) { "[DISABLED]" } elseif ($agInstalled) { "[INSTALLED]" } else { "[NOT INSTALLED]" }
+        $color = if (-not $ag.enabled) { "DarkGray" } elseif ($agInstalled) { "Green" } else { "Yellow" }
+        Write-Host ("  {0,-16} {1,-12} ({2}) - Version: {3}{4}" -f $statusTag, $ag.id, $ag.label, $agVer, $hint) -ForegroundColor $color
+    }
+    if ($regData.registry_warnings -and $regData.registry_warnings.Count -gt 0) {
+        foreach ($w in $regData.registry_warnings) {
+            Write-Host "  [REGISTRY WARN] $w" -ForegroundColor DarkYellow
+        }
+    }
 }
 
 # 4. Node.js (>= 22.18), Git & GitHub CLI
@@ -132,8 +198,11 @@ $expectedFiles = @(
     (Join-Path $env:USERPROFILE ".gemini\config\rules\claude-leader-workflow.md"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\multi-ai\SKILL.md"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\SKILL.md"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\agents.json"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\lib\maw-common.ps1"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\lib\maw-registry.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-agent.ps1"),
+    (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-cli-agent.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-claude.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-codex.ps1"),
     (Join-Path $env:USERPROFILE ".gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1"),

@@ -16,9 +16,59 @@ $nodeExe = $nodeCmd.Source
 
 $origTmp  = $env:TMP
 $origTemp = $env:TEMP
+$origMawHome = $env:MAW_HOME
 $baseTemp = if ($origTemp) { $origTemp } else { [System.IO.Path]::GetTempPath() }
 $spaceTempDir = Join-Path $baseTemp ("maw smoke space " + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Path $spaceTempDir -Force | Out-Null
+
+$smokeMawHome = Join-Path $spaceTempDir ".maw"
+New-Item -ItemType Directory -Path $smokeMawHome -Force | Out-Null
+$smokeUserRegistry = @{
+    version = 1
+    agents  = @(
+        @{
+            id           = "fake-reviewer"
+            label        = "Fake Smoke Reviewer"
+            color        = "#10b981"
+            enabled      = $true
+            adapter      = "cli"
+            detect       = @{ command = "powershell.exe"; version_args = @() }
+            models       = @("auto")
+            efforts      = @()
+            capabilities = @{ write = $true; review = $true; new_session = $false; sessions = $false; ide_send = $false }
+            cli          = @{
+                command     = "powershell.exe"
+                prompt_via  = "stdin"
+                args        = @("-NoProfile", "-Command", "[void][Console]::In.ReadToEnd(); Write-Output 'Smoke council review passed.'; Write-Output 'SCORE: 9.5/10'; Write-Output 'VERDICT: APPROVED'")
+                role_args   = @{}
+                model_args  = @()
+                effort_args = @()
+                output      = "text"
+            }
+        },
+        @{
+            id           = "uninstalled-smoke-ai"
+            label        = "Uninstalled Smoke AI"
+            color        = "#ef4444"
+            enabled      = $true
+            adapter      = "cli"
+            detect       = @{ command = "uninstalled-smoke-cli-99999"; version_args = @("--version") }
+            models       = @("auto")
+            efforts      = @()
+            capabilities = @{ write = $true; review = $true; new_session = $false; sessions = $false; ide_send = $false }
+            cli          = @{
+                command     = "uninstalled-smoke-cli-99999"
+                prompt_via  = "stdin"
+                args        = @()
+                role_args   = @{}
+                model_args  = @()
+                effort_args = @()
+                output      = "text"
+            }
+        }
+    )
+} | ConvertTo-Json -Depth 8
+[System.IO.File]::WriteAllText((Join-Path $smokeMawHome "agents.json"), $smokeUserRegistry, (New-Object System.Text.UTF8Encoding($false)))
 
 $port = Get-Random -Minimum 18100 -Maximum 18999
 $rootUrl = "http://127.0.0.1:$port"
@@ -28,8 +78,9 @@ function Start-SmokeNodeServer {
     param(
         [string]$ProjectsRootArg = ""
     )
-    $env:TMP  = $spaceTempDir
-    $env:TEMP = $spaceTempDir
+    $env:TMP      = $spaceTempDir
+    $env:TEMP     = $spaceTempDir
+    $env:MAW_HOME = $smokeMawHome
     try {
         $qMain = if ($serverMain -match '\s') { '"' + $serverMain + '"' } else { $serverMain }
         $argList = @($qMain, "--port", "$port")
@@ -39,12 +90,13 @@ function Start-SmokeNodeServer {
         }
         return Start-Process -FilePath $nodeExe -ArgumentList $argList -WorkingDirectory $repoRoot -PassThru -WindowStyle Hidden
     } finally {
-        $env:TMP  = $origTmp
-        $env:TEMP = $origTemp
+        $env:TMP      = $origTmp
+        $env:TEMP     = $origTemp
+        $env:MAW_HOME = $origMawHome
     }
 }
 
-Write-Host "[api-smoke] Starting Node.js v3.0 server using $nodeExe on 127.0.0.1:$port (TMP='$spaceTempDir')..." -ForegroundColor Cyan
+Write-Host "[api-smoke] Starting Node.js v4.0 server using $nodeExe on 127.0.0.1:$port (TMP='$spaceTempDir')..." -ForegroundColor Cyan
 $serverProc = Start-SmokeNodeServer
 
 $httpClient = New-Object System.Net.Http.HttpClient
@@ -145,14 +197,25 @@ function Invoke-RawTcpPathRequest {
 try {
     Wait-SmokeServerReady
 
-    # 1. GET status -> 200, api_version 3.0, features contains 'agents' and 'sse', tools.node.version present, no raw telegram_bot_token, honest telemetry
+    # 1. GET status -> 200, api_version 4.0, features contains 'agents', 'sse', 'registry', status.agents lists all 6 shipped agents with installed flags
     $r1 = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=status"
     if ($r1.StatusCode -ne 200) { throw "Test 1 failed: expected 200, got $($r1.StatusCode)" }
     $j1 = $r1.Body | ConvertFrom-Json
     if (-not $j1.ok) { throw "Test 1 failed: ok is false" }
-    if ($j1.api_version -ne "3.0") { throw "Test 1 failed: expected api_version 3.0, got $($j1.api_version)" }
+    if ($j1.api_version -ne "4.0") { throw "Test 1 failed: expected api_version 4.0, got $($j1.api_version)" }
     if (@($j1.features) -notcontains "agents") { throw "Test 1 failed: status.features does not contain 'agents'" }
     if (@($j1.features) -notcontains "sse") { throw "Test 1 failed: status.features does not contain 'sse'" }
+    if (@($j1.features) -notcontains "registry") { throw "Test 1 failed: status.features does not contain 'registry'" }
+    if (-not $j1.agents -or @($j1.agents).Count -lt 6) { throw "Test 1 failed: status.agents has fewer than 6 entries" }
+    foreach ($shippedId in @("claude", "codex", "antigravity", "gemini", "cursor", "aider")) {
+        $agObj = @($j1.agents | Where-Object { $_.id -eq $shippedId }) | Select-Object -First 1
+        if (-not $agObj) {
+            throw "Test 1 failed: status.agents missing shipped agent '$shippedId'"
+        }
+        if ($null -eq $agObj.installed -or ($agObj.installed -isnot [bool])) {
+            throw "Test 1 failed: status.agents['$shippedId'].installed is not a boolean"
+        }
+    }
     if (-not $j1.tools.node.version) { throw "Test 1 failed: tools.node.version is missing" }
     $notifyProps = @($j1.notify_config.PSObject.Properties.Name)
     if ($notifyProps -contains "telegram_bot_token") {
@@ -168,7 +231,7 @@ try {
     if ($auditProps -notcontains "avg_cost_per_call_usd") {
         throw "Test 1 failed: audit missing avg_cost_per_call_usd!"
     }
-    Write-Host "  [PASS] 1. GET status -> 200, api_version 3.0, features=['agents','sse'], tools.node, honest telemetry" -ForegroundColor Green
+    Write-Host "  [PASS] 1. GET status -> 200, api_version 4.0, features=['agents','sse','registry'], 6 shipped agents with installed flags" -ForegroundColor Green
 
     # 1b. Wrong Host header -> 403 (DNS-rebinding guard, SPEC §3.0 & §6.2)
     $rHost = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=status" -Headers @{ "Host" = "evil.example.com" }
@@ -422,14 +485,112 @@ try {
     }
     Write-Host "  [PASS] 14. Non-zero exit_code: spec-guard violation -> FAILED with exit_code: 1 and [FAIL] report" -ForegroundColor Green
 
-    Write-Host "[api-smoke] All 17 v3.0 Node.js API security, C1/C2 runner survival, non-zero exit_code & SSE assertions PASSED!" -ForegroundColor Cyan
+    # 15. v4.0 dispatch task & team with gemini, cursor, aider, and council with reviewers -> builds invoke-agent.ps1 & -Reviewers (SPEC §8.3)
+    foreach ($cliAg in @("gemini", "cursor", "aider")) {
+        $cliTaskBody = (@{
+            mode         = "task"
+            agent        = $cliAg
+            role         = "backend"
+            project_path = $failRepoDir
+            prompt       = "Implement backend with $cliAg"
+        } | ConvertTo-Json -Compress)
+        $rCliTask = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=dispatch" -Headers @{ "X-MAW-Request" = "1" } -Body $cliTaskBody
+        if ($rCliTask.StatusCode -ne 200) {
+            throw "Test 15 failed: dispatch task for $cliAg expected 200, got $($rCliTask.StatusCode) ($($rCliTask.Body))"
+        }
+        $jCliTask = $rCliTask.Body | ConvertFrom-Json
+        if ($jCliTask.command -notmatch 'invoke-agent\.ps1' -or $jCliTask.command -notmatch "-Agent '$cliAg'") {
+            throw "Test 15 failed: unexpected command for ${cliAg}: $($jCliTask.command)"
+        }
+    }
+
+    $cliTeamBody = (@{
+        mode         = "team"
+        agent        = "gemini"
+        team         = @{ backend = "aider"; frontend = "cursor"; reviewer = "gemini" }
+        project_path = $failRepoDir
+        prompt       = "Lead CLI team"
+    } | ConvertTo-Json -Compress)
+    $rCliTeam = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=dispatch" -Headers @{ "X-MAW-Request" = "1" } -Body $cliTeamBody
+    if ($rCliTeam.StatusCode -ne 200) {
+        throw "Test 15 failed: dispatch team with gemini/cursor/aider expected 200, got $($rCliTeam.StatusCode) ($($rCliTeam.Body))"
+    }
+    $jCliTeam = $rCliTeam.Body | ConvertFrom-Json
+    if ($jCliTeam.command -notmatch 'invoke-agent\.ps1' -or $jCliTeam.command -notmatch "-Team 'backend=aider,frontend=cursor,reviewer=gemini'") {
+        throw "Test 15 failed: unexpected team command: $($jCliTeam.command)"
+    }
+
+    $councilDispBody = (@{
+        mode         = "council"
+        reviewers    = @("claude", "gemini")
+        project_path = $failRepoDir
+        prompt       = "Council review diff"
+    } | ConvertTo-Json -Compress)
+    $rCouncilDisp = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=dispatch" -Headers @{ "X-MAW-Request" = "1" } -Body $councilDispBody
+    if ($rCouncilDisp.StatusCode -ne 200) {
+        throw "Test 15 failed: dispatch council with reviewers expected 200, got $($rCouncilDisp.StatusCode) ($($rCouncilDisp.Body))"
+    }
+    $jCouncilDisp = $rCouncilDisp.Body | ConvertFrom-Json
+    if ($jCouncilDisp.command -notmatch 'invoke-council-review\.ps1' -or $jCouncilDisp.command -notmatch "-Reviewers 'claude,gemini'") {
+        throw "Test 15 failed: expected -Reviewers 'claude,gemini' in council command, got: $($jCouncilDisp.command)"
+    }
+    Write-Host "  [PASS] 15. v4.0 dispatch task/team with gemini/cursor/aider and council with -Reviewers" -ForegroundColor Green
+
+    # 16. v4.0 run_job for an agent that is not installed -> 400 (SPEC §8.3)
+    $uninstJobBody = (@{
+        mode         = "task"
+        agent        = "uninstalled-smoke-ai"
+        role         = "backend"
+        project_path = $failRepoDir
+        prompt       = "Should return 400 not installed"
+    } | ConvertTo-Json -Compress)
+    $rUninst = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=run_job" -Headers @{ "X-MAW-Request" = "1" } -Body $uninstJobBody
+    if ($rUninst.StatusCode -ne 400) {
+        throw "Test 16 failed: run_job for uninstalled agent expected 400, got $($rUninst.StatusCode) ($($rUninst.Body))"
+    }
+    $jUninst = $rUninst.Body | ConvertFrom-Json
+    if ($jUninst.error -notmatch "is not installed") {
+        throw "Test 16 failed: expected '<label> is not installed.' message, got: $($jUninst.error)"
+    }
+    Write-Host "  [PASS] 16. v4.0 run_job for uninstalled agent -> 400 ($($jUninst.error))" -ForegroundColor Green
+
+    # 17. v4.0 Real Council run on a temp git repo with a fake CLI reviewer registered in a temp MAW_HOME -> finishes with COUNCIL_RESULT line, no hang (SPEC §8.3)
+    $realCouncilBody = (@{
+        mode         = "council"
+        reviewers    = @("fake-reviewer")
+        project_path = $failRepoDir
+        prompt       = "Audit temp repo changes."
+    } | ConvertTo-Json -Compress)
+    $rCouncilRun = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=run_job" -Headers @{ "X-MAW-Request" = "1" } -Body $realCouncilBody
+    if ($rCouncilRun.StatusCode -ne 200) {
+        throw "Test 17 failed: Council run_job expected 200, got $($rCouncilRun.StatusCode) ($($rCouncilRun.Body))"
+    }
+    $councilJobId = [string]($rCouncilRun.Body | ConvertFrom-Json).job_id
+    if (-not $councilJobId) {
+        throw "Test 17 failed: missing councilJobId"
+    }
+
+    $rCouncilStream = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=job_stream&job_id=$councilJobId&offset=0"
+    if ($rCouncilStream.StatusCode -ne 200) {
+        throw "Test 17 failed: Council job_stream returned HTTP $($rCouncilStream.StatusCode)"
+    }
+    if ($rCouncilStream.Body -notmatch "=== COUNCIL_RESULT fake-reviewer=APPROVED\|9\.5/10 ===") {
+        throw "Test 17 failed: Council stream did not contain '=== COUNCIL_RESULT fake-reviewer=APPROVED|9.5/10 ==='. Body:`n$($rCouncilStream.Body)"
+    }
+    if ($rCouncilStream.Body -notmatch '"status"\s*:\s*"DONE"' -or $rCouncilStream.Body -notmatch '"exit_code"\s*:\s*0') {
+        throw "Test 17 failed: Council run did not finish with DONE and exit_code 0. Body:`n$($rCouncilStream.Body)"
+    }
+    Write-Host "  [PASS] 17. v4.0 Real Council run with fake CLI reviewer in temp MAW_HOME -> DONE (exit 0) + COUNCIL_RESULT line (no hang)" -ForegroundColor Green
+
+    Write-Host "[api-smoke] All 20 v4.0 Node.js API security, Registry, C1/C2 runner survival, real Council & SSE assertions PASSED!" -ForegroundColor Cyan
     exit 0
 } catch {
     Write-Error "[api-smoke] FAILED: $($_.Exception.Message)"
     exit 1
 } finally {
-    $env:TMP  = $origTmp
-    $env:TEMP = $origTemp
+    $env:TMP      = $origTmp
+    $env:TEMP     = $origTemp
+    $env:MAW_HOME = $origMawHome
     $httpClient.Dispose()
     if ($serverProc -and -not $serverProc.HasExited) {
         try { Stop-Process -Id $serverProc.Id -Force -ErrorAction SilentlyContinue } catch {}

@@ -9,6 +9,8 @@ export interface ValidatedCommandInfo {
   new_session: boolean;
   team: Record<string, string> | null;
   team_spec: string;
+  reviewers?: string[];
+  implementer?: string;
   project_path: string;
   prompt: string;
   command: string;
@@ -118,6 +120,9 @@ export function buildCommandSpec(
   } else if (mode === 'council') {
     scriptPath = path.win32.join(scriptsDir, 'invoke-council-review.ps1');
     tokens.push({ kind: 'str', name: '-WorkDir', value: projectPath });
+    if (info.reviewers && info.reviewers.length > 0) {
+      tokens.push({ kind: 'str', name: '-Reviewers', value: info.reviewers.join(',') });
+    }
     if (promptFile !== null && prompt !== '') {
       tokens.push({ kind: 'str', name: '-Prompt', value: '' });
       tokens.push({ kind: 'str', name: '-PromptFile', value: promptFile });
@@ -130,6 +135,12 @@ export function buildCommandSpec(
     scriptPath = path.win32.join(scriptsDir, 'invoke-auto-gate.ps1');
     tokens.push({ kind: 'str', name: '-WorkDir', value: projectPath });
     tokens.push({ kind: 'raw', name: '-MaxRounds', value: '2' });
+    if (info.implementer && info.implementer !== '') {
+      tokens.push({ kind: 'str', name: '-Implementer', value: info.implementer });
+    }
+    if (info.reviewers && info.reviewers.length > 0) {
+      tokens.push({ kind: 'str', name: '-Reviewers', value: info.reviewers.join(',') });
+    }
     if (role === 'review-only') {
       tokens.push({ kind: 'flag', name: '-SkipInitialImplement' });
     }
@@ -143,7 +154,7 @@ export function buildCommandSpec(
   } else if (mode === 'spec-guard') {
     scriptPath = path.win32.join(scriptsDir, 'invoke-spec-guard.ps1');
     tokens.push({ kind: 'str', name: '-WorkDir', value: projectPath });
-    if (['antigravity', 'claude', 'codex'].includes(role)) {
+    if (role !== '' && role !== 'check') {
       tokens.push({ kind: 'str', name: '-Owner', value: role });
     }
   } else {

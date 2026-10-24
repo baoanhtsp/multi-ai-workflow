@@ -3,7 +3,6 @@ param(
     [string]$WorkDir,
 
     [Parameter(Mandatory=$false)]
-    [ValidateSet("", "antigravity", "claude", "codex")]
     [string]$Owner = "",
 
     [Parameter(Mandatory=$false)]
@@ -18,6 +17,17 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 . (Join-Path $PSScriptRoot "lib\maw-common.ps1")
+. (Join-Path $PSScriptRoot "lib\maw-registry.ps1")
+
+$script:Registry = Get-AgentRegistry -ScriptsDir $PSScriptRoot
+$enabledOwnerIds = @($script:Registry.agents | ForEach-Object { [string]$_.id })
+$normCheckOwner = if ($Owner) { $Owner.Trim().ToLowerInvariant() } else { "" }
+if ($normCheckOwner -and ($normCheckOwner -notin $enabledOwnerIds)) {
+    $err = @{ ok = $false; error = "Invalid Owner '$Owner'. Allowed: $($enabledOwnerIds -join ', '), or empty." }
+    if ($Json) { $err | ConvertTo-Json -Compress; exit 1 }
+    Write-Error $err.error
+    exit 1
+}
 
 if (-not (Test-Path -LiteralPath $WorkDir)) {
     $err = @{ ok = $false; error = "WorkDir does not exist: $WorkDir" }
@@ -144,14 +154,12 @@ function Parse-SpecOwnershipTable {
         }
 
         $ownerCell = $cells[$ownerIdx]
-        $ownerKey = if ($ownerCell -match '(?i)antigravity') {
-            "antigravity"
-        } elseif ($ownerCell -match '(?i)codex') {
-            "codex"
-        } elseif ($ownerCell -match '(?i)claude') {
-            "claude"
-        } else {
-            $ownerCell.ToLowerInvariant().Trim()
+        $resolvedOwners = @(Resolve-AgentOwner -CellText $ownerCell -Registry $script:Registry)
+        if ($resolvedOwners.Count -eq 0) {
+            $fallbackKey = ($ownerCell -replace '[*`]', '').ToLowerInvariant().Trim()
+            if ($fallbackKey) {
+                $resolvedOwners = @($fallbackKey)
+            }
         }
 
         $allowedPats = @(Get-BacktickPathPatterns -CellText $cells[$allowedIdx])
@@ -161,11 +169,13 @@ function Parse-SpecOwnershipTable {
             @()
         }
 
-        $rules.Add([PSCustomObject]@{
-            owner     = $ownerKey
-            allowed   = $allowedPats
-            forbidden = $forbiddenPats
-        })
+        foreach ($ownerKey in $resolvedOwners) {
+            $rules.Add([PSCustomObject]@{
+                owner     = $ownerKey
+                allowed   = $allowedPats
+                forbidden = $forbiddenPats
+            })
+        }
     }
 
     return $rules.ToArray()

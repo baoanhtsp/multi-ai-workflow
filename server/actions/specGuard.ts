@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { isFileSafe, resolveProjectPath, type ServerPaths } from '../lib/paths.ts';
 import { runCommand } from '../lib/proc.ts';
+import { loadAgentRegistry } from '../lib/registry.ts';
 import { ApiValidationError } from '../lib/validate.ts';
 
 export async function handleSpecGuard(
@@ -13,10 +14,13 @@ export async function handleSpecGuard(
     throw new ApiValidationError('Invalid project_path.', 400);
   }
 
+  const registry = loadAgentRegistry(paths);
+  const enabledIds = registry.agents.map((a) => a.id);
+
   const owner = String(body.owner ?? '').trim().toLowerCase();
-  if (!['', 'antigravity', 'claude', 'codex'].includes(owner)) {
+  if (owner !== '' && !enabledIds.includes(owner)) {
     throw new ApiValidationError(
-      'Invalid owner. Allowed: antigravity, claude, codex, or empty.',
+      `Invalid owner. Allowed: ${enabledIds.join(', ')}, or empty.`,
       400
     );
   }

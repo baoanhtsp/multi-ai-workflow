@@ -12,6 +12,7 @@ import {
   trimIncompleteUtf8Tail,
 } from '../lib/paths.ts';
 import { buildCommandSpec } from '../lib/commands.ts';
+import { loadAgentRegistry, resolveAgentOwnersFromCell } from '../lib/registry.ts';
 import { buildValidatedCommand, ApiValidationError } from '../lib/validate.ts';
 import {
   getPublicNotifyConfig,
@@ -938,3 +939,343 @@ test('PHP-to-Node response key-set parity check (if PHP and dashboard/api.php ar
     cleanup();
   }
 });
+
+test('v4.0 registry.ts: loads 6 shipped agents, merges user overrides, disables entries, skips invalid entries, and ignores corrupt user file', () => {
+  const { tempDir, cleanup } = makeTempEnv();
+  try {
+    const paths = resolveServerPaths({
+      userProfile: tempDir,
+      projectsRoot: path.dirname(repoRoot),
+    });
+
+    // 1. Default shipped registry
+    const baseReg = loadAgentRegistry(paths, { mawHome: path.join(tempDir, 'no-user-maw') });
+    assert.equal(baseReg.warnings.length, 0);
+    assert.deepEqual(
+      baseReg.agents.map((a) => a.id),
+      ['claude', 'codex', 'antigravity', 'gemini', 'cursor', 'aider']
+    );
+
+    // 2. Multi-owner cell resolution
+    assert.deepEqual(
+      resolveAgentOwnersFromCell('Claude Opus (-Role architect) + Antigravity', baseReg),
+      ['claude', 'antigravity']
+    );
+    assert.deepEqual(
+      resolveAgentOwnersFromCell('Antigravity (Gemini 4 Argon)', baseReg),
+      ['antigravity']
+    );
+
+    // 3. Merge user overrides, add custom AI, disable cursor, and skip invalid entry
+    const customMawHome = path.join(tempDir, 'custom-maw');
+    fs.mkdirSync(customMawHome, { recursive: true });
+    fs.writeFileSync(
+      path.join(customMawHome, 'agents.json'),
+      JSON.stringify({
+        version: 1,
+        defaults: {
+          council: ['claude', 'gemini'],
+          implementer: 'gemini',
+        },
+        agents: [
+          {
+            id: 'gemini',
+            label: 'Gemini Custom Label',
+            models: ['pro', 'flash'],
+          },
+          {
+            id: 'cursor',
+            enabled: false,
+          },
+          {
+            id: 'custom-bot',
+            label: 'Custom Bot CLI',
+            color: '#123456',
+            enabled: true,
+            adapter: 'cli',
+            detect: { command: 'custom-bot-exe', version_args: ['--version'] },
+            models: ['v1'],
+            efforts: [],
+            capabilities: {
+              write: true,
+              review: true,
+              new_session: false,
+              sessions: false,
+              ide_send: false,
+            },
+            cli: {
+              command: 'custom-bot-exe',
+              prompt_via: 'stdin',
+              args: ['-p'],
+              role_args: {},
+              model_args: ['-m', '{model}'],
+              effort_args: [],
+              output: 'text',
+            },
+          },
+          {
+            id: 'BAD_ID_WITH_CAPS',
+            label: 'Invalid Agent',
+          },
+        ],
+      }),
+      'utf8'
+    );
+
+    const mergedReg = loadAgentRegistry(paths, { mawHome: customMawHome });
+    assert.deepEqual(mergedReg.defaults.council, ['claude', 'gemini']);
+    assert.equal(mergedReg.defaults.implementer, 'gemini');
+    assert.equal(
+      mergedReg.agents.some((a) => a.id === 'cursor'),
+      false,
+      'Disabled agent cursor should not be in enabled agents list'
+    );
+    assert.equal(
+      mergedReg.allAgents.find((a) => a.id === 'cursor')?.enabled,
+      false
+    );
+    const geminiEntry = mergedReg.agents.find((a) => a.id === 'gemini');
+    assert.equal(geminiEntry?.label, 'Gemini Custom Label');
+    assert.deepEqual(geminiEntry?.models, ['pro', 'flash']);
+    assert.ok(mergedReg.agents.some((a) => a.id === 'custom-bot'));
+    assert.ok(
+      mergedReg.warnings.some((w) => w.includes('BAD_ID_WITH_CAPS')),
+      'Expected warning for invalid entry'
+    );
+
+    // 4. Corrupt user file is ignored with a warning
+    const corruptMawHome = path.join(tempDir, 'corrupt-maw');
+    fs.mkdirSync(corruptMawHome, { recursive: true });
+    fs.writeFileSync(path.join(corruptMawHome, 'agents.json'), '{not valid json', 'utf8');
+    const corruptReg = loadAgentRegistry(paths, { mawHome: corruptMawHome });
+    assert.equal(corruptReg.agents.length, 6);
+    assert.ok(corruptReg.warnings.length > 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test('v4.0 status, registry-driven dispatch, uninstalled agent 400 on run_job, and A3 executed command in job meta', async () => {
+  const { tempDir, cleanup } = makeTempEnv();
+  const prevMawHome = process.env.MAW_HOME;
+  const testMawHome = path.join(tempDir, '.maw');
+  fs.mkdirSync(testMawHome, { recursive: true });
+  // Add an uninstalled custom agent and an installed fake CLI agent
+  fs.writeFileSync(
+    path.join(testMawHome, 'agents.json'),
+    JSON.stringify({
+      version: 1,
+      agents: [
+        {
+          id: 'uninstalled-ai',
+          label: 'Uninstalled Test AI',
+          color: '#ff0000',
+          enabled: true,
+          adapter: 'cli',
+          detect: { command: 'definitely-not-installed-binary-xyz987', version_args: ['--version'] },
+          models: ['auto'],
+          efforts: [],
+          capabilities: { write: true, review: true, new_session: false, sessions: false, ide_send: false },
+          cli: {
+            command: 'definitely-not-installed-binary-xyz987',
+            prompt_via: 'stdin',
+            args: [],
+            role_args: {},
+            model_args: [],
+            effort_args: [],
+            output: 'text',
+          },
+        },
+        {
+          id: 'installed-ps-ai',
+          label: 'Installed PS AI',
+          color: '#00ff00',
+          enabled: true,
+          adapter: 'cli',
+          detect: { command: 'powershell.exe', version_args: ['-NoProfile', '-Command', '"1.0.0"'] },
+          models: ['auto'],
+          efforts: [],
+          capabilities: { write: true, review: true, new_session: false, sessions: false, ide_send: false },
+          cli: {
+            command: 'powershell.exe',
+            prompt_via: 'stdin',
+            args: ['-NoProfile', '-Command', 'Write-Output "OK"'],
+            role_args: {},
+            model_args: [],
+            effort_args: [],
+            output: 'text',
+          },
+        },
+      ],
+    }),
+    'utf8'
+  );
+  process.env.MAW_HOME = testMawHome;
+
+  const { server } = createMawHttpServer({
+    repoRoot,
+    projectsRoot: path.dirname(repoRoot),
+    userProfile: tempDir,
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+
+  try {
+    // 1. Check status v4.0 fields
+    const statusRes = await rawHttpRequest({
+      port,
+      path: '/api?action=status',
+      headers: { Host: `127.0.0.1:${port}` },
+    });
+    assert.equal(statusRes.statusCode, 200);
+    const statusJson = JSON.parse(statusRes.body) as {
+      api_version: string;
+      features: string[];
+      agents: Array<{ id: string; installed: boolean }>;
+      defaults: { council: string[]; implementer: string };
+      registry_warnings: string[];
+    };
+    assert.equal(statusJson.api_version, '4.0');
+    assert.ok(statusJson.features.includes('registry'));
+    for (const id of ['claude', 'codex', 'antigravity', 'gemini', 'cursor', 'aider']) {
+      assert.ok(
+        statusJson.agents.some((a) => a.id === id),
+        `Expected status.agents to include ${id}`
+      );
+    }
+
+    // 2. Dispatch with gemini / cursor / aider and council reviewers
+    for (const ag of ['gemini', 'cursor', 'aider']) {
+      const disp = await rawHttpRequest({
+        port,
+        method: 'POST',
+        path: '/api?action=dispatch',
+        headers: {
+          Host: `127.0.0.1:${port}`,
+          Origin: `http://127.0.0.1:${port}`,
+          'X-MAW-Request': '1',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          mode: 'task',
+          agent: ag,
+          role: 'backend',
+          project_path: repoRoot,
+          prompt: `Test ${ag}`,
+        }),
+      });
+      assert.equal(disp.statusCode, 200);
+      const dispData = JSON.parse(disp.body) as { command: string };
+      assert.ok(dispData.command.includes('invoke-agent.ps1'));
+      assert.ok(dispData.command.includes(`-Agent '${ag}'`));
+    }
+
+    const councilDisp = await rawHttpRequest({
+      port,
+      method: 'POST',
+      path: '/api?action=dispatch',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: `http://127.0.0.1:${port}`,
+        'X-MAW-Request': '1',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        mode: 'council',
+        reviewers: ['claude', 'gemini'],
+        project_path: repoRoot,
+        prompt: 'Review changes',
+      }),
+    });
+    assert.equal(councilDisp.statusCode, 200);
+    const councilDispData = JSON.parse(councilDisp.body) as { command: string };
+    assert.ok(councilDispData.command.includes("-Reviewers 'claude,gemini'"));
+
+    // 3. run_job for uninstalled agent -> 400 "<label> is not installed."
+    const uninstRes = await rawHttpRequest({
+      port,
+      method: 'POST',
+      path: '/api?action=run_job',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: `http://127.0.0.1:${port}`,
+        'X-MAW-Request': '1',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        mode: 'task',
+        agent: 'uninstalled-ai',
+        role: 'backend',
+        project_path: repoRoot,
+        prompt: 'Should fail 400',
+      }),
+    });
+    assert.equal(uninstRes.statusCode, 400);
+    const uninstData = JSON.parse(uninstRes.body) as { error: string };
+    assert.equal(uninstData.error, 'Uninstalled Test AI is not installed.');
+
+    // 4. A3: run_job stores the executed command with -PromptFile in job meta JSON
+    const runInstalled = await rawHttpRequest({
+      port,
+      method: 'POST',
+      path: '/api?action=run_job',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: `http://127.0.0.1:${port}`,
+        'X-MAW-Request': '1',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        mode: 'spec-guard',
+        role: 'check',
+        project_path: repoRoot,
+      }),
+    });
+    assert.equal(runInstalled.statusCode, 200);
+    const runTaskRes = await rawHttpRequest({
+      port,
+      method: 'POST',
+      path: '/api?action=run_job',
+      headers: {
+        Host: `127.0.0.1:${port}`,
+        Origin: `http://127.0.0.1:${port}`,
+        'X-MAW-Request': '1',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        mode: 'task',
+        agent: 'installed-ps-ai',
+        role: 'reviewer',
+        project_path: repoRoot,
+        prompt: 'Inline prompt that must become -PromptFile in meta',
+      }),
+    });
+    assert.equal(runTaskRes.statusCode, 200);
+    const runTaskData = JSON.parse(runTaskRes.body) as { job_id: string; command: string };
+    assert.ok(
+      runTaskData.command.includes('-PromptFile'),
+      `Expected run_job response command to use -PromptFile, got: ${runTaskData.command}`
+    );
+    const paths = resolveServerPaths({
+      userProfile: tempDir,
+      projectsRoot: path.dirname(repoRoot),
+    });
+    const metaOnDisk = JSON.parse(
+      fs.readFileSync(path.join(paths.jobsDir, `${runTaskData.job_id}.json`), 'utf8')
+    ) as { command: string };
+    assert.ok(
+      metaOnDisk.command.includes('-PromptFile'),
+      `Expected job meta command on disk to contain -PromptFile, got: ${metaOnDisk.command}`
+    );
+    assert.equal(metaOnDisk.command.includes('Inline prompt that must become'), false);
+  } finally {
+    if (prevMawHome === undefined) {
+      delete process.env.MAW_HOME;
+    } else {
+      process.env.MAW_HOME = prevMawHome;
+    }
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    cleanup();
+  }
+});
+

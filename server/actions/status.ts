@@ -4,7 +4,8 @@ import net from 'node:net';
 import path from 'node:path';
 import { getAuditStats } from '../lib/audit.ts';
 import { getTempDir, isDirectorySafe, isFileSafe, type ServerPaths } from '../lib/paths.ts';
-import { getCodexModels, getDetectedToolVersions } from '../lib/versions.ts';
+import { loadAgentRegistry } from '../lib/registry.ts';
+import { detectRegistryAgents, getCodexModels, getDetectedToolVersions } from '../lib/versions.ts';
 import { getProjectGitInfo } from './git.ts';
 import { getRecentJobs } from './jobs.ts';
 import { getPublicNotifyConfig } from './notify.ts';
@@ -373,9 +374,7 @@ export async function handleStatus(paths: ServerPaths): Promise<Record<string, u
   const conversations = getConversations(paths.presenceDir, paths.brainDir, lineCache);
   saveLineCountCache(lineCache);
 
-  const claudeInstalled = isDirectorySafe(path.win32.join(paths.userProfile, '.claude'));
-  const codexInstalled = isDirectorySafe(path.win32.join(paths.userProfile, '.codex'));
-  const agyInstalled = isFileSafe(path.win32.join(paths.antigravityDir, 'bin', 'agentapi.bat'));
+  const registry = loadAgentRegistry(paths);
   const codexModels = getCodexModels(paths.userProfile);
   const projects = getLocalProjects(paths.projectsRoot);
   const defaultProjectPath = String(projects[0]?.path ?? paths.repoRoot);
@@ -387,16 +386,58 @@ export async function handleStatus(paths: ServerPaths): Promise<Record<string, u
     getRecentJobs(paths.jobsDir),
   ]);
 
+  const detectedAgentsMap = await detectRegistryAgents(paths, registry.allAgents, detectedVersions);
+
+  const agentsPayload = registry.allAgents.map((entry) => {
+    const det = detectedAgentsMap.get(entry.id) ?? { installed: false, version: null };
+    let models = [...entry.models];
+    if (entry.id === 'codex') {
+      for (const cm of codexModels) {
+        if (!models.includes(cm)) {
+          models.push(cm);
+        }
+      }
+    }
+    return {
+      id: entry.id,
+      label: entry.label,
+      color: entry.color,
+      adapter: entry.adapter,
+      enabled: entry.enabled,
+      installed: det.installed,
+      version: det.version,
+      models,
+      efforts: [...entry.efforts],
+      capabilities: { ...entry.capabilities },
+    };
+  });
+
+  const claudeStatus = detectedAgentsMap.get('claude') ?? {
+    installed: isDirectorySafe(path.win32.join(paths.userProfile, '.claude')),
+    version: detectedVersions.claude,
+  };
+  const codexStatus = detectedAgentsMap.get('codex') ?? {
+    installed: isDirectorySafe(path.win32.join(paths.userProfile, '.codex')),
+    version: detectedVersions.codex,
+  };
+  const agyStatus = detectedAgentsMap.get('antigravity') ?? {
+    installed: isFileSafe(path.win32.join(paths.antigravityDir, 'bin', 'agentapi.bat')),
+    version: null,
+  };
+
   return {
     ok: true,
-    api_version: '3.0',
-    features: ['agents', 'sse'],
+    api_version: '4.0',
+    features: ['agents', 'sse', 'registry'],
     timestamp: new Date().toISOString(),
     user_profile: paths.userProfile,
     bridge,
+    agents: agentsPayload,
+    defaults: registry.defaults,
+    registry_warnings: registry.warnings,
     tools: {
       antigravity: {
-        installed: agyInstalled,
+        installed: agyStatus.installed,
         model: 'Gemini 4 Argon (High)',
         models: [
           'gemini-4-argon-high',
@@ -413,8 +454,8 @@ export async function handleStatus(paths: ServerPaths): Promise<Record<string, u
           'Backend/Core Dev, Multi-Subagent Branch Coordinator & Context Filter',
       },
       claude: {
-        installed: claudeInstalled,
-        version: detectedVersions.claude,
+        installed: claudeStatus.installed,
+        version: claudeStatus.version,
         models: [
           'claude-opus-5-5',
           'claude-sonnet-5-5',
@@ -444,8 +485,8 @@ export async function handleStatus(paths: ServerPaths): Promise<Record<string, u
         role_summary: 'Tech Lead, 100% Frontend UI Specialist & Code Grader',
       },
       codex: {
-        installed: codexInstalled,
-        version: detectedVersions.codex,
+        installed: codexStatus.installed,
+        version: codexStatus.version,
         model: 'gpt-6-sol (high)',
         models: codexModels,
         cli_models: codexModels,

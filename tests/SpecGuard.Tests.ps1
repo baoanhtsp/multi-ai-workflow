@@ -140,5 +140,43 @@ Describe "invoke-spec-guard.ps1" {
             $res.verdict | Should -Be "WARN"
             $res.warnings | Should -Contain "Owner 'codex' has no row in the ownership matrix; nothing was enforced."
         }
+
+        It "Assigns a multi-owner matrix row (e.g. 'Claude Opus (-Role architect) + Antigravity') to every matched registry agent (A2)" {
+            $multiSpec = @"
+# Project Specification: Multi-Owner Test
+
+## Strict File Ownership Matrix
+
+| Layer | Owner AI | Allowed File Paths | Forbidden Files |
+| :--- | :--- | :--- | :--- |
+| Architecture & Contract | Claude Opus (`-Role architect`) + Antigravity | ``SPEC.md`` | ``dashboard/*.html`` |
+| Frontend UI | Claude (`-Role frontend`) + Gemini CLI | ``dashboard/index.html`` | ``dashboard/api.php`` |
+| Backend | Antigravity | ``dashboard/api.php`` | ``dashboard/*.html`` |
+"@
+            [System.IO.File]::WriteAllText((Join-Path $script:TmpRepo "SPEC.md"), $multiSpec, (New-Object System.Text.UTF8Encoding($false)))
+            & git -C $script:TmpRepo add SPEC.md
+            & git -C $script:TmpRepo commit -m "multi-owner spec" 2>$null | Out-Null
+
+            # Modify SPEC.md -> should PASS for both -Owner claude and -Owner antigravity
+            [System.IO.File]::AppendAllText((Join-Path $script:TmpRepo "SPEC.md"), "`n<!-- updated spec -->`n", (New-Object System.Text.UTF8Encoding($false)))
+
+            $rawClaude = (& $script:GuardScript -WorkDir $script:TmpRepo -Owner claude -Json) -join "`n"
+            $resClaude = $rawClaude | ConvertFrom-Json
+            $resClaude.verdict | Should -Be "PASS"
+            $resClaude.violations.Count | Should -Be 0
+
+            $rawAgy = (& $script:GuardScript -WorkDir $script:TmpRepo -Owner antigravity -Json) -join "`n"
+            $resAgy = $rawAgy | ConvertFrom-Json
+            $resAgy.verdict | Should -Be "PASS"
+            $resAgy.violations.Count | Should -Be 0
+
+            # Modify dashboard/index.html -> should PASS for -Owner gemini
+            & git -C $script:TmpRepo checkout -- SPEC.md 2>$null | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $script:TmpRepo "dashboard\index.html"), "<html>gemini edit</html>", (New-Object System.Text.UTF8Encoding($false)))
+            $rawGemini = (& $script:GuardScript -WorkDir $script:TmpRepo -Owner gemini -Json) -join "`n"
+            $resGemini = $rawGemini | ConvertFrom-Json
+            $resGemini.verdict | Should -Be "PASS"
+            $resGemini.violations.Count | Should -Be 0
+        }
     }
 }

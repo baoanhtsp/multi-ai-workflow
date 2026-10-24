@@ -1,0 +1,250 @@
+{
+  "version": 1,
+  "defaults": {
+    "team": {
+      "backend": "antigravity",
+      "frontend": "claude",
+      "reviewer": "codex"
+    },
+    "council": ["claude", "codex"],
+    "implementer": "antigravity"
+  },
+  "agents": [
+    {
+      "id": "claude",
+      "label": "Claude Code",
+      "color": "#d97757",
+      "enabled": true,
+      "adapter": "claude",
+      "aliases": [
+        "claude code",
+        "claude opus",
+        "claude sonnet",
+        "claude haiku",
+        "claude fable",
+        "opus",
+        "sonnet",
+        "haiku",
+        "fable"
+      ],
+      "detect": {
+        "command": "claude",
+        "version_args": ["--version"]
+      },
+      "models": [
+        "opus",
+        "sonnet",
+        "haiku",
+        "fable",
+        "claude-opus-5-5",
+        "claude-opus-5",
+        "claude-sonnet-5-5",
+        "claude-sonnet-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-1",
+        "claude-fable-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-opus-4-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-4-5",
+        "claude-haiku-4-5"
+      ],
+      "efforts": ["low", "medium", "high", "xhigh", "max"],
+      "capabilities": {
+        "write": true,
+        "review": true,
+        "new_session": false,
+        "sessions": false,
+        "ide_send": false
+      }
+    },
+    {
+      "id": "codex",
+      "label": "OpenAI Codex",
+      "color": "#10a37f",
+      "enabled": true,
+      "adapter": "codex",
+      "aliases": ["openai codex", "codex cli"],
+      "detect": {
+        "command": "codex",
+        "version_args": ["--version"]
+      },
+      "models": [
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-reserve",
+        "gpt-6-luna",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "codex-auto-review"
+      ],
+      "efforts": ["low", "medium", "high", "xhigh"],
+      "capabilities": {
+        "write": true,
+        "review": true,
+        "new_session": false,
+        "sessions": false,
+        "ide_send": false
+      }
+    },
+    {
+      "id": "antigravity",
+      "label": "Antigravity IDE",
+      "color": "#4285f4",
+      "enabled": true,
+      "adapter": "antigravity",
+      "aliases": [
+        "google antigravity",
+        "antigravity ide",
+        "gemini 4 argon",
+        "gemini 3.8 flash",
+        "agy"
+      ],
+      "detect": {
+        "command": "agentapi",
+        "version_args": ["--version"]
+      },
+      "models": ["pro", "flash", "flash_lite"],
+      "efforts": [],
+      "capabilities": {
+        "write": true,
+        "review": true,
+        "new_session": true,
+        "sessions": true,
+        "ide_send": true
+      }
+    },
+    {
+      "id": "gemini",
+      "label": "Gemini CLI",
+      "color": "#4285f4",
+      "enabled": true,
+      "adapter": "cli",
+      "aliases": ["gemini cli"],
+      "detect": {
+        "command": "gemini",
+        "version_args": ["--version"]
+      },
+      "models": ["auto", "pro", "flash", "flash-lite"],
+      "efforts": [],
+      "capabilities": {
+        "write": true,
+        "review": true,
+        "new_session": false,
+        "sessions": false,
+        "ide_send": false
+      },
+      "cli": {
+        "command": "gemini",
+        "prompt_via": "stdin",
+        "args": [
+          "-p",
+          "Follow the task instructions given on stdin.",
+          "--skip-trust",
+          "-o",
+          "json"
+        ],
+        "role_args": {
+          "reviewer": ["--approval-mode", "plan"],
+          "*": ["--approval-mode", "yolo"]
+        },
+        "model_args": ["-m", "{model}"],
+        "effort_args": [],
+        "output": "gemini-json",
+        "max_arg_chars": 30000,
+        "pricing": {
+          "input_per_mtok": 0,
+          "output_per_mtok": 0
+        }
+      }
+    },
+    {
+      "id": "cursor",
+      "label": "Cursor Agent CLI",
+      "color": "#22d3ee",
+      "enabled": true,
+      "adapter": "cli",
+      "aliases": ["cursor agent", "cursor cli", "cursor-agent"],
+      "detect": {
+        "command": "cursor-agent",
+        "version_args": ["--version"]
+      },
+      "models": ["auto"],
+      "efforts": [],
+      "capabilities": {
+        "write": true,
+        "review": true,
+        "new_session": false,
+        "sessions": false,
+        "ide_send": false
+      },
+      "cli": {
+        "command": "cursor-agent",
+        "prompt_via": "arg",
+        "args": ["-p", "--output-format", "text", "{prompt}"],
+        "role_args": {
+          "*": ["--force"],
+          "reviewer": []
+        },
+        "model_args": ["-m", "{model}"],
+        "effort_args": [],
+        "output": "text",
+        "max_arg_chars": 30000,
+        "pricing": {
+          "input_per_mtok": 0,
+          "output_per_mtok": 0
+        }
+      }
+    },
+    {
+      "id": "aider",
+      "label": "Aider",
+      "color": "#a855f7",
+      "enabled": true,
+      "adapter": "cli",
+      "aliases": ["aider cli", "aider-chat"],
+      "detect": {
+        "command": "aider",
+        "version_args": ["--version"]
+      },
+      "models": ["sonnet", "opus", "haiku", "4o", "deepseek", "gemini"],
+      "efforts": [],
+      "capabilities": {
+        "write": true,
+        "review": true,
+        "new_session": false,
+        "sessions": false,
+        "ide_send": false
+      },
+      "cli": {
+        "command": "aider",
+        "prompt_via": "file_arg",
+        "args": [
+          "--message-file",
+          "{prompt_file}",
+          "--yes-always",
+          "--no-auto-commits",
+          "--no-pretty",
+          "--no-stream",
+          "--no-check-update",
+          "--no-show-model-warnings"
+        ],
+        "role_args": {
+          "reviewer": ["--dry-run"]
+        },
+        "model_args": ["--model", "{model}"],
+        "effort_args": [],
+        "output": "text",
+        "max_arg_chars": 30000,
+        "pricing": {
+          "input_per_mtok": 0,
+          "output_per_mtok": 0
+        }
+      }
+    }
+  ]
+}

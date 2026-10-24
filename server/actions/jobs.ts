@@ -9,7 +9,9 @@ import {
   type ServerPaths,
 } from '../lib/paths.ts';
 import { isProcessRunning, runCommand } from '../lib/proc.ts';
+import { loadAgentRegistry } from '../lib/registry.ts';
 import { ApiValidationError, buildValidatedCommand } from '../lib/validate.ts';
+import { detectRegistryAgents } from '../lib/versions.ts';
 
 export interface JobMeta {
   job_id: string;
@@ -21,6 +23,8 @@ export interface JobMeta {
   effort?: string;
   new_session?: boolean;
   team?: Record<string, string>;
+  reviewers?: string[];
+  implementer?: string;
   project_path: string;
   command: string;
   status: 'RUNNING' | 'DONE' | 'FAILED' | 'CANCELLED' | string;
@@ -241,6 +245,12 @@ export async function getRecentJobs(jobsDir: string): Promise<Array<Record<strin
     if (meta.team && typeof meta.team === 'object' && !Array.isArray(meta.team)) {
       row.team = meta.team;
     }
+    if (Array.isArray(meta.reviewers) && meta.reviewers.length > 0) {
+      row.reviewers = meta.reviewers;
+    }
+    if (typeof meta.implementer === 'string' && meta.implementer !== '') {
+      row.implementer = meta.implementer;
+    }
     jobs.push(row);
   }
 
@@ -278,8 +288,67 @@ export async function handleRunJob(
     team: teamArray,
     project_path: validatedProjectPath,
     prompt,
-    command: cmd,
   } = info;
+
+  const registry = loadAgentRegistry(paths);
+  const effectiveReviewers =
+    mode === 'council' || mode === 'auto-gate'
+      ? info.reviewers && info.reviewers.length > 0
+        ? info.reviewers
+        : registry.defaults.council
+      : undefined;
+  const effectiveImplementer =
+    mode === 'auto-gate'
+      ? info.implementer && info.implementer !== ''
+        ? info.implementer
+        : registry.defaults.implementer
+      : undefined;
+
+  const requiredAgentIds: string[] = [];
+  if (mode === 'task') {
+    requiredAgentIds.push(agent);
+  } else if (mode === 'team') {
+    requiredAgentIds.push(agent);
+    if (teamArray) {
+      for (const v of Object.values(teamArray)) {
+        if (!requiredAgentIds.includes(v)) {
+          requiredAgentIds.push(v);
+        }
+      }
+    }
+  } else if (mode === 'claude' || mode === 'codex' || mode === 'antigravity') {
+    requiredAgentIds.push(mode);
+  } else if (mode === 'council' && effectiveReviewers) {
+    for (const r of effectiveReviewers) {
+      if (!requiredAgentIds.includes(r)) {
+        requiredAgentIds.push(r);
+      }
+    }
+  } else if (mode === 'auto-gate') {
+    if (role !== 'review-only' && effectiveImplementer) {
+      requiredAgentIds.push(effectiveImplementer);
+    }
+    if (effectiveReviewers) {
+      for (const r of effectiveReviewers) {
+        if (!requiredAgentIds.includes(r)) {
+          requiredAgentIds.push(r);
+        }
+      }
+    }
+  }
+
+  if (requiredAgentIds.length > 0) {
+    const requiredEntries = requiredAgentIds
+      .map((id) => registry.agents.find((a) => a.id === id))
+      .filter((a): a is NonNullable<typeof a> => a !== undefined);
+    const detectedMap = await detectRegistryAgents(paths, requiredEntries);
+    for (const entry of requiredEntries) {
+      const det = detectedMap.get(entry.id);
+      if (!det || !det.installed) {
+        throw new ApiValidationError(`${entry.label} is not installed.`, 400);
+      }
+    }
+  }
 
   const jobsDir = paths.jobsDir;
   if (!isDirectorySafe(jobsDir)) {
@@ -410,7 +479,7 @@ export async function handleRunJob(
     effort: effortOverride,
     new_session: newSession,
     project_path: validatedProjectPath,
-    command: cmd,
+    command: spec.preview,
     status: 'RUNNING',
     exit_code: null,
     started_at: now.toISOString(),
@@ -418,6 +487,12 @@ export async function handleRunJob(
   };
   if (teamArray) {
     meta.team = teamArray;
+  }
+  if (effectiveReviewers) {
+    meta.reviewers = effectiveReviewers;
+  }
+  if (effectiveImplementer) {
+    meta.implementer = effectiveImplementer;
   }
   fs.writeFileSync(metaFile, JSON.stringify(meta), 'utf8');
 
@@ -429,10 +504,16 @@ export async function handleRunJob(
     agent,
     role,
     status: 'RUNNING',
-    command: cmd,
+    command: spec.preview,
   };
   if (teamArray) {
     runResp.team = teamArray;
+  }
+  if (effectiveReviewers) {
+    runResp.reviewers = effectiveReviewers;
+  }
+  if (effectiveImplementer) {
+    runResp.implementer = effectiveImplementer;
   }
   return runResp;
 }
@@ -525,6 +606,12 @@ export async function handleJobStatus(
   };
   if (meta.team && typeof meta.team === 'object' && !Array.isArray(meta.team)) {
     statusResp.team = meta.team;
+  }
+  if (Array.isArray(meta.reviewers) && meta.reviewers.length > 0) {
+    statusResp.reviewers = meta.reviewers;
+  }
+  if (typeof meta.implementer === 'string' && meta.implementer !== '') {
+    statusResp.implementer = meta.implementer;
   }
   return statusResp;
 }

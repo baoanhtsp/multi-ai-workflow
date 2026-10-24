@@ -48,6 +48,33 @@ Describe "ConvertTo-NativeArgument & Invoke-NativeProcess" {
             }
         }
     }
+
+    It "Finishes Invoke-NativeProcess inside Start-Job without hanging and supports -StdinText (A1 regression test)" {
+        $commonPath = $script:CommonScript
+        $repoDir = $script:RepoRoot
+        $job = Start-Job -ScriptBlock {
+            param($cPath, $wDir)
+            . $cPath
+            $res1 = Invoke-NativeProcess -FilePath "git" -ArgumentList @("-C", $wDir, "status", "--porcelain") -WorkingDirectory $wDir -TimeoutMs 15000
+            $res2 = Invoke-NativeProcess -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-Command", '[Console]::In.ReadToEnd()') -StdinText "hello-stdin-v4" -TimeoutMs 15000
+            return [PSCustomObject]@{
+                GitExit   = $res1.ExitCode
+                StdinExit = $res2.ExitCode
+                StdinOut  = $res2.StdOut.Trim()
+            }
+        } -ArgumentList $commonPath, $repoDir
+
+        try {
+            $finished = Wait-Job -Job $job -Timeout 20
+            $finished | Should -Not -BeNullOrEmpty
+            $out = Receive-Job -Job $job
+            $out.GitExit | Should -Be 0
+            $out.StdinExit | Should -Be 0
+            $out.StdinOut | Should -Be "hello-stdin-v4"
+        } finally {
+            Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 Describe "Get-ReviewVerdict" {

@@ -80,11 +80,14 @@ Write-ManagedFile -dest "$geminiConfigDir\GEMINI.md" -content $ruleBody -useBom 
 Write-ManagedFile -dest "$geminiDir\GEMINI.md" -content $ruleBody -useBom $false
 
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\SKILL.md" "$geminiSkillDir\SKILL.md"
+Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\agents.json" "$geminiSkillDir\agents.json"
 if (Test-Path -LiteralPath "$repoRoot\antigravity\skills\multi-ai\SKILL.md") {
     Copy-WithUserPath "$repoRoot\antigravity\skills\multi-ai\SKILL.md" "$geminiMultiAiSkillDir\SKILL.md"
 }
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\lib\maw-common.ps1" "$geminiScriptsLibDir\maw-common.ps1"
+Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\lib\maw-registry.ps1" "$geminiScriptsLibDir\maw-registry.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-agent.ps1" "$geminiScriptsDir\invoke-agent.ps1"
+Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-cli-agent.ps1" "$geminiScriptsDir\invoke-cli-agent.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-claude.ps1" "$geminiScriptsDir\invoke-claude.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-codex.ps1" "$geminiScriptsDir\invoke-codex.ps1"
 Copy-WithUserPath "$repoRoot\antigravity\skills\claude-leader\scripts\invoke-antigravity.ps1" "$geminiScriptsDir\invoke-antigravity.ps1"

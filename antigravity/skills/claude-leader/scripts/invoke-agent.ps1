@@ -1,6 +1,5 @@
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet("claude", "antigravity", "codex")]
     [string]$Agent,
 
     [Parameter(Mandatory=$true)]
@@ -41,9 +40,18 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 
 . (Join-Path $PSScriptRoot "lib\maw-common.ps1")
+. (Join-Path $PSScriptRoot "lib\maw-registry.ps1")
 
 $normAgent = $Agent.Trim().ToLowerInvariant()
 $normRole  = $Role.Trim().ToLowerInvariant()
+
+$reg = Get-AgentRegistry -ScriptsDir $PSScriptRoot
+$agentEntry = Get-AgentEntry -AgentId $normAgent -Registry $reg
+if ($null -eq $agentEntry) {
+    $allowedIds = @($reg.enabled_agents | ForEach-Object { $_.id }) -join ", "
+    Write-Output "ERROR: Invalid or disabled -Agent '$normAgent'. Allowed registry agents: $allowedIds"
+    exit 1
+}
 
 # 1. Recursion Guard (SPEC §5.2: MAW_DEPTH >= 1 for leader => exit 2)
 $currentDepth = 0
@@ -69,7 +77,7 @@ if ($PromptFile) {
     }
 }
 
-# 3. Parse Team configuration (SPEC §5.2 & §5.3: default only when -Team is omitted; when -Team is passed, start from empty map, allow backend/frontend/reviewer)
+# 3. Parse Team configuration (SPEC §5.2 & §7.4: registry-driven team validation and defaults)
 $teamMap = [ordered]@{}
 if ($PSBoundParameters.ContainsKey("Team") -or $Team) {
     $pairs = $Team -split '[,;]'
@@ -86,8 +94,10 @@ if ($PSBoundParameters.ContainsKey("Team") -or $Team) {
             Write-Output "ERROR: Invalid role '$tRole' in -Team. Allowed: backend, frontend, reviewer."
             exit 1
         }
-        if ($tAgent -notin @("claude", "antigravity", "codex")) {
-            Write-Output "ERROR: Invalid agent '$tAgent' in -Team. Allowed: claude, antigravity, codex."
+        $tEntry = Get-AgentEntry -AgentId $tAgent -Registry $reg
+        if ($null -eq $tEntry) {
+            $allowedIds = @($reg.enabled_agents | ForEach-Object { $_.id }) -join ", "
+            Write-Output "ERROR: Invalid or disabled agent '$tAgent' in -Team. Allowed: $allowedIds"
             exit 1
         }
         $teamMap[$tRole] = $tAgent
@@ -97,9 +107,9 @@ if ($PSBoundParameters.ContainsKey("Team") -or $Team) {
         exit 1
     }
 } else {
-    $teamMap["backend"]  = "antigravity"
-    $teamMap["frontend"] = "claude"
-    $teamMap["reviewer"] = "codex"
+    $teamMap["backend"]  = [string]$reg.defaults.team.backend
+    $teamMap["frontend"] = [string]$reg.defaults.team.frontend
+    $teamMap["reviewer"] = [string]$reg.defaults.team.reviewer
 }
 
 $teamTableLines = [System.Collections.Generic.List[string]]::new()
@@ -142,11 +152,11 @@ if ($normRole -eq "reviewer") {
     $fullPrompt = Add-ReviewerContract -Prompt $fullPrompt
 }
 
-# 5. Map (Agent, Role) to Target Script & Arguments per SPEC §5.1
+# 5. Map (Agent.adapter, Role) to Target Script & Arguments per SPEC §5.1 & §7.4
 $targetScript = ""
 $childArgs    = [System.Collections.Generic.List[string]]::new()
 
-switch ($normAgent) {
+switch ($agentEntry.adapter) {
     "claude" {
         $targetScript = Join-Path $PSScriptRoot "invoke-claude.ps1"
         $claudeRole = switch ($normRole) {
@@ -205,6 +215,28 @@ switch ($normAgent) {
             $childArgs.Add($ModelOverride.ToLowerInvariant())
         }
     }
+    "cli" {
+        $targetScript = Join-Path $PSScriptRoot "invoke-cli-agent.ps1"
+        $childArgs.Add("-AgentId")
+        $childArgs.Add($normAgent)
+        $childArgs.Add("-Role")
+        $childArgs.Add($normRole)
+        $childArgs.Add("-WorkDir")
+        $childArgs.Add($WorkDir)
+        if ($normRole -eq "reviewer") {
+            $childArgs.Add("-IncludeGitDiff")
+        }
+        if ($ModelOverride) {
+            $childArgs.Add("-ModelOverride")
+            $childArgs.Add($ModelOverride)
+        }
+        if ($EffortOverride) {
+            $childArgs.Add("-EffortOverride")
+            $childArgs.Add($EffortOverride)
+        }
+        $childArgs.Add("-TimeoutSeconds")
+        $childArgs.Add([string]$TimeoutSeconds)
+    }
 }
 
 if ($DryRun) {
@@ -213,6 +245,7 @@ if ($DryRun) {
     Write-Output "=== INVOKE-AGENT DRY RUN ==="
     Write-Output "DRYRUN_COMMAND: powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptArg $previewArgs -PromptFile <temp_prompt_file>"
     Write-Output "Agent         : $normAgent"
+    Write-Output "Adapter       : $($agentEntry.adapter)"
     Write-Output "Role          : $normRole"
     Write-Output "TargetScript  : $targetScript"
     Write-Output "ChildArguments: $previewArgs -PromptFile <temp_prompt_file>"
@@ -256,7 +289,7 @@ try {
         $ErrorActionPreference = $prevEap
     }
 
-    if ($normAgent -eq "antigravity") {
+    if ($agentEntry.adapter -eq "antigravity") {
         try {
             $auditFile = Join-Path $env:USERPROFILE ".gemini\antigravity\multi-ai-audit.jsonl"
             $auditDir = Split-Path -Parent $auditFile
@@ -279,8 +312,8 @@ try {
 
             [ordered]@{
                 Timestamp    = (Get-Date).ToString("o")
-                Tool         = "antigravity"
-                Agent        = "antigravity"
+                Tool         = $normAgent
+                Agent        = $normAgent
                 Role         = $normRole
                 Model        = $agyModel
                 Effort       = "high"
@@ -298,9 +331,9 @@ try {
 
     exit $exitCode
 } finally {
-    $env:MAW_DEPTH = $prevDepth
-    $env:MAW_ROLE  = $prevRole
-    $env:MAW_AGENT = $prevAgent
+    if ($null -eq $prevDepth) { Remove-Item Env:\MAW_DEPTH -ErrorAction SilentlyContinue } else { $env:MAW_DEPTH = $prevDepth }
+    if ($null -eq $prevRole)  { Remove-Item Env:\MAW_ROLE  -ErrorAction SilentlyContinue } else { $env:MAW_ROLE  = $prevRole }
+    if ($null -eq $prevAgent) { Remove-Item Env:\MAW_AGENT -ErrorAction SilentlyContinue } else { $env:MAW_AGENT = $prevAgent }
     if (Test-Path -LiteralPath $tmpPromptFile) {
         Remove-Item -LiteralPath $tmpPromptFile -Force -ErrorAction SilentlyContinue
     }

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { appendAuditEntry } from '../lib/audit.ts';
 import { type ServerPaths } from '../lib/paths.ts';
 import { runCommand } from '../lib/proc.ts';
+import { loadAgentRegistry } from '../lib/registry.ts';
 import { ApiValidationError, buildValidatedCommand } from '../lib/validate.ts';
 
 export async function handleDispatch(
@@ -11,13 +12,16 @@ export async function handleDispatch(
   paths: ServerPaths
 ): Promise<Record<string, unknown>> {
   const info = buildValidatedCommand(body, paths);
-  const { mode, role, model: modelOverride, project_path: validatedProjectPath, prompt, command: cmd } = info;
+  const { mode, agent, role, model: modelOverride, project_path: validatedProjectPath, prompt, command: cmd } = info;
 
   const executeAntigravity = body.execute_antigravity === true;
   if (executeAntigravity) {
-    if (mode !== 'antigravity' || !['send-latest', 'new'].includes(role)) {
+    const registry = loadAgentRegistry(paths);
+    const targetId = mode === 'task' || mode === 'team' ? agent : mode;
+    const targetEntry = registry.agents.find((a) => a.id === targetId);
+    if (!targetEntry?.capabilities.ide_send || mode !== 'antigravity' || !['send-latest', 'new'].includes(role)) {
       throw new ApiValidationError(
-        'Live quick-send (execute_antigravity) is only for antigravity mode with send-latest or new. Use action=run_job for background streaming execution of any mode.',
+        'Live quick-send (execute_antigravity) is only valid for an agent with capabilities.ide_send in antigravity mode with send-latest or new. Use action=run_job for background streaming execution of any mode.',
         400
       );
     }

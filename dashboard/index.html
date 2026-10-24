@@ -231,6 +231,16 @@
   /* work area */
   .g-work { grid-template-columns: minmax(0, 1.75fr) minmax(320px, 1fr); gap: 20px; align-items: start; }
   .stack-lg > * + * { margin-top: 20px; }
+  .ai-chip.is-missing { opacity: .6; border-style: dashed; }
+  .ai-chip.pick[aria-pressed="false"] { opacity: .55; }
+  .ai-chip.pick[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+  .ai-chip.pick.is-missing[aria-pressed="true"] { opacity: .8; }
+  .council-pick { margin-top: 8px; gap: 6px; }
+  .agent-row.is-missing { opacity: .7; }
+  .agent-extra { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+  #featHeader:empty, #jobActions:empty, #projActions:empty { display: none; }
+  .maw-view { min-height: calc(100vh - 57px); }
+  .agents-hint { border-top: 1px solid var(--border); font-size: 12px; }
   .proj-pick { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .proj-anchor { position: relative; flex: 1; min-width: 0; }
   .proj-btn { display: inline-flex; align-items: center; gap: 8px; width: 100%; min-width: 0; height: 32px; padding: 0 9px 0 11px; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: 6px; cursor: pointer; text-align: left; }
@@ -559,10 +569,12 @@
       </div>
     </div>
     <div class="tools">
+      <div id="viewNav" class="seg hidden" role="tablist" aria-label="Views"></div>
+      <span id="featHeader" class="row-wrap"></span>
       <span id="modeBadge" class="pill warn hidden" data-i18n="demoBadge"></span>
       <button id="fxMotionBtn" type="button" class="pill warn hidden" style="cursor:pointer" data-i18n="fxMotion" data-i18n-title="fxMotionTip"></button>
       <span id="apiBadge" class="pill err hidden" role="alert"><span class="dot err"></span><span id="apiBadgeText" class="truncate"></span></span>
-      <span id="bridgeBadge" class="pill"><span class="dot" id="bridgeDot"></span><span id="bridgeText" class="truncate" data-i18n="bridgeChecking"></span></span>
+      <span id="agentsBadge" class="pill"><span class="dot" id="agentsDot"></span><span id="agentsBadgeText" class="truncate" data-i18n="bridgeChecking"></span></span>
       <div class="btn-group">
         <button id="refreshBtn" type="button" class="btn btn-sm" data-i18n="refreshNow"></button>
         <label class="btn btn-sm btn-toggle" data-i18n-title="autoRefreshTip"><input type="checkbox" id="autoToggle" checked><span data-i18n="autoRefresh"></span></label>
@@ -583,7 +595,7 @@
   </div>
 </header>
 
-<main class="wrap">
+<main class="wrap" id="view-dashboard">
 
   <!-- KPI strip -->
   <section class="grid g-kpi" id="kpiRow" aria-label="Summary"></section>
@@ -674,8 +686,10 @@
               <button type="button" class="btn btn-sm" data-flow="council" data-i18n="flowCouncil"></button>
               <button type="button" class="btn btn-sm" data-flow="auto-loop" data-i18n="flowAuto"></button>
               <button type="button" class="btn btn-sm" data-flow="review-only" data-i18n="flowReviewOnly"></button>
-              <button type="button" class="btn btn-sm" data-flow="agy-status" data-i18n="flowAgyStatus"></button>
-              <button type="button" class="btn btn-sm" data-flow="agy-wait" data-i18n="flowAgyWait"></button>
+            </div>
+            <div class="row-wrap council-pick">
+              <span class="sub" data-i18n="councilLbl"></span>
+              <span id="councilPick" class="row-wrap"></span>
             </div>
           </div>
         </div>
@@ -686,6 +700,7 @@
           <h2 data-i18n="liveJobTitle"></h2>
           <span id="liveJobHead" class="row-wrap sub mono"></span>
           <span class="spacer"></span>
+          <span id="jobActions" class="row-wrap"></span>
           <button id="cancelJobBtn" type="button" class="btn btn-sm btn-danger hidden" data-i18n="cancelJob"></button>
         </div>
         <pre id="liveJobLog" class="log mono"></pre>
@@ -707,11 +722,9 @@
           <div class="row-wrap">
             <button id="initSpecBtn" type="button" class="btn btn-sm hidden" data-i18n="initSpec"></button>
             <button id="specGuardBtn" type="button" class="btn btn-sm" data-i18n="specGuardBtn"></button>
+            <span id="projActions" class="row-wrap"></span>
             <select id="guardOwner" class="select-sm" data-i18n-title="guardOwnerTitle" aria-label="SPEC Guard owner">
               <option value="" data-i18n="guardOwnerAll"></option>
-              <option value="antigravity">antigravity</option>
-              <option value="claude">claude</option>
-              <option value="codex">codex</option>
             </select>
           </div>
           <div id="specGuardOut" class="hidden callout" style="color:var(--text)"></div>
@@ -720,8 +733,9 @@
       </div>
 
       <div class="card">
-        <div class="card-h"><h2 data-i18n="agentsTitle"></h2></div>
+        <div class="card-h"><h2 data-i18n="agentsTitle"></h2><span id="agentsCount" class="meta mono"></span></div>
         <div id="agents" class="list"></div>
+        <div class="card-b sub faint agents-hint" data-i18n-html="agentsHint"></div>
       </div>
     </aside>
   </section>
@@ -810,9 +824,7 @@ const I18N = {
   vi: {
     subtitle: 'Điều phối Claude · Antigravity · Codex',
     demoBadge: 'Dữ liệu demo',
-    bridgeChecking: 'Antigravity…',
-    bridgeOnline: 'Antigravity',
-    bridgeOffline: 'Antigravity ngoại tuyến',
+    bridgeChecking: 'AI…',
     autoRefresh: 'Tự động',
     autoRefreshTip: 'Tải lại dữ liệu mỗi 10 giây (tạm dừng khi tab bị ẩn)',
     refreshNow: 'Làm mới',
@@ -848,17 +860,16 @@ const I18N = {
     singleHint: '{agent} sẽ làm vai {role}.',
     teamHint: '{leader} làm Leader: chốt SPEC, giao việc cho {members}; sau đó chạy SPEC Guard, cho Review chấm và yêu cầu sửa tối đa 2 vòng.',
     teamEmpty: 'Hãy chọn ít nhất một thành viên tham gia.',
+    tplNeedsDetail: 'Hãy viết tính năng cần làm ngay sau dấu ":" trong ô Việc cần làm.',
     needV22: '(Tổ hợp này cần backend v2.2 — đang được cập nhật.)',
     runSingle: 'Chạy · {role} → {agent}',
     runTeam: 'Chạy nhóm · Leader {leader} + {n} thành viên',
     advTitle: 'Tùy chọn nâng cao (model, mức suy luận)',
     newSession: 'Mở phiên Antigravity mới',
     flowsLbl: 'Quy trình có sẵn',
-    flowCouncil: 'Chấm chéo (Claude + Codex)',
+    flowCouncil: 'Chấm chéo',
     flowAuto: 'Tự động code → chấm → sửa',
     flowReviewOnly: 'Chỉ chấm lại thay đổi',
-    flowAgyStatus: 'Antigravity: trạng thái',
-    flowAgyWait: 'Antigravity: chờ kết quả',
     tplPick: 'Mẫu yêu cầu…',
     tpl_spec: 'Thiết kế SPEC.md', tpl_backend: 'Làm Backend theo SPEC', tpl_frontend: 'Làm Frontend theo SPEC', tpl_review: 'Review thay đổi', tpl_team: 'Cả nhóm làm tính năng',
     tplPrompts: {
@@ -870,6 +881,17 @@ const I18N = {
     },
     projTitle: 'Dự án',
     agentsTitle: 'Agent',
+    agentsReady: 'AI sẵn sàng {n}/{total}',
+    viewDashboard: 'Bảng điều khiển',
+    bridgeOn: 'Bridge trực tuyến', bridgeOff: 'Bridge ngoại tuyến',
+    agentStatusBtn: 'Trạng thái', agentWaitBtn: 'Chờ kết quả',
+    cliAgent: 'Agent dòng lệnh (CLI) khai báo trong registry',
+    agentNotInstalled: 'Chưa cài trên máy này: {names}. Cài AI đó hoặc đổi sang AI khác.',
+    councilLbl: 'Người chấm:',
+    councilTip: 'Bấm để thêm / bỏ AI khỏi lượt chấm chéo',
+    councilMin: 'Cần ít nhất một AI chấm.',
+    agentsHint: 'Thêm AI mới: khai báo trong <code>~/.maw/agents.json</code> (lệnh CLI, model, vai) — không cần sửa code.',
+    kReady: 'AI sẵn sàng', kReadySub: 'đã cài trên máy · {n} AI trong registry',
     statsTitle: 'Thống kê',
     kbdHint: 'Ctrl + Enter để chạy',
     runLabel: 'Chạy · {agent}',
@@ -882,7 +904,7 @@ const I18N = {
     noProject: 'Chưa có dự án nào.',
     guideBtn: 'Cách sử dụng',
     g1: '<b>Chọn dự án</b> ở thanh trên cùng. Nếu chưa có <code>SPEC.md</code>, bấm <b>Tạo SPEC.md</b> để tạo hợp đồng kiến trúc từ mẫu.',
-    g2: '<b>Phân vai:</b> kéo Claude / Antigravity / Codex vào các ô Leader, Backend, Frontend, Review (AI nào cũng làm được mọi vai). Chọn <b>Một vai</b> rồi bấm vào ô cần chạy, hoặc <b>Cả nhóm</b> để Leader tự điều phối các thành viên.',
+    g2: '<b>Phân vai:</b> kéo bất kỳ AI nào (Claude, Codex, Antigravity, Gemini, Cursor, Aider…) vào các ô Leader, Backend, Frontend, Review — AI nào cũng làm được mọi vai. Chọn <b>Một vai</b> rồi bấm vào ô cần chạy, hoặc <b>Cả nhóm</b> để Leader tự điều phối các thành viên.',
     g3: '<b>Mô tả việc cần làm</b> (hoặc chọn từ Mẫu yêu cầu). Model / mức suy luận nằm trong Tùy chọn nâng cao — để Tự động là đủ.',
     g4: '<b>Nhập yêu cầu</b> rồi bấm <b>Chạy</b> (Ctrl + Enter) để xem log trực tiếp, hoặc <b>Sao chép lệnh</b> để tự chạy trong Terminal.',
     lblProject: 'Dự án',
@@ -941,13 +963,10 @@ const I18N = {
     kTotal: 'Tổng lượt gọi',
     kTotalSub: '{i} token vào · {o} token ra',
     kSpend: 'Tổng chi phí (USD)',
-    kSpendSub: 'Claude {c} · Codex {x}',
     kAvg: 'Chi phí TB / lượt',
     kAvgSub: '~{n} token / lượt',
     kRate: 'Tỷ lệ duyệt',
     kRateSub: '{a} duyệt · {c} yêu cầu sửa',
-    kActive: 'Phiên đang hoạt động',
-    kActiveSub: 'trong {n} hội thoại gần đây',
     apiErr: 'API lỗi: {msg}',
     tokUnit: 'tok',
     charsUnit: 'ký tự',
@@ -1045,9 +1064,7 @@ const I18N = {
   en: {
     subtitle: 'Orchestrating Claude · Antigravity · Codex',
     demoBadge: 'Demo data',
-    bridgeChecking: 'Antigravity…',
-    bridgeOnline: 'Antigravity',
-    bridgeOffline: 'Antigravity offline',
+    bridgeChecking: 'AI…',
     autoRefresh: 'Auto',
     autoRefreshTip: 'Reload data every 10 seconds (paused while the tab is hidden)',
     refreshNow: 'Refresh',
@@ -1083,17 +1100,16 @@ const I18N = {
     singleHint: '{agent} will act as {role}.',
     teamHint: '{leader} leads: locks the SPEC, assigns {members}; then runs SPEC Guard, has Review score it and requests fixes for up to 2 rounds.',
     teamEmpty: 'Include at least one team member.',
+    tplNeedsDetail: 'Describe the feature right after the ":" in the task box.',
     needV22: '(This combination needs backend v2.2 — update in progress.)',
     runSingle: 'Run · {role} → {agent}',
     runTeam: 'Run team · Leader {leader} + {n} members',
     advTitle: 'Advanced options (model, reasoning effort)',
     newSession: 'Open a new Antigravity session',
     flowsLbl: 'Ready-made workflows',
-    flowCouncil: 'Cross review (Claude + Codex)',
+    flowCouncil: 'Cross review',
     flowAuto: 'Auto code → review → fix',
     flowReviewOnly: 'Review changes only',
-    flowAgyStatus: 'Antigravity: status',
-    flowAgyWait: 'Antigravity: wait for result',
     tplPick: 'Prompt templates…',
     tpl_spec: 'Design SPEC.md', tpl_backend: 'Build backend from SPEC', tpl_frontend: 'Build frontend from SPEC', tpl_review: 'Review changes', tpl_team: 'Team builds a feature',
     tplPrompts: {
@@ -1105,6 +1121,17 @@ const I18N = {
     },
     projTitle: 'Project',
     agentsTitle: 'Agents',
+    agentsReady: 'AI ready {n}/{total}',
+    viewDashboard: 'Dashboard',
+    bridgeOn: 'Bridge online', bridgeOff: 'Bridge offline',
+    agentStatusBtn: 'Status', agentWaitBtn: 'Wait for result',
+    cliAgent: 'Command-line (CLI) agent from the registry',
+    agentNotInstalled: 'Not installed on this machine: {names}. Install it or pick another AI.',
+    councilLbl: 'Reviewers:',
+    councilTip: 'Click to add / remove this AI from the cross review',
+    councilMin: 'Keep at least one reviewer.',
+    agentsHint: 'Add an AI: declare it in <code>~/.maw/agents.json</code> (CLI command, models, roles) — no code changes.',
+    kReady: 'AI ready', kReadySub: 'installed here · {n} AIs in the registry',
     statsTitle: 'Statistics',
     kbdHint: 'Ctrl + Enter to run',
     runLabel: 'Run · {agent}',
@@ -1117,7 +1144,7 @@ const I18N = {
     noProject: 'No projects found.',
     guideBtn: 'How it works',
     g1: '<b>Pick a project</b> in the top bar. Without a <code>SPEC.md</code>, click <b>Create SPEC.md</b> to start the architecture contract from the template.',
-    g2: '<b>Assign roles:</b> drag Claude / Antigravity / Codex onto Leader, Backend, Frontend, Review (any agent can take any role). Choose <b>One role</b> and click the slot to run, or <b>Whole team</b> to let the Leader coordinate the members.',
+    g2: '<b>Assign roles:</b> drag any AI (Claude, Codex, Antigravity, Gemini, Cursor, Aider…) onto Leader, Backend, Frontend, Review — any AI can take any role. Choose <b>One role</b> and click the slot to run, or <b>Whole team</b> to let the Leader coordinate the members.',
     g3: '<b>Describe the work</b> (or start from a template). Model / effort live under Advanced options — Auto is fine.',
     g4: '<b>Write the prompt</b>, then click <b>Run</b> (Ctrl + Enter) to stream the log, or <b>Copy command</b> to run it yourself in a terminal.',
     lblProject: 'Project',
@@ -1176,13 +1203,10 @@ const I18N = {
     kTotal: 'Total calls',
     kTotalSub: '{i} in · {o} out tokens',
     kSpend: 'Total spend (USD)',
-    kSpendSub: 'Claude {c} · Codex {x}',
     kAvg: 'Avg cost / call',
     kAvgSub: '~{n} tokens / call',
     kRate: 'Approval rate',
     kRateSub: '{a} approved · {c} changes requested',
-    kActive: 'Active sessions',
-    kActiveSub: 'of {n} recent conversations',
     apiErr: 'API error: {msg}',
     tokUnit: 'tok',
     charsUnit: 'chars',
@@ -1303,10 +1327,15 @@ function setLang(lang) {
   updateChars();
   renderTemplates();
   renderBoard();
+  renderOwnerOptions();
+  renderCouncilPick();
   if (!state.lastCmd) $('cmdOut').textContent = t('cmdPlaceholder');
   if (state.data) render();
   renderJobHead();
   renderGuard();
+  renderProjectActions();
+  if (typeof renderViewNav === 'function' && MAW_VIEWS) renderViewNav();
+  emit('lang', LANG);
 }
 
 // ---------- Theme (light / dark / neon) ----------
@@ -1331,11 +1360,17 @@ darkQuery.addEventListener?.('change', () => {
 });
 
 // ---------- Role board: any agent can take any role (SPEC §5) ----------
-const AGENTS = {
-  claude: { label: 'Claude', color: 'var(--c-claude)' },
-  antigravity: { label: 'Antigravity', color: 'var(--c-agy)' },
-  codex: { label: 'Codex', color: 'var(--c-codex)' }
+// The Agent Registry (SPEC §7) decides which AIs exist. Built-in agents keep their theme-tuned colours;
+// a v3 backend without a registry only reports these three through `tools`.
+const BUILTIN = {
+  claude: { label: 'Claude', color: 'var(--c-claude)', capabilities: { write: true, review: true } },
+  antigravity: { label: 'Antigravity', color: 'var(--c-agy)', capabilities: { write: true, review: true, new_session: true, sessions: true, ide_send: true } },
+  codex: { label: 'Codex', color: 'var(--c-codex)', capabilities: { write: true, review: true } }
 };
+let AGENTS = Object.fromEntries(Object.entries(BUILTIN).map(([id, a]) => [id, { ...a, adapter: id, installed: true, version: null, models: [], efforts: [] }]));
+const AGENT_ID = /^[a-z][a-z0-9-]{1,23}$/;
+const cap = (id, k) => !!AGENTS[id]?.capabilities?.[k];
+const agentLabel = id => AGENTS[id]?.label || id;
 const SLOTS = ['leader', 'backend', 'frontend', 'reviewer'];
 const MEMBER_SLOTS = ['backend', 'frontend', 'reviewer'];
 const BOARD_DEFAULT = {
@@ -1350,13 +1385,14 @@ function loadBoard() {
     const out = structuredClone(BOARD_DEFAULT);
     out.kind = b.kind;
     if (SLOTS.includes(b.sel)) out.sel = b.sel;
-    for (const s of SLOTS) if (AGENTS[b.assign?.[s]]) out.assign[s] = b.assign[s];
+    // Registry ids are only known after the first status call; syncAgents() repairs unknown ones.
+    for (const s of SLOTS) if (AGENT_ID.test(b.assign?.[s] || '')) out.assign[s] = b.assign[s];
     for (const s of MEMBER_SLOTS) if (typeof b.include?.[s] === 'boolean') out.include[s] = b.include[s];
     return out;
   } catch { return structuredClone(BOARD_DEFAULT); }
 }
 
-let state = { data: null, board: loadBoard(), timer: null, demo: false, apiError: '', lastCmd: '', job: null, guard: null, git: null, gitCache: {}, gitBusy: false, notifyDirty: false, adopted: false };
+let state = { data: null, board: loadBoard(), council: loadCouncil(), timer: null, demo: false, apiError: '', lastCmd: '', job: null, guard: null, git: null, gitCache: {}, gitBusy: false, notifyDirty: false, adopted: false };
 
 function demoGit(path) {
   const name = String(path || '').split(/[\\/]/).filter(Boolean).pop() || 'project';
@@ -1488,10 +1524,9 @@ function statusBadge(s) {
   const u = String(s || '').toUpperCase() || 'UNKNOWN';
   return badge(u, u === 'DONE' ? 'b-ok' : u === 'RUNNING' ? 'b-warn' : u === 'FAILED' ? 'b-err' : '');
 }
-const TOOL_COLOR = { claude: 'var(--c-claude)', codex: 'var(--c-codex)', antigravity: 'var(--c-agy)' };
 function toolLabel(tool) {
   const k = String(tool || '').toLowerCase();
-  return `<span class="row" style="gap:6px"><span class="dot" style="background:${TOOL_COLOR[k] || 'var(--faint)'}"></span>${esc(tool)}</span>`;
+  return `<span class="row" style="gap:6px"><span class="dot" style="background:${AGENTS[k]?.color || 'var(--faint)'}"></span>${esc(AGENTS[k]?.label || tool)}</span>`;
 }
 
 function render() {
@@ -1502,38 +1537,21 @@ function render() {
   $('apiBadgeText').textContent = state.apiError ? t('apiErr', { msg: state.apiError }) : '';
   $('apiBadge').title = state.apiError || '';
 
-  // bridge
-  const b = d.bridge || {};
-  $('bridgeDot').className = 'dot ' + (b.online ? 'ok live' : 'err');
-  $('bridgeText').textContent = b.online ? t('bridgeOnline', { addr: b.ls_address }) : t('bridgeOffline');
-  $('bridgeBadge').title = `Antigravity bridge${b.ls_address ? ' · ' + b.ls_address : ''} · LS ${b.ls_version || '—'} · CSRF ${b.csrf_masked || '—'} · ${b.updated_at || ''}`;
-
-  // agents
-  const tools = d.tools || {};
-  const ver = v => v ? 'v' + v : '—';
-  const agent = (name, color, tool, verText, roleFallback) => {
-    const models = (tool?.models || []).join(', ');
-    const tip = [tool?.role_summary || roleFallback, tool?.command, models].filter(Boolean).join('\n');
-    return `<div class="agent-row" title="${esc(tip)}">
-      <span class="dot" style="background:${color};color:${color}"></span>
-      <div style="min-width:0"><div style="font-weight:600">${esc(name)}</div><div class="sub truncate">${esc(tool?.role_summary || roleFallback)}</div></div>
-      <span class="sub mono">${esc(verText)}</span>
-      ${tool?.installed ? badge(t('agentInstalled'), 'b-ok') : badge(t('agentMissing'), tool ? 'b-err' : '')}
-    </div>`;
-  };
-  $('agents').innerHTML =
-    agent('Claude Code', 'var(--c-claude)', tools.claude, ver(tools.claude?.version), t('roleCl')) +
-    agent('Antigravity', 'var(--c-agy)', tools.antigravity, b.ls_version || '—', t('roleAg')) +
-    agent('OpenAI Codex', 'var(--c-codex)', tools.codex, ver(tools.codex?.version), t('roleCx'));
+  // agents (registry) — the board, menus and pickers follow the same list
+  if (syncAgents(d)) { renderBoard(); renderCouncilPick(); }
+  renderAgentsCard(d);
 
   // KPI
   const a = d.audit || {};
   const v = a.verdicts || {};
   const graded = (v.APPROVED || 0) + (v.CHANGES_REQUESTED || 0);
   const rate = graded ? Math.round((v.APPROVED || 0) / graded * 100) + '%' : '—';
-  const activeSess = (d.conversations || []).filter(c => c.is_active).length;
   const usd = (n, dp) => '$' + Number(n || 0).toFixed(dp);
-  const cbt = a.cost_by_tool || {};
+  const agentIds = Object.keys(AGENTS);
+  const readyN = agentIds.filter(id => AGENTS[id].installed).length;
+  // Spend split across whichever agents actually cost something (top three).
+  const spendSub = Object.entries(a.cost_by_tool || {}).filter(([, n]) => Number(n) > 0).sort((x, y) => y[1] - x[1]).slice(0, 3)
+    .map(([k, n]) => `${agentLabel(k)} ${usd(n, 2)}`).join(' · ') || '—';
   const calls = Number(a.total_calls || 0);
   const avgCost = a.avg_cost_per_call_usd ?? (calls ? a.total_cost_usd / calls : 0);
   const avgTok = calls ? Math.round((Number(a.total_input_tokens || 0) + Number(a.total_output_tokens || 0)) / calls) : 0;
@@ -1541,10 +1559,10 @@ function render() {
   const kpi = (label, val, sub, num, kind) => `<div class="card stat"><div class="k">${esc(label)}</div><div class="v"${num != null ? ` data-num="${num}" data-kind="${kind}"` : ''}>${esc(val)}</div><div class="s truncate" title="${esc(sub)}">${esc(sub)}</div></div>`;
   $('kpiRow').innerHTML =
     kpi(t('kTotal'), fmt(calls), t('kTotalSub', { i: fmt(a.total_input_tokens), o: fmt(a.total_output_tokens) }), calls, 'int') +
-    kpi(t('kSpend'), usd(a.total_cost_usd, 2), t('kSpendSub', { c: usd(cbt.claude, 2), x: usd(cbt.codex, 2) }), Number(a.total_cost_usd || 0), 'usd2') +
+    kpi(t('kSpend'), usd(a.total_cost_usd, 2), spendSub, Number(a.total_cost_usd || 0), 'usd2') +
     kpi(t('kAvg'), usd(avgCost, 4), t('kAvgSub', { n: fmt(avgTok) }), Number(avgCost || 0), 'usd4') +
     kpi(t('kRate'), rate, t('kRateSub', { a: fmt(v.APPROVED), c: fmt(v.CHANGES_REQUESTED) }), graded ? Math.round((v.APPROVED || 0) / graded * 100) : null, 'pct') +
-    kpi(t('kActive'), fmt(activeSess), t('kActiveSub', { n: fmt((d.conversations || []).length) }), activeSess, 'int');
+    kpi(t('kReady'), `${readyN} / ${agentIds.length}`, t('kReadySub', { n: agentIds.length }), null, 'int');
   if (FX.on) FX.countUp($('kpiRow'));
 
   renderProjects();
@@ -1598,6 +1616,8 @@ function render() {
 
   fillNotify();
   ensureGit();
+  loadFeatureUis(d);
+  emit('data', d);
   if (!state.job && !state.adopted) {
     state.adopted = true;
     const rj = (d.jobs || []).find(j => j.status === 'RUNNING');
@@ -1814,13 +1834,134 @@ function execAgent() { const b = state.board; return b.kind === 'team' ? b.assig
 function slotRole(slot) { return slot === 'leader' ? (state.board.kind === 'team' ? 'leader' : 'architect') : slot; }
 function teamMembers() { return MEMBER_SLOTS.filter(s => state.board.include[s]); }
 function hasAgentsApi() { return (state.data?.features || []).includes('agents'); }
+function hasRegistryApi() { return (state.data?.features || []).includes('registry'); }
+
+// Rebuilds AGENTS from status.agents (or from `tools` on a v3 backend). Returns true when the set changed.
+function syncAgents(d) {
+  const list = Array.isArray(d?.agents)
+    ? d.agents.filter(a => a && AGENT_ID.test(a.id || '') && a.enabled !== false)
+    : Object.keys(BUILTIN).map(id => {
+      const tool = d?.tools?.[id];
+      return { id, adapter: id, installed: tool ? tool.installed !== false : true, version: tool?.version || null,
+        models: tool?.cli_models?.length && id !== 'antigravity' ? tool.cli_models : MODELS[id], efforts: tool?.efforts?.length && id !== 'antigravity' ? tool.efforts : EFFORTS[id] };
+    });
+  const next = {};
+  for (const a of list) {
+    const b = BUILTIN[a.id];
+    next[a.id] = {
+      label: a.label || b?.label || a.id,
+      color: b ? b.color : (/^#[0-9a-f]{6}$/i.test(a.color || '') ? a.color : 'var(--faint)'),
+      adapter: a.adapter || 'cli',
+      installed: a.installed !== false,
+      version: a.version || null,
+      models: Array.isArray(a.models) ? a.models : [],
+      efforts: Array.isArray(a.efforts) ? a.efforts : [],
+      capabilities: a.capabilities || b?.capabilities || {}
+    };
+  }
+  if (!Object.keys(next).length) return false;
+  const sig = JSON.stringify(next);
+  if (sig === syncAgents.sig) return false;
+  syncAgents.sig = sig;
+  AGENTS = next;
+  // First visit: start from the registry's default team. Afterwards, repair slots whose agent disappeared.
+  const team = d?.defaults?.team;
+  if (team && !store.get('maw_board')) for (const s of MEMBER_SLOTS) if (AGENTS[team[s]]) state.board.assign[s] = team[s];
+  const first = Object.keys(AGENTS)[0];
+  for (const s of SLOTS) if (!AGENTS[state.board.assign[s]]) state.board.assign[s] = AGENTS[BOARD_DEFAULT.assign[s]] ? BOARD_DEFAULT.assign[s] : first;
+  state.council = state.council.filter(id => cap(id, 'review'));
+  if (!state.council.length) state.council = (d?.defaults?.council || ['claude', 'codex']).filter(id => cap(id, 'review'));
+  if (!state.council.length) state.council = Object.keys(AGENTS).filter(id => cap(id, 'review')).slice(0, 2);
+  renderOwnerOptions();
+  return true;
+}
+
+// Agents a request would actually run (used to stop a run on a machine where one of them is missing).
+function agentsUsed(p) {
+  if (p.mode === 'task') return [p.agent];
+  if (p.mode === 'team') return [p.agent, ...Object.values(p.team || {})];
+  if (p.mode === 'council') return p.reviewers || ['claude', 'codex'];
+  if (p.mode === 'auto-gate') return [...(p.role === 'auto-loop' && p.implementer ? [p.implementer] : []), ...(p.reviewers || [])];
+  if (p.mode === 'antigravity') return ['antigravity'];
+  return [];
+}
+function missingAgents(p) {
+  return [...new Set(agentsUsed(p))].filter(id => AGENTS[id] && !AGENTS[id].installed).map(agentLabel);
+}
+
+// Council reviewers: any agent that can review; persisted per browser.
+function loadCouncil() {
+  try { const a = JSON.parse(store.get('maw_council') || 'null'); return Array.isArray(a) ? a.filter(x => AGENT_ID.test(x)) : []; } catch { return []; }
+}
+function renderCouncilPick() {
+  const box = $('councilPick');
+  if (!box) return;
+  box.innerHTML = Object.keys(AGENTS).filter(id => cap(id, 'review')).map(id => {
+    const a = AGENTS[id], on = state.council.includes(id);
+    return `<button type="button" class="ai-chip pick${a.installed ? '' : ' is-missing'}" data-council="${esc(id)}" aria-pressed="${on}"
+      title="${esc(a.installed ? t('councilTip') : t('agentMissing'))}"><span class="dot" style="background:${a.color};color:${a.color}"></span>${esc(a.label)}</button>`;
+  }).join('');
+}
+$('councilPick').addEventListener('click', e => {
+  const b = e.target.closest('[data-council]');
+  if (!b) return;
+  const id = b.dataset.council;
+  if (state.council.includes(id)) {
+    if (state.council.length === 1) { toast(t('councilMin'), 'warn'); return; }
+    state.council = state.council.filter(x => x !== id);
+  } else state.council = [...state.council, id];
+  store.set('maw_council', JSON.stringify(state.council));
+  renderCouncilPick(); resetCmd();
+});
+
+function renderOwnerOptions() {
+  const sel = $('guardOwner'), prev = sel.value;
+  sel.innerHTML = `<option value="">${esc(t('guardOwnerAll'))}</option>` + Object.keys(AGENTS).map(id => `<option value="${esc(id)}">${esc(agentLabel(id))}</option>`).join('');
+  sel.value = AGENTS[prev] ? prev : '';
+}
+
+function renderAgentsCard(d) {
+  const tools = d.tools || {}, b = d.bridge || {};
+  const ids = Object.keys(AGENTS);
+  const ready = ids.filter(id => AGENTS[id].installed).length;
+  $('agentsCount').textContent = `${ready} / ${ids.length}`;
+  $('agents').innerHTML = ids.map(id => {
+    const a = AGENTS[id], tool = tools[id];
+    const summary = tool?.role_summary || (BUILTIN[id] ? t({ claude: 'roleCl', antigravity: 'roleAg', codex: 'roleCx' }[id]) : t('cliAgent'));
+    const ver = a.version ? 'v' + String(a.version).replace(/^v/, '') : (id === 'antigravity' && b.ls_version ? b.ls_version : '—');
+    const tip = [summary, tool?.command, a.models.join(', ')].filter(Boolean).join('\n');
+    // Agents with sessions (Antigravity) keep their bridge status and quick actions here.
+    const extra = cap(id, 'sessions') ? `<div class="agent-extra">
+        ${badge(b.online ? t('bridgeOn') : t('bridgeOff'), b.online ? 'b-ok' : 'b-err')}
+        <button type="button" class="btn btn-sm" data-flow="agy-status">${esc(t('agentStatusBtn'))}</button>
+        <button type="button" class="btn btn-sm" data-flow="agy-wait">${esc(t('agentWaitBtn'))}</button>
+      </div>` : '';
+    return `<div class="agent-row${a.installed ? '' : ' is-missing'}" title="${esc(tip)}">
+      <span class="dot" style="background:${a.color};color:${a.color}"></span>
+      <div style="min-width:0"><div style="font-weight:600">${esc(a.label)}</div><div class="sub truncate">${esc(summary)}</div></div>
+      <span class="sub mono">${esc(ver)}</span>
+      ${a.installed ? badge(t('agentInstalled'), 'b-ok') : badge(t('agentMissing'), '')}
+      ${extra}
+    </div>`;
+  }).join('');
+
+  // Header: one compact readiness pill instead of a single vendor's bridge.
+  $('agentsDot').className = 'dot ' + (ready ? 'ok' : 'err');
+  $('agentsBadgeText').textContent = t('agentsReady', { n: ready, total: ids.length });
+  $('agentsBadge').title = ids.map(id => `${agentLabel(id)}: ${AGENTS[id].installed ? (AGENTS[id].version || t('agentInstalled')) : t('agentMissing')}`).join('\n')
+    + (AGENTS.antigravity ? `\nAntigravity bridge: ${b.online ? (b.ls_address || 'online') : 'offline'}` : '');
+  const sessAgent = ids.find(id => cap(id, 'sessions'));
+  document.querySelector('[data-tab="sessions"]').classList.toggle('hidden', !sessAgent);
+  if (!sessAgent && store.get('maw_tab') === 'sessions') document.querySelector('[data-tab="audit"]').click();
+}
+$('agents').addEventListener('click', e => { const f = e.target.closest('[data-flow]'); if (f) runJob(flowPayload(f.dataset.flow)); });
 
 function agentChip(agent, slot) {
-  const a = AGENTS[agent];
-  const missing = state.data?.tools?.[agent] && !state.data.tools[agent].installed;
-  return `<button type="button" class="ai-chip" draggable="true" data-agent="${agent}"${slot ? ` data-from="${slot}" aria-haspopup="menu"` : ''}
-    title="${esc(slot ? t('chipTip') : t('poolTip'))}">
-    <span class="dot" style="background:${a.color};color:${a.color}"></span>${esc(a.label)}${missing ? ` <span class="t-err" title="${esc(t('agentMissing'))}">!</span>` : ''}${slot ? '<span class="caret">▾</span>' : ''}</button>`;
+  const a = AGENTS[agent] || { label: agent, color: 'var(--faint)', installed: false };
+  const tip = (slot ? t('chipTip') : t('poolTip')) + (a.installed ? '' : ' · ' + t('agentMissing'));
+  return `<button type="button" class="ai-chip${a.installed ? '' : ' is-missing'}" draggable="true" data-agent="${esc(agent)}"${slot ? ` data-from="${slot}" aria-haspopup="menu"` : ''}
+    title="${esc(tip)}">
+    <span class="dot" style="background:${a.color};color:${a.color}"></span>${esc(a.label)}${slot ? '<span class="caret">▾</span>' : ''}</button>`;
 }
 
 function renderBoard() {
@@ -1870,10 +2011,10 @@ function updateActions() {
   $('runWebBtn').textContent = b.kind === 'team'
     ? t('runTeam', { leader: AGENTS[agent].label, n: teamMembers().length })
     : t('runSingle', { role: t('role_' + slotRole(b.sel)), agent: AGENTS[agent].label });
-  const canSend = b.kind === 'single' && agent === 'antigravity';
+  const canSend = b.kind === 'single' && cap(agent, 'ide_send');
   $('sendBtn').classList.toggle('hidden', !canSend);
   $('actionHint').textContent = t('actHintRun') + (canSend ? ' ' + t('actHintSend') : '');
-  $('newSessWrap').classList.toggle('hidden', agent !== 'antigravity');
+  $('newSessWrap').classList.toggle('hidden', !cap(agent, 'new_session'));
   $('advFor').textContent = '(' + AGENTS[agent].label + ')';
 }
 
@@ -1896,8 +2037,8 @@ function openAgentMenu(chip) {
   const slot = chip.dataset.from;
   const m = document.createElement('div');
   m.className = 'ai-menu'; m.setAttribute('role', 'menu'); m.id = 'aiMenu';
-  m.innerHTML = Object.entries(AGENTS).map(([k, a]) => `<button type="button" role="menuitemradio" aria-checked="${state.board.assign[slot] === k}" data-pick="${k}">
-    <span class="dot" style="background:${a.color}"></span>${esc(a.label)}</button>`).join('');
+  m.innerHTML = Object.entries(AGENTS).map(([k, a]) => `<button type="button" role="menuitemradio" aria-checked="${state.board.assign[slot] === k}" data-pick="${esc(k)}">
+    <span class="dot" style="background:${a.color}"></span>${esc(a.label)}${a.installed ? '' : ` <span class="sub faint">· ${esc(t('agentMissing'))}</span>`}</button>`).join('');
   chip.closest('.slot').appendChild(m);
   m.querySelector('[aria-checked="true"]')?.focus();
   m.onclick = e => { const p = e.target.closest('[data-pick]'); if (p) { closeAgentMenu(); setAssign(slot, p.dataset.pick); } };
@@ -1998,11 +2139,10 @@ function populateOverrides() {
     sel.disabled = !list.length;
   };
   const agent = execAgent();
-  const tool = state.data?.tools?.[agent];
-  const models = agent !== 'antigravity' && tool?.cli_models?.length ? tool.cli_models : MODELS[agent];
-  const efforts = agent !== 'antigravity' && tool?.efforts?.length ? tool.efforts : EFFORTS[agent];
+  const a = AGENTS[agent] || { models: [], efforts: [] };
+  const models = a.models, efforts = a.efforts;
   // Antigravity only accepts a model tier when it opens a new conversation.
-  fill('modelSel', t('autoModel'), agent === 'antigravity' && !$('newSessChk').checked ? [] : models);
+  fill('modelSel', t('autoModel'), a.adapter === 'antigravity' && !$('newSessChk').checked ? [] : models);
   fill('effortSel', t('autoEffort'), efforts);
 }
 $('newSessChk').onchange = () => { populateOverrides(); resetCmd(); };
@@ -2012,7 +2152,7 @@ function boardPayload(exec) {
   const b = state.board;
   const base = {
     agent: execAgent(), model: $('modelSel').value, effort: $('effortSel').value,
-    new_session: execAgent() === 'antigravity' && $('newSessChk').checked,
+    new_session: cap(execAgent(), 'new_session') && $('newSessChk').checked,
     project_path: $('projectSel').value, prompt: $('promptTxt').value.trim(),
     execute_antigravity: !!exec
   };
@@ -2033,7 +2173,14 @@ const FLOWS = {
 };
 function flowPayload(flow) {
   const f = FLOWS[flow];
-  return f ? { model: '', effort: '', project_path: $('projectSel').value, prompt: $('promptTxt').value.trim(), ...f } : null;
+  if (!f) return null;
+  const p = { model: '', effort: '', project_path: $('projectSel').value, prompt: $('promptTxt').value.trim(), ...f };
+  // v4 backends take the reviewers (Council / Auto-Gate) and the implementer (Backend slot) from the dashboard.
+  if (hasRegistryApi() && (p.mode === 'council' || p.mode === 'auto-gate')) {
+    p.reviewers = [...state.council];
+    if (p.mode === 'auto-gate' && p.role === 'auto-loop') p.implementer = state.board.assign.backend;
+  }
+  return p;
 }
 
 // Until the backend speaks v2.2, map single tasks onto the v2.1 modes it already supports.
@@ -2077,6 +2224,21 @@ function localCommand(p) {
   return `${ps} ${q(s + '\\invoke-council-review.ps1')} -WorkDir ${q(p.project_path)} -Prompt ${q(cp)}`;
 }
 
+// Client-side checks shared by the command preview, the IDE quick-send and the web runner.
+function requestProblem(p, exec) {
+  if (!p.project_path) return 'pickProj';
+  if ((exec === true || needsPrompt(p)) && !p.prompt) return 'emptyPrompt';
+  if (p.mode === 'team' && !Object.keys(p.team || {}).length) return 'teamEmpty';
+  // The team template ends with "…:" and expects the feature to be written after it.
+  if (p.prompt && Object.values(I18N).some(l => p.prompt.endsWith(l.tplPrompts.team.trim()))) return 'tplNeedsDetail';
+  return '';
+}
+function focusPromptEnd() {
+  const box = $('promptTxt');
+  box.focus();
+  box.setSelectionRange(box.value.length, box.value.length);
+}
+
 function needsPrompt(p) {
   return p.mode === 'task' || p.mode === 'team' || p.mode === 'claude'
     || (p.mode === 'codex' && ['critic', 'coder'].includes(p.role))
@@ -2105,13 +2267,13 @@ $('tplSel').onchange = () => {
   const name = $('projectSel').selectedOptions[0]?.dataset.name;
   const text = I18N[LANG].tplPrompts[tpl.id];
   $('promptTxt').value = name ? `${t('presetProject')} "${name}": ${text}` : text;
-  updateChars(); resetCmd(); $('promptTxt').focus();
+  updateChars(); resetCmd(); focusPromptEnd();
 };
 
 async function generate(exec, quiet, body) {
   const p = body || payload(exec);
   const wire = wirePayload(p);
-  const missing = !p.project_path ? 'pickProj' : ((exec === true || needsPrompt(p)) && !p.prompt) ? 'emptyPrompt' : !wire ? 'needV22' : '';
+  const missing = requestProblem(p, exec) || (!wire ? 'needV22' : '');
   if (missing) {
     if (quiet) $('cmdOut').textContent = t(missing);
     else toast(t(missing), 'warn');
@@ -2183,6 +2345,7 @@ $('projectSel').onchange = () => {
   state.guard = null;
   renderGuard();
   projMeta(); resetCmd(); ensureGit(true);
+  emit('project-change', MAW.project());
 };
 // Templates prefix the prompt with `Dự án "<name>":` — keep that prefix pointing at the selected project.
 function retargetPrompt(name) {
@@ -2208,8 +2371,137 @@ function selectTab(name) {
   document.querySelectorAll('#tabsCard [data-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
   store.set('maw_tab', name);
 }
-document.querySelectorAll('#tabsCard [data-tab]').forEach(b => b.onclick = () => selectTab(b.dataset.tab));
+// Delegated, so tabs added later by feature plugins work too.
+document.querySelector('#tabsCard .tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) selectTab(b.dataset.tab); });
 selectTab(['audit', 'sessions', 'stats', 'notify'].includes(store.get('maw_tab')) ? store.get('maw_tab') : 'audit');
+
+// ---------- Feature plugins (SPEC §9.0) ----------
+// Each server feature may ship `dashboard/feat-<name>.js`; it talks to the page only through window.MAW.
+// `var` on purpose: setLang()/renderJobHead() can run before this block during start-up.
+var MAW_EVENTS = {};
+var MAW_JOB_ACTIONS = [];
+var MAW_PROJECT_ACTIONS = [];
+var loadedFeatures = new Set();
+function emit(ev, data) {
+  for (const fn of (MAW_EVENTS && MAW_EVENTS[ev]) || []) {
+    try { fn(data); } catch (e) { console.error(`[feature:${ev}]`, e); }
+  }
+}
+window.MAW = {
+  api, t, toast, esc, badge, fmt,
+  get state() { return state; },
+  get lang() { return LANG; },
+  agents: () => structuredClone(AGENTS),
+  project: () => (state.data?.projects || []).find(p => p.path === $('projectSel').value) || null,
+  on(ev, fn) { (MAW_EVENTS[ev] ||= []).push(fn); },
+  addI18n(lang, dict) { if (I18N[lang]) Object.assign(I18N[lang], dict); },
+  // A tab next to Audit / Sessions / Stats / Notifications. render(panel) is called on every data refresh.
+  addTab({ id, title, render }) {
+    if (!/^[a-z][a-z0-9-]{1,31}$/.test(id) || document.querySelector(`#tabsCard [data-tab="${id}"]`)) return;
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.setAttribute('role', 'tab'); btn.dataset.tab = id;
+    btn.innerHTML = `<span></span> <span class="count"></span>`;
+    document.querySelector('#tabsCard .tabs').appendChild(btn);
+    const panel = document.createElement('div');
+    panel.dataset.panel = id; panel.setAttribute('role', 'tabpanel'); panel.className = 'hidden feature-panel';
+    $('tabsCard').appendChild(panel);
+    const paint = () => {
+      btn.firstElementChild.textContent = typeof title === 'function' ? title() : title;
+      try { render?.(panel); } catch (e) { console.error(`[feature tab ${id}]`, e); }
+    };
+    MAW.on('data', paint); MAW.on('lang', paint);
+    if (state.data) paint();
+    if (store.get('maw_tab') === id) selectTab(id);
+    return { button: btn, panel, setCount: n => { btn.lastElementChild.textContent = n || ''; } };
+  },
+  // Buttons on the live job header, e.g. "Rollback", "Retry with…", "Steer".
+  addJobAction(a) { MAW_JOB_ACTIONS.push(a); renderJobHead(); },
+  // Buttons in the project card, e.g. "New worktree", "Import issue".
+  addProjectAction(a) { MAW_PROJECT_ACTIONS.push(a); renderProjectActions(); },
+  addHeaderItem(el) { $('featHeader').appendChild(el); },
+  // A full-screen view next to the classic dashboard (e.g. the S6 3-column workspace). render(el) runs once;
+  // onShow(el) runs every time the view becomes visible.
+  addView({ id, title, render, onShow }) {
+    if (!/^[a-z][a-z0-9-]{1,31}$/.test(id) || id === 'dashboard' || MAW_VIEWS[id]) return;
+    const el = document.createElement('section');
+    el.id = 'view-' + id; el.className = 'maw-view hidden';
+    $('view-dashboard').after(el);
+    MAW_VIEWS[id] = { title, onShow, el };
+    try { render?.(el); } catch (e) { console.error(`[view ${id}]`, e); }
+    renderViewNav();
+    if (store.get('maw_view') === id) showView(id);
+    return el;
+  },
+  showView: id => showView(id),
+  // Starts a job exactly like the Run button (same checks, same live log).
+  runJob: body => runJob(body),
+};
+
+function renderJobActions() {
+  const box = $('jobActions'), j = state.job;
+  box.innerHTML = '';
+  if (!j || !MAW_JOB_ACTIONS) return;
+  for (const a of MAW_JOB_ACTIONS) {
+    let show = false;
+    try { show = !a.when || a.when(j); } catch { show = false; }
+    if (!show) continue;
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'btn btn-sm';
+    b.textContent = typeof a.label === 'function' ? a.label(j) : a.label;
+    b.onclick = () => { try { a.run(j); } catch (e) { toast(e.message, 'err'); } };
+    box.appendChild(b);
+  }
+}
+function renderProjectActions() {
+  const box = $('projActions');
+  box.innerHTML = '';
+  if (!MAW_PROJECT_ACTIONS) return;
+  for (const a of MAW_PROJECT_ACTIONS) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'btn btn-sm';
+    b.textContent = typeof a.label === 'function' ? a.label() : a.label;
+    b.onclick = () => { const p = MAW.project(); if (!p) { toast(t('pickProj'), 'warn'); return; } try { a.run(p); } catch (e) { toast(e.message, 'err'); } };
+    box.appendChild(b);
+  }
+}
+// Views: "dashboard" is the built-in one; features may add more (MAW.addView).
+var MAW_VIEWS = {};
+var currentView = 'dashboard';
+function renderViewNav() {
+  const nav = $('viewNav'), ids = Object.keys(MAW_VIEWS);
+  nav.classList.toggle('hidden', !ids.length);
+  if (!ids.length) return;
+  const label = id => id === 'dashboard' ? t('viewDashboard') : (typeof MAW_VIEWS[id].title === 'function' ? MAW_VIEWS[id].title() : MAW_VIEWS[id].title);
+  nav.innerHTML = ['dashboard', ...ids].map(id => `<button type="button" role="tab" data-view="${esc(id)}" aria-pressed="${id === currentView}">${esc(label(id))}</button>`).join('');
+}
+function showView(id) {
+  if (id !== 'dashboard' && !MAW_VIEWS[id]) id = 'dashboard';
+  currentView = id;
+  $('view-dashboard').classList.toggle('hidden', id !== 'dashboard');
+  for (const [k, v] of Object.entries(MAW_VIEWS)) v.el.classList.toggle('hidden', k !== id);
+  store.set('maw_view', id);
+  renderViewNav();
+  if (id !== 'dashboard') { try { MAW_VIEWS[id].onShow?.(MAW_VIEWS[id].el); } catch (e) { console.error(`[view ${id}]`, e); } }
+  emit('view', id);
+}
+$('viewNav').addEventListener('click', e => { const b = e.target.closest('[data-view]'); if (b) showView(b.dataset.view); });
+
+// Loads every feature UI the server announces (once per page).
+function loadFeatureUis(d) {
+  for (const f of d.ui_features || []) {
+    if (!f || !/^[a-z][a-z0-9-]{1,31}$/.test(f.name || '') || loadedFeatures.has(f.name)) continue;
+    loadedFeatures.add(f.name);
+    if (f.style && /^feat-[a-z0-9-]+\.css$/.test(f.style)) {
+      const l = document.createElement('link'); l.rel = 'stylesheet'; l.href = f.style; document.head.appendChild(l);
+    }
+    if (f.script && /^feat-[a-z0-9-]+\.js$/.test(f.script)) {
+      const s = document.createElement('script'); s.src = f.script; s.defer = true;
+      s.onerror = () => console.error(`[feature ${f.name}] could not load ${f.script}`);
+      document.body.appendChild(s);
+    }
+  }
+}
+
 $('refreshBtn').onclick = () => load(true);
 $('autoToggle').onchange = setAuto;
 
@@ -2229,13 +2521,14 @@ function setRunBusy(busy) { $('runWebBtn').disabled = busy; }
 function renderJobHead() {
   const j = state.job;
   const head = $('liveJobHead'), cancel = $('cancelJobBtn');
-  if (!j) { head.innerHTML = ''; cancel.classList.add('hidden'); return; }
+  if (!j) { head.innerHTML = ''; cancel.classList.add('hidden'); renderJobActions(); return; }
   const running = j.status === 'RUNNING';
   const st = running
     ? `<span class="badge b-warn"><span class="dot warn live"></span>${esc(t('jobRunning'))}</span>`
     : statusBadge(j.status);
   head.innerHTML = `${st}<span>${fmt(j.elapsed)}s</span>${running ? '' : exitInfo(j)}<span>PID ${esc(j.pid || '—')}</span><span class="truncate" style="max-width:18rem" title="${esc(j.id)}">${esc(j.id)}</span>`;
   cancel.classList.toggle('hidden', !running);
+  renderJobActions();
   $('liveJobBox').classList.toggle('is-running', running);
   $('liveJobLog').classList.toggle('is-running', running);
 }
@@ -2314,6 +2607,7 @@ function startJob(r) {
   $('cancelJobBtn').disabled = false;
   setRunBusy(true);
   renderJobHead();
+  emit('job-start', { id: r.job_id, pid: r.pid });
   if (typeof EventSource === 'function' && state.data?.features?.includes('sse')) startJobStream(state.job);
   else startJobPolling(state.job);
 }
@@ -2351,6 +2645,7 @@ async function pollJob() {
 
 function finishJob(j) {
   stopJobPoll();
+  emit('job-end', { id: j.id, status: j.status, exit_code: j.exitCode });
   setRunBusy(false);
   toast(t('jobEnded', { status: j.status }), j.status === 'DONE' ? 'ok' : j.status === 'CANCELLED' ? 'warn' : 'err');
   if (FX.on) { j.status === 'DONE' && !j.exitCode ? FX.burst($('runWebBtn')) : j.status === 'FAILED' && FX.shake($('liveJobBox')); }
@@ -2360,8 +2655,14 @@ function finishJob(j) {
 async function runJob(body) {
   if (state.job?.status === 'RUNNING') { toast(t('jobBusy'), 'warn'); return; }
   const p = body || payload(false);
-  if (!p.project_path) { toast(t('pickProj'), 'warn'); return; }
-  if (needsPrompt(p) && !p.prompt) { toast(t('emptyPrompt'), 'warn'); $('promptTxt').focus(); return; }
+  const problem = requestProblem(p);
+  if (problem) {
+    toast(t(problem), 'warn');
+    if (problem === 'emptyPrompt' || problem === 'tplNeedsDetail') focusPromptEnd();
+    return;
+  }
+  const missing = missingAgents(p);
+  if (missing.length) { toast(t('agentNotInstalled', { names: missing.join(', ') }), 'warn'); return; }
   const wire = wirePayload(p);
   if (!wire) { toast(t('needV22'), 'warn'); return; }
   setRunBusy(true);
@@ -2529,7 +2830,7 @@ function reviewWithCouncil(path) {
   }
   runJob(flowPayload('council'));
 }
-document.querySelectorAll('[data-flow]').forEach(b => b.onclick = () => runJob(flowPayload(b.dataset.flow)));
+document.querySelectorAll('.flows [data-flow]').forEach(b => b.onclick = () => runJob(flowPayload(b.dataset.flow)));
 $('gitBody').onclick = e => {
   const b = e.target.closest('[data-review]');
   if (b) reviewWithCouncil(b.dataset.review);

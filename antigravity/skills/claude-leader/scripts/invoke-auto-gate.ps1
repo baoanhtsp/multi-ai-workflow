@@ -9,6 +9,12 @@ param(
     [string]$PromptFile = "",
 
     [Parameter(Mandatory=$false)]
+    [string]$Implementer = "",
+
+    [Parameter(Mandatory=$false)]
+    [string]$Reviewers = "",
+
+    [Parameter(Mandatory=$false)]
     [int]$MaxRounds = 2,
 
     [Parameter(Mandatory=$false)]
@@ -20,6 +26,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 . (Join-Path $PSScriptRoot "lib\maw-common.ps1")
+. (Join-Path $PSScriptRoot "lib\maw-registry.ps1")
 
 if ($PromptFile) {
     if (-not (Test-Path -LiteralPath $PromptFile)) {
@@ -35,15 +42,40 @@ if ($PromptFile) {
 }
 
 $scriptDir   = $PSScriptRoot
-$agyScript   = Join-Path $scriptDir "invoke-antigravity.ps1"
+$agentScript = Join-Path $scriptDir "invoke-agent.ps1"
 $guardScript = Join-Path $scriptDir "invoke-spec-guard.ps1"
 $councilScr  = Join-Path $scriptDir "invoke-council-review.ps1"
 $notifyScr   = Join-Path $scriptDir "send-notification.ps1"
 
+$reg = Get-AgentRegistry -ScriptsDir $scriptDir
+$effImplementer = if ($Implementer -and $Implementer.Trim()) {
+    $Implementer.Trim().ToLowerInvariant()
+} else {
+    ([string]$reg.defaults.implementer).Trim().ToLowerInvariant()
+}
+
+$implEntry = Get-AgentEntry -AgentId $effImplementer -Registry $reg
+if ($null -eq $implEntry) {
+    Write-Output "ERROR: Unknown or disabled implementer '$effImplementer'."
+    exit 1
+}
+if (-not $implEntry.capabilities.write) {
+    Write-Output "ERROR: Implementer '$effImplementer' does not have write capability."
+    exit 1
+}
+
+$effReviewers = if ($Reviewers -and $Reviewers.Trim()) {
+    ($Reviewers -split '[,;\s]+' | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ }) -join ","
+} else {
+    (@($reg.defaults.council) -join ",")
+}
+
 Write-Output "=================================================================="
 Write-Output "  AUTO-REVIEW GATE: IMPLEMENT -> SPEC GUARD -> COUNCIL -> FIX"
-Write-Output "  Project   : $WorkDir"
-Write-Output "  Max Rounds: $MaxRounds"
+Write-Output "  Project    : $WorkDir"
+Write-Output "  Implementer: $effImplementer ($($implEntry.label))"
+Write-Output "  Reviewers  : $effReviewers"
+Write-Output "  Max Rounds : $MaxRounds"
 Write-Output "=================================================================="
 
 $baselineFile = $null
@@ -53,17 +85,17 @@ if (-not $SkipInitialImplement) {
 }
 
 try {
-    # Step 1: Initial Implementation by Antigravity (unless skipped)
+    # Step 1: Initial Implementation via invoke-agent.ps1 -Role backend (unless skipped)
     if (-not $SkipInitialImplement -and $Prompt) {
-        Write-Output "`n[Phase 1] Dispatching implementation task to Antigravity IDE (Timeout: 1800s)..."
+        Write-Output "`n[Phase 1] Dispatching implementation task to $($implEntry.label) ($effImplementer) (Timeout: 1800s)..."
         $initPromptFile = Join-Path $env:TEMP ("autogate_init_" + [guid]::NewGuid().ToString("N") + ".txt")
         [System.IO.File]::WriteAllText($initPromptFile, $Prompt, (New-Object System.Text.UTF8Encoding($true)))
-        & powershell -NoProfile -ExecutionPolicy Bypass -File $agyScript -Action send-latest -WorkDir $WorkDir -Title "Auto-Gate Implementation" -PromptFile $initPromptFile -TimeoutSeconds 1800
-        $agyCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $agentScript -Agent $effImplementer -Role backend -WorkDir $WorkDir -PromptFile $initPromptFile -TimeoutSeconds 1800
+        $implCode = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
         Remove-Item -LiteralPath $initPromptFile -Force -ErrorAction SilentlyContinue
-        if ($agyCode -ne 0) {
-            Write-Output "[Auto-Gate] Antigravity initial implementation failed or timed out (exit code $agyCode). Aborting before review."
-            exit $agyCode
+        if ($implCode -ne 0) {
+            Write-Output "[Auto-Gate] Initial implementation by $effImplementer failed or timed out (exit code $implCode). Aborting before review."
+            exit $implCode
         }
     }
 
@@ -77,13 +109,13 @@ try {
         if ($SkipInitialImplement) {
             Write-Output "  [Round $round / $MaxRounds] Running SPEC.md Contract Guard (review-only mode)..."
         } else {
-            Write-Output "  [Round $round / $MaxRounds] Running SPEC.md Contract Guard (-Owner antigravity with baseline)..."
+            Write-Output "  [Round $round / $MaxRounds] Running SPEC.md Contract Guard (-Owner $effImplementer with baseline)..."
         }
         Write-Output "------------------------------------------------------------------"
 
         $guardArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $guardScript, "-WorkDir", $WorkDir, "-Json")
         if (-not $SkipInitialImplement) {
-            $guardArgs += @("-Owner", "antigravity", "-Baseline", $baselineFile)
+            $guardArgs += @("-Owner", $effImplementer, "-Baseline", $baselineFile)
         }
         $guardJsonRaw = (& powershell @guardArgs 2>&1) -join "`n"
         $guardViolations = @()
@@ -101,47 +133,58 @@ try {
         }
 
         Write-Output "`n------------------------------------------------------------------"
-        Write-Output "  [Round $round / $MaxRounds] Running Parallel AI Council Review (Claude + Codex)..."
+        Write-Output "  [Round $round / $MaxRounds] Running Parallel AI Council Review ($effReviewers)..."
         Write-Output "------------------------------------------------------------------"
         $reviewPrompt = if ($Prompt) { "Round $round Review against SPEC.md for task: $Prompt" } else { "Round $round Review of uncommitted changes against SPEC.md." }
-        $councilOut = (& powershell -NoProfile -ExecutionPolicy Bypass -File $councilScr -WorkDir $WorkDir -Prompt $reviewPrompt 2>&1) -join "`n"
+        $councilOut = (& powershell -NoProfile -ExecutionPolicy Bypass -File $councilScr -WorkDir $WorkDir -Reviewers $effReviewers -Prompt $reviewPrompt 2>&1) -join "`n"
         $councilExit = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
         Write-Output $councilOut
 
-        $cVerdict = "UNKNOWN"
-        $xVerdict = "UNKNOWN"
-        $cScoreVal = $null
-        $xScoreVal = $null
-
-        if ($councilOut -match '===\s*COUNCIL_RESULT\s+claude=([A-Z_]+)\|([^\s]*)\s+codex=([A-Z_]+)\|([^\s=]*)\s*===') {
-            $cVerdict = $Matches[1]
-            $cScoreRaw = $Matches[2]
-            $xVerdict = $Matches[3]
-            $xScoreRaw = $Matches[4]
-
-            if ($cScoreRaw -match '^(\d+(?:\.\d+)?)') {
-                $cScoreVal = [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture)
-            }
-            if ($xScoreRaw -match '^(\d+(?:\.\d+)?)') {
-                $xScoreVal = [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture)
-            }
-        }
-
-        if ($councilExit -eq 3 -or $cVerdict -eq "UNKNOWN" -or $xVerdict -eq "UNKNOWN") {
-            Write-Output "`n[Auto-Gate ERROR] Council review incomplete or failed (claude=$cVerdict, codex=$xVerdict). Refusing to send broken review output to Antigravity."
-            exit 3
-        }
-
+        $anyUnknown = $false
+        $allApproved = $true
         $minScore = $null
-        if ($null -ne $cScoreVal -and $null -ne $xScoreVal) {
-            $minScore = [Math]::Min($cScoreVal, $xScoreVal)
+        $summaryParts = [System.Collections.Generic.List[string]]::new()
+
+        if ($councilOut -match '===\s*COUNCIL_RESULT\s+(.+?)\s*===') {
+            $pairsText = $Matches[1].Trim()
+            $pairMatches = [regex]::Matches($pairsText, '([a-z0-9-]+)=([A-Z_]+)\|([^\s]*)')
+            if ($pairMatches.Count -eq 0) {
+                $anyUnknown = $true
+            }
+            foreach ($pm in $pairMatches) {
+                $rId = $pm.Groups[1].Value
+                $rVerd = $pm.Groups[2].Value
+                $rScoreRaw = $pm.Groups[3].Value
+                $summaryParts.Add("${rId}: $rVerd")
+
+                if ($rVerd -eq "UNKNOWN") {
+                    $anyUnknown = $true
+                }
+                if ($rVerd -ne "APPROVED") {
+                    $allApproved = $false
+                }
+                if ($rScoreRaw -match '^(\d+(?:\.\d+)?)') {
+                    $sVal = [double]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture)
+                    if ($null -eq $minScore -or $sVal -lt $minScore) {
+                        $minScore = $sVal
+                    }
+                } else {
+                    $allApproved = $false
+                }
+            }
+        } else {
+            $anyUnknown = $true
+        }
+
+        if ($councilExit -eq 3 -or $anyUnknown) {
+            Write-Output "`n[Auto-Gate ERROR] Council review incomplete or failed ($($summaryParts -join ', ')). Refusing to send broken review output to implementer."
+            exit 3
         }
 
         $scoreStr = if ($null -ne $minScore) { "$minScore/10" } else { "N/A" }
 
         $isApproved = (
-            $cVerdict -eq "APPROVED" -and
-            $xVerdict -eq "APPROVED" -and
+            $allApproved -and
             $null -ne $minScore -and
             $minScore -ge 8.5 -and
             $guardViolations.Count -eq 0
@@ -156,19 +199,19 @@ try {
         $finalScore = $scoreStr
         $finalVerdict = $roundVerdict
 
-        Write-Output "`n>>> [Round $round Result] Min Score: $scoreStr (Claude: $cVerdict, Codex: $xVerdict) | Verdict: $roundVerdict <<<"
+        Write-Output "`n>>> [Round $round Result] Min Score: $scoreStr ($($summaryParts -join ', ')) | Verdict: $roundVerdict <<<"
 
         if ($isApproved) {
-            Write-Output "`n[Auto-Gate] Target achieved! Code is APPROVED by both reviewers (min score >= 8.5) in Round $round."
+            Write-Output "`n[Auto-Gate] Target achieved! Code is APPROVED by all reviewers (min score >= 8.5) in Round $round."
             $finalExitCode = 0
             break
         }
 
-        if ($round -lt $MaxRounds) {
-            Write-Output "`n[Auto-Gate] Sending Council feedback back to Antigravity for automated fixes (Round $($round + 1), Timeout: 1800s)..."
+        if ($round -lt $MaxRounds -and -not $SkipInitialImplement) {
+            Write-Output "`n[Auto-Gate] Sending Council feedback back to $($implEntry.label) ($effImplementer) for automated fixes (Round $($round + 1), Timeout: 1800s)..."
 
             $cleanLines = foreach ($line in ($councilOut -replace "`r`n", "`n" -split "`n")) {
-                if ($line -notmatch '^\[(Claude|Codex)\]\s+\[(Connected|Action|Done|Completed)') {
+                if ($line -notmatch '^\[[^\]]+\]\s+\[(Connected|Action|Done|Completed)') {
                     $line
                 }
             }
@@ -191,11 +234,11 @@ $cleanReview
 "@
             $fixFile = Join-Path $env:TEMP ("autogate_fix_" + [guid]::NewGuid().ToString("N") + ".txt")
             [System.IO.File]::WriteAllText($fixFile, $fixPrompt, (New-Object System.Text.UTF8Encoding($true)))
-            & powershell -NoProfile -ExecutionPolicy Bypass -File $agyScript -Action send-latest -WorkDir $WorkDir -Title "Auto-Gate Fix Round $($round + 1)" -PromptFile $fixFile -TimeoutSeconds 1800
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $agentScript -Agent $effImplementer -Role backend -WorkDir $WorkDir -PromptFile $fixFile -TimeoutSeconds 1800
             $fixExit = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
             Remove-Item -LiteralPath $fixFile -Force -ErrorAction SilentlyContinue
             if ($fixExit -ne 0) {
-                Write-Output "[Auto-Gate] Antigravity fix turn failed or timed out (exit code $fixExit). Stopping."
+                Write-Output "[Auto-Gate] Implementer ($effImplementer) fix turn failed or timed out (exit code $fixExit). Stopping."
                 exit $fixExit
             }
         }

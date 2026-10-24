@@ -1,5 +1,6 @@
 import { buildCommandSpec, type ValidatedCommandInfo } from './commands.ts';
 import { resolveProjectPath, type ServerPaths } from './paths.ts';
+import { loadAgentRegistry } from './registry.ts';
 import { getCodexModels } from './versions.ts';
 
 export class ApiValidationError extends Error {
@@ -23,7 +24,6 @@ const ALLOWED_MODES: readonly string[] = [
   'spec-guard',
 ];
 
-const ALLOWED_AGENTS: readonly string[] = ['claude', 'antigravity', 'codex'];
 const ALLOWED_TASK_ROLES: readonly string[] = [
   'architect',
   'backend',
@@ -33,31 +33,45 @@ const ALLOWED_TASK_ROLES: readonly string[] = [
 ];
 const ALLOWED_TEAM_KEYS: readonly string[] = ['backend', 'frontend', 'reviewer'];
 
-const ALLOWED_CLAUDE_MODELS: readonly string[] = [
-  '',
-  'opus',
-  'sonnet',
-  'haiku',
-  'fable',
-  'claude-opus-5-5',
-  'claude-opus-5',
-  'claude-sonnet-5-5',
-  'claude-sonnet-5',
-  'claude-haiku-5-5',
-  'claude-fable-5-1',
-  'claude-fable-5',
-  'claude-opus-4-8',
-  'claude-opus-4-7',
-  'claude-opus-4-6',
-  'claude-opus-4-5',
-  'claude-sonnet-4-6',
-  'claude-sonnet-4-5',
-  'claude-haiku-4-5',
-];
+function parseReviewersList(
+  rawReviewers: unknown,
+  enabledMap: Map<string, { id: string; capabilities: { review: boolean } }>
+): string[] {
+  let items: string[] = [];
+  if (Array.isArray(rawReviewers)) {
+    items = rawReviewers.map((x) => (typeof x === 'string' ? x.trim().toLowerCase() : ''));
+  } else if (typeof rawReviewers === 'string') {
+    items = rawReviewers
+      .split(',')
+      .map((x) => x.trim().toLowerCase())
+      .filter((x) => x !== '');
+  } else {
+    throw new ApiValidationError('Invalid reviewers format: must be a non-empty array of agent ids.', 400);
+  }
 
-const ALLOWED_CLAUDE_EFFORTS: readonly string[] = ['', 'low', 'medium', 'high', 'xhigh', 'max'];
-const ALLOWED_CODEX_EFFORTS: readonly string[] = ['', 'low', 'medium', 'high', 'xhigh'];
-const ALLOWED_AGY_MODELS: readonly string[] = ['', 'pro', 'flash', 'flash_lite'];
+  if (items.length === 0 || items.some((x) => x === '')) {
+    throw new ApiValidationError('Council reviewers must contain at least 1 valid agent id.', 400);
+  }
+
+  const deduped: string[] = [];
+  for (const id of items) {
+    const entry = enabledMap.get(id);
+    if (!entry) {
+      throw new ApiValidationError(`Invalid reviewer agent '${id}'. Not an enabled registry agent.`, 400);
+    }
+    if (!entry.capabilities.review) {
+      throw new ApiValidationError(`Agent '${id}' does not have review capability.`, 400);
+    }
+    if (!deduped.includes(id)) {
+      deduped.push(id);
+    }
+  }
+
+  if (deduped.length === 0) {
+    throw new ApiValidationError('Council reviewers must contain at least 1 valid agent id.', 400);
+  }
+  return deduped;
+}
 
 export function buildValidatedCommand(
   body: Record<string, unknown>,
@@ -80,17 +94,24 @@ export function buildValidatedCommand(
     );
   }
 
+  const registry = loadAgentRegistry(paths);
+  const enabledAgentsMap = new Map(registry.agents.map((a) => [a.id, a]));
+  const enabledIds = registry.agents.map((a) => a.id);
+
   let agent = '';
   let role = String(body.role ?? '').trim().toLowerCase();
   const newSession = body.new_session === true;
   let teamArray: Record<string, string> | null = null;
   let teamSpec = '';
+  let reviewers: string[] | undefined;
+  let implementer: string | undefined;
 
   if (mode === 'task') {
     agent = String(body.agent ?? '').trim().toLowerCase();
-    if (!ALLOWED_AGENTS.includes(agent)) {
+    const agentEntry = enabledAgentsMap.get(agent);
+    if (!agentEntry) {
       throw new ApiValidationError(
-        'Invalid agent for task mode. Allowed: claude, antigravity, codex.',
+        `Invalid agent for task mode. Allowed: ${enabledIds.join(', ')}.`,
         400
       );
     }
@@ -100,13 +121,20 @@ export function buildValidatedCommand(
         400
       );
     }
+    if (newSession && !agentEntry.capabilities.new_session) {
+      throw new ApiValidationError(`Agent '${agent}' does not support new_session.`, 400);
+    }
   } else if (mode === 'team') {
     agent = String(body.agent ?? '').trim().toLowerCase();
-    if (!ALLOWED_AGENTS.includes(agent)) {
+    const leaderEntry = enabledAgentsMap.get(agent);
+    if (!leaderEntry) {
       throw new ApiValidationError(
-        'Invalid leader agent for team mode. Allowed: claude, antigravity, codex.',
+        `Invalid leader agent for team mode. Allowed: ${enabledIds.join(', ')}.`,
         400
       );
+    }
+    if (newSession && !leaderEntry.capabilities.new_session) {
+      throw new ApiValidationError(`Agent '${agent}' does not support new_session.`, 400);
     }
     role = 'leader';
     const rawTeam = body.team;
@@ -131,9 +159,9 @@ export function buildValidatedCommand(
           400
         );
       }
-      if (!ALLOWED_AGENTS.includes(vNorm)) {
+      if (!enabledAgentsMap.has(vNorm)) {
         throw new ApiValidationError(
-          `Invalid agent '${vNorm}' for team slot '${kNorm}'. Allowed: claude, antigravity, codex.`,
+          `Invalid agent '${vNorm}' for team slot '${kNorm}'. Allowed: ${enabledIds.join(', ')}.`,
           400
         );
       }
@@ -193,6 +221,9 @@ export function buildValidatedCommand(
       if (!allowedRolesByMode.council!.includes(role)) {
         throw new ApiValidationError('Invalid role for council. Allowed: parallel-review.', 400);
       }
+      if (body.reviewers !== undefined) {
+        reviewers = parseReviewersList(body.reviewers, enabledAgentsMap);
+      }
     } else if (mode === 'auto-gate') {
       agent = 'auto-gate';
       if (role === '') role = 'auto-loop';
@@ -202,12 +233,32 @@ export function buildValidatedCommand(
           400
         );
       }
+      if (body.implementer !== undefined && String(body.implementer).trim() !== '') {
+        const imp = String(body.implementer).trim().toLowerCase();
+        const impEntry = enabledAgentsMap.get(imp);
+        if (!impEntry) {
+          throw new ApiValidationError(
+            `Invalid implementer '${imp}'. Not an enabled registry agent.`,
+            400
+          );
+        }
+        if (!impEntry.capabilities.write) {
+          throw new ApiValidationError(
+            `Agent '${imp}' does not have write capability required for auto-gate implementer.`,
+            400
+          );
+        }
+        implementer = imp;
+      }
+      if (body.reviewers !== undefined) {
+        reviewers = parseReviewersList(body.reviewers, enabledAgentsMap);
+      }
     } else if (mode === 'spec-guard') {
       agent = 'spec-guard';
       if (role === '' || role === 'all') role = 'check';
-      if (!['check', 'antigravity', 'claude', 'codex'].includes(role)) {
+      if (role !== 'check' && !enabledAgentsMap.has(role)) {
         throw new ApiValidationError(
-          'Invalid role/owner for spec-guard. Allowed: check, antigravity, claude, codex.',
+          `Invalid role/owner for spec-guard. Allowed: check, ${enabledIds.join(', ')}.`,
           400
         );
       }
@@ -243,45 +294,43 @@ export function buildValidatedCommand(
   const modelOverride = rawModel.trim().toLowerCase();
   const effortOverride = rawEffort.trim().toLowerCase();
 
-  const allowedCodexModels = [
-    '',
-    ...getCodexModels(paths.userProfile).map((m) => m.toLowerCase()),
-  ];
-
   const execAgent = mode === 'task' || mode === 'team' ? agent : mode;
-  if (execAgent === 'claude') {
-    if (!ALLOWED_CLAUDE_MODELS.includes(modelOverride)) {
-      throw new ApiValidationError('Invalid Claude model override.', 400);
+  const execEntry =
+    enabledAgentsMap.get(execAgent) ?? registry.agents.find((a) => a.id === execAgent);
+
+  if (execEntry) {
+    const allowedModels = new Set(execEntry.models.map((m) => m.toLowerCase()));
+    if (execEntry.id === 'codex') {
+      for (const cm of getCodexModels(paths.userProfile)) {
+        allowedModels.add(cm.toLowerCase());
+      }
     }
-    if (!ALLOWED_CLAUDE_EFFORTS.includes(effortOverride)) {
-      throw new ApiValidationError('Invalid Claude effort override.', 400);
+
+    if (modelOverride !== '') {
+      if (!allowedModels.has(modelOverride)) {
+        throw new ApiValidationError(`Invalid ${execEntry.label} model override.`, 400);
+      }
+      if (
+        execEntry.adapter === 'antigravity' &&
+        (mode === 'task' || mode === 'team') &&
+        !newSession
+      ) {
+        throw new ApiValidationError(
+          'Antigravity model tier override is only supported when new_session is true.',
+          400
+        );
+      }
     }
-  } else if (execAgent === 'codex') {
-    if (!allowedCodexModels.includes(modelOverride)) {
-      throw new ApiValidationError('Invalid Codex model override.', 400);
-    }
-    if (!ALLOWED_CODEX_EFFORTS.includes(effortOverride)) {
-      throw new ApiValidationError('Invalid Codex effort override.', 400);
-    }
-  } else if (execAgent === 'antigravity') {
-    if (!ALLOWED_AGY_MODELS.includes(modelOverride)) {
-      throw new ApiValidationError(
-        'Invalid Antigravity model tier (allowed: pro, flash, flash_lite).',
-        400
-      );
-    }
-    if ((mode === 'task' || mode === 'team') && modelOverride !== '' && !newSession) {
-      throw new ApiValidationError(
-        'Antigravity model tier override is only supported when new_session is true.',
-        400
-      );
-    }
+
+    const allowedEfforts = new Set(execEntry.efforts.map((e) => e.toLowerCase()));
     if (effortOverride !== '') {
-      throw new ApiValidationError('Antigravity does not accept an effort override.', 400);
+      if (!allowedEfforts.has(effortOverride)) {
+        throw new ApiValidationError(`Invalid ${execEntry.label} effort override.`, 400);
+      }
     }
   }
 
-  const baseInfo = {
+  const baseInfo: Omit<ValidatedCommandInfo, 'command'> = {
     mode,
     agent,
     role,
@@ -293,6 +342,13 @@ export function buildValidatedCommand(
     project_path: validatedProjectPath,
     prompt,
   };
+  if (reviewers !== undefined) {
+    baseInfo.reviewers = reviewers;
+  }
+  if (implementer !== undefined) {
+    baseInfo.implementer = implementer;
+  }
+
   const spec = buildCommandSpec(baseInfo, paths.scriptsDir, null);
   return {
     ...baseInfo,

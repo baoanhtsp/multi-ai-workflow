@@ -37,7 +37,12 @@ function Invoke-NativeProcess {
         [string]$WorkingDirectory = "",
 
         [Parameter(Mandatory=$false)]
-        [int]$TimeoutMs = 0
+        [int]$TimeoutMs = 0,
+
+        [Parameter(Mandatory=$false)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$StdinText = $null
     )
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -48,6 +53,7 @@ function Invoke-NativeProcess {
     $psi.Arguments = ($quotedArgs -join " ")
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
+    $psi.RedirectStandardInput = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
@@ -61,11 +67,25 @@ function Invoke-NativeProcess {
     $proc.StartInfo = $psi
     [void]$proc.Start()
 
+    try {
+        if ($PSBoundParameters.ContainsKey("StdinText") -and $null -ne $StdinText -and $StdinText.Length -gt 0) {
+            $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+            $inBytes = $utf8NoBom.GetBytes($StdinText)
+            $proc.StandardInput.BaseStream.Write($inBytes, 0, $inBytes.Length)
+            $proc.StandardInput.BaseStream.Flush()
+        }
+    } catch {} finally {
+        try { $proc.StandardInput.Close() } catch {}
+    }
+
     $stdoutTask = $proc.StandardOutput.ReadToEndAsync()
     $stderrTask = $proc.StandardError.ReadToEndAsync()
 
+    $timedOut = $false
     if ($TimeoutMs -gt 0) {
         if (-not $proc.WaitForExit($TimeoutMs)) {
+            $timedOut = $true
+            try { & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null } catch {}
             try { $proc.Kill() } catch {}
         }
     }
@@ -73,9 +93,11 @@ function Invoke-NativeProcess {
 
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
+    $exitCode = if ($timedOut) { 124 } else { [int]$proc.ExitCode }
 
     return @{
-        ExitCode = [int]$proc.ExitCode
+        ExitCode = $exitCode
+        TimedOut = $timedOut
         StdOut   = [string]$stdout
         StdErr   = [string]$stderr
     }
