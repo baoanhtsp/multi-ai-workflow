@@ -1021,45 +1021,67 @@ async function main(): Promise<void> {
       if (event === 'before-review') {
         const workdir = String(context.workdir || context.project || process.env.MAW_JOB_PROJECT || '').trim();
 
-        if (workdir) {
-          // 1. Check unresolved high policy violations for this workdir (Design §5.2.4)
-          const violFile = path.win32.join(paths.featureDataDir('policy'), 'violations.jsonl');
-          if (fs.existsSync(violFile)) {
-            try {
-              const lines = fs
-                .readFileSync(violFile, 'utf8')
-                .split(/\r?\n/)
-                .filter((l) => l.trim().length > 0);
+        if (!workdir) {
+          const reason = 'Test gate: no workdir [S4:gate]';
+          outputResult({
+            block: true,
+            reason,
+            lines: [reason],
+          });
+          return;
+        }
 
-              for (const l of lines) {
-                const v = JSON.parse(l) as PolicyViolation;
-                if (v.severity === 'high' && !v.resolved) {
-                  if (v.project && isPathInsideProject(workdir, v.project)) {
-                    const reason = `Policy violation: ${v.detail} [S4:policy]`;
-                    outputResult({
-                      block: true,
-                      reason,
-                      lines: [reason],
-                    });
-                    return;
-                  }
+        // 1. Check unresolved high policy violations for this workdir (Design §5.2.4)
+        const violFile = path.win32.join(paths.featureDataDir('policy'), 'violations.jsonl');
+        if (fs.existsSync(violFile)) {
+          try {
+            const lines = fs
+              .readFileSync(violFile, 'utf8')
+              .split(/\r?\n/)
+              .filter((l) => l.trim().length > 0);
+
+            for (const l of lines) {
+              const v = JSON.parse(l) as PolicyViolation;
+              if (v.severity === 'high' && !v.resolved) {
+                if (v.project && isPathInsideProject(workdir, v.project)) {
+                  const reason = `Policy violation: ${v.detail} [S4:policy]`;
+                  outputResult({
+                    block: true,
+                    reason,
+                    lines: [reason],
+                  });
+                  return;
                 }
               }
-            } catch {
-              // Ignore
             }
+          } catch {
+            // Ignore
           }
+        }
 
-          // 2. Synchronously run configured checks in workdir (Design §3.4)
-          const shaInfo = getProjectChecksSha256(workdir);
-          if (!shaInfo) {
-            outputResult({
-              block: false,
-              reason: '',
-              lines: ['[S4] no checks configured'],
-            });
-            return;
-          }
+        // 2. Synchronously run configured checks in workdir (Design §3.4)
+        let shaInfo: { sha256: string; content: string } | null = null;
+        try {
+          shaInfo = getProjectChecksSha256(workdir);
+        } catch (err: any) {
+          const msg = err instanceof Error ? err.message : String(err);
+          const reason = `Test gate: unreadable .maw/checks.json: ${msg} [S4:gate]`;
+          outputResult({
+            block: true,
+            reason,
+            lines: [reason],
+          });
+          return;
+        }
+
+        if (!shaInfo) {
+          outputResult({
+            block: false,
+            reason: '',
+            lines: ['[S4] no checks configured'],
+          });
+          return;
+        }
 
           const isTrusted = isProjectChecksTrusted(paths, workdir, shaInfo.sha256);
           if (!isTrusted) {
@@ -1131,7 +1153,6 @@ async function main(): Promise<void> {
             });
             return;
           }
-        }
 
         outputResult({
           block: false,

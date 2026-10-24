@@ -6,7 +6,7 @@ import test from 'node:test';
 import type { MawFeatureContext } from '../../../lib/feature.ts';
 import { resolveServerPaths } from '../../../lib/paths.ts';
 import { loadAgentRegistry } from '../../../lib/registry.ts';
-import { feature as policyFeature } from '../index.ts';
+import { approvePolicyApproval, feature as policyFeature } from '../index.ts';
 import {
   handleInboxResolved,
   loadInbox,
@@ -103,6 +103,7 @@ test('inbox bridge: pushes mapped attention items, respects deduplication, and h
     const mockInboxFile = path.win32.join(tmp, 'mock-inbox-store.ts');
     const mockInboxCode = `
 export const pushedCalls = [];
+export const updateStatusCalls = [];
 let resolvedListener = null;
 
 export function addInboxItem(paths, input, options) {
@@ -116,6 +117,11 @@ export function addInboxItem(paths, input, options) {
     updated_at: new Date().toISOString(),
   };
   return { item, created: true };
+}
+
+export function updateInboxItemStatus(paths, id, status, resolution) {
+  updateStatusCalls.push({ paths, id, status, resolution });
+  return { id, status, resolution };
 }
 
 export function onInboxResolved(listener) {
@@ -420,6 +426,285 @@ test('inbox bridge: integration with real S3 store.ts (if present)', async () =>
       const dismissed = JSON.parse(fs.readFileSync(dismissedFile, 'utf8'));
       assert.ok(dismissed.includes(attentionId), 'Attention item should be marked dismissed in S4');
     }
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression N1: recovery item pushes retry body when rebuildable, but [open, dismiss] when un-rebuildable; listener does not re-spawn', async () => {
+  const { tmp, paths, ctx, startedJobs, cleanup } = createTempEnv();
+  try {
+    resetInboxBridgeForTest();
+
+    const mockInboxFile = path.win32.join(tmp, 'mock-inbox-n1.ts');
+    const mockInboxCode = `
+export const pushedCalls = [];
+let resolvedListener = null;
+
+export function addInboxItem(paths, input, options) {
+  pushedCalls.push({ paths, input, options });
+  const item = {
+    id: 'i_' + Math.random().toString(36).slice(2, 8),
+    ...input,
+    status: 'open',
+    resolution: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  return { item, created: true };
+}
+
+export function onInboxResolved(listener) {
+  resolvedListener = listener;
+  return () => { resolvedListener = null; };
+}
+
+export async function triggerResolve(item) {
+  if (resolvedListener) return await resolvedListener(item);
+  return false;
+}
+`;
+    fs.writeFileSync(mockInboxFile, mockInboxCode, 'utf8');
+    setInboxModulePathForTest(mockInboxFile);
+
+    const fallbackDir = paths.featureDataDir('fallback');
+    fs.mkdirSync(fallbackDir, { recursive: true });
+
+    // Item 1: rebuildable (meta and prompt exist)
+    const rec1 = {
+      id: 'rec_rebuildable',
+      root_job_id: 'job_reb',
+      source_job_id: 'job_reb',
+      kind: 'fallback',
+      agent: 'claude',
+      role: 'backend',
+      fallback_agent: 'codex',
+      attempt: 1,
+      status: 'suggested',
+      next_at: null,
+      reason: 'Agent failed',
+      created_at: new Date().toISOString(),
+      new_job_id: null,
+      error: null,
+    };
+
+    // Item 2: NOT rebuildable (no meta/prompt file)
+    const rec2 = {
+      id: 'rec_unrebuildable',
+      root_job_id: 'job_no_prompt',
+      source_job_id: 'job_no_prompt',
+      kind: 'fallback',
+      agent: 'claude',
+      role: 'backend',
+      fallback_agent: 'codex',
+      attempt: 1,
+      status: 'suggested',
+      next_at: null,
+      reason: 'Agent failed',
+      created_at: new Date().toISOString(),
+      new_job_id: null,
+      error: null,
+    };
+
+    fs.writeFileSync(
+      path.win32.join(fallbackDir, 'recovery.json'),
+      JSON.stringify({ processed_jobs: [], items: [rec1, rec2] }),
+      'utf8'
+    );
+
+    // Write source job files for rec1 ONLY
+    fs.writeFileSync(
+      path.win32.join(paths.jobsDir, 'job_reb.json'),
+      JSON.stringify({ job_id: 'job_reb', command: 'run.ps1', agent: 'claude', role: 'backend' }),
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.win32.join(paths.jobsDir, 'job_reb.prompt.txt'),
+      'Do something',
+      'utf8'
+    );
+
+    await syncAttentionToInbox(ctx, true);
+
+    const mockMod = await import(`file:///${mockInboxFile.replace(/\\/g, '/')}`);
+    const call1 = mockMod.pushedCalls.find((c: any) => c.input.ref?.recovery_id === 'rec_rebuildable');
+    assert.ok(call1);
+    assert.deepEqual(call1.input.actions, ['retry', 'dismiss']);
+    assert.ok(call1.input.retry, 'Must have retry body');
+    assert.equal(call1.input.retry.agent, 'codex'); // replaced with fallback agent
+
+    const call2 = mockMod.pushedCalls.find((c: any) => c.input.ref?.recovery_id === 'rec_unrebuildable');
+    assert.ok(call2);
+    assert.deepEqual(call2.input.actions, ['open', 'dismiss']);
+    assert.equal(call2.input.retry, undefined, 'Must not have retry body when un-rebuildable');
+
+    // Test listener: S3 itself spawned job_from_s3_123, calls listener with resolution.action='retry'
+    const jobsBefore = startedJobs.length;
+    const resItem = {
+      id: 'inbox_item_1',
+      kind: 'rate_limited',
+      source: 's4',
+      ref: call1.input.ref,
+      status: 'open',
+      resolution: {
+        action: 'retry',
+        by: 'ui',
+        at: new Date().toISOString(),
+        job_id: 'job_from_s3_123',
+      },
+    };
+    const handled = await mockMod.triggerResolve(resItem);
+    assert.equal(handled, true);
+    assert.equal(startedJobs.length, jobsBefore, 'Listener must NOT spawn another job');
+
+    const updatedRecovery = JSON.parse(
+      fs.readFileSync(path.win32.join(fallbackDir, 'recovery.json'), 'utf8')
+    );
+    const updated1 = updatedRecovery.items.find((i: any) => i.id === 'rec_rebuildable');
+    assert.equal(updated1.status, 'started');
+    assert.equal(updated1.new_job_id, 'job_from_s3_123');
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression N2: approval fails closed and reverts to pending if startJob throws', async () => {
+  const { paths, tmp, cleanup } = createTempEnv();
+  try {
+    const policyDir = paths.featureDataDir('policy');
+    fs.mkdirSync(policyDir, { recursive: true });
+
+    const approval = {
+      id: 'apr_failing_spawn',
+      job_id: 'job_fail_src',
+      role: 'backend',
+      agent: 'claude',
+      project: paths.repoRoot,
+      command: 'dangerous_cmd',
+      prompt_sha256: 'sha999',
+      created_at: new Date().toISOString(),
+      status: 'pending',
+    };
+    fs.writeFileSync(
+      path.win32.join(policyDir, 'approvals.json'),
+      JSON.stringify([approval]),
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.win32.join(paths.jobsDir, 'job_fail_src.json'),
+      JSON.stringify({ job_id: 'job_fail_src', command: 'run.ps1', agent: 'claude', role: 'backend' }),
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.win32.join(paths.jobsDir, 'job_fail_src.prompt.txt'),
+      'Rerun prompt',
+      'utf8'
+    );
+
+    const failingCtx: MawFeatureContext = {
+      paths,
+      registry: loadAgentRegistry(paths),
+      readJobs: async () => [
+        { job_id: 'job_fail_src', command: 'run.ps1', agent: 'claude', role: 'backend' },
+      ],
+      startJob: async () => {
+        throw new Error('EACCES: permission denied when starting process');
+      },
+    };
+
+    const res = await approvePolicyApproval(failingCtx, 'apr_failing_spawn');
+    assert.equal(res.ok, false);
+    assert.ok(res.error?.includes('permission denied'));
+
+    // Approval MUST be reverted to 'pending', never left 'approved'
+    const approvalsAfter = JSON.parse(
+      fs.readFileSync(path.win32.join(policyDir, 'approvals.json'), 'utf8')
+    );
+    assert.equal(approvalsAfter[0].status, 'pending');
+
+    // A failed recovery item must be recorded in recovery.json and mapped to recovery_failed attention item
+    const fallbackDir = paths.featureDataDir('fallback');
+    const recoveryFile = path.win32.join(fallbackDir, 'recovery.json');
+    assert.ok(fs.existsSync(recoveryFile));
+    const recoveryData = JSON.parse(fs.readFileSync(recoveryFile, 'utf8'));
+    const failedItem = recoveryData.items.find((it: any) => it.status === 'failed');
+    assert.ok(failedItem, 'Must record failed recovery item');
+    assert.ok(failedItem.error?.includes('permission denied'));
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression N3: inbox reconciliation marks done in S3 and removes from inbox-pushed.json', async () => {
+  const { paths, tmp, ctx, cleanup } = createTempEnv();
+  try {
+    resetInboxBridgeForTest();
+
+    const mockInboxFile = path.win32.join(tmp, 'mock-inbox-n3.ts');
+    const mockInboxCode = `
+export const pushedCalls = [];
+export const updateStatusCalls = [];
+
+export function addInboxItem(paths, input, options) {
+  pushedCalls.push({ paths, input, options });
+  const item = {
+    id: 's3_item_' + Math.random().toString(36).slice(2, 8),
+    ...input,
+    status: 'open',
+    resolution: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  return { item, created: true };
+}
+
+export function updateInboxItemStatus(paths, id, status, resolution) {
+  updateStatusCalls.push({ paths, id, status, resolution });
+  return { id, status, resolution };
+}
+
+export function onInboxResolved() { return () => {}; }
+`;
+    fs.writeFileSync(mockInboxFile, mockInboxCode, 'utf8');
+    setInboxModulePathForTest(mockInboxFile);
+
+    // 1. Create a budget block attention item
+    const budgetDir = paths.featureDataDir('budget');
+    fs.mkdirSync(budgetDir, { recursive: true });
+    const blockEntry = {
+      ts: new Date().toISOString(),
+      kind: 'day_block',
+      scope: 'day',
+      agent: 'claude',
+      reason: 'Budget cap exceeded',
+    };
+    const blocksFile = path.win32.join(budgetDir, 'blocks.jsonl');
+    fs.writeFileSync(blocksFile, JSON.stringify(blockEntry) + '\n', 'utf8');
+
+    // 2. Initial sync pushes the item to S3
+    await syncAttentionToInbox(ctx, true);
+
+    const mockMod = await import(`file:///${mockInboxFile.replace(/\\/g, '/')}`);
+    assert.equal(mockMod.pushedCalls.length, 1);
+    const s3Id = mockMod.pushedCalls[0].input.dedupe_key;
+
+    const policyDir = paths.featureDataDir('policy');
+    const pushedFile = path.win32.join(policyDir, 'inbox-pushed.json');
+    let pushedData = JSON.parse(fs.readFileSync(pushedFile, 'utf8'));
+    assert.ok(pushedData[s3Id], 'pushed map must contain attention item');
+
+    // 3. Now remove the attention item (e.g. user dismissed or block expired)
+    fs.writeFileSync(blocksFile, '', 'utf8');
+
+    // 4. Next sync reconciles: calls updateInboxItemStatus with 'done' and cleans pushed map
+    await syncAttentionToInbox(ctx, true);
+
+    assert.equal(mockMod.updateStatusCalls.length, 1);
+    assert.equal(mockMod.updateStatusCalls[0].status, 'done');
+    assert.equal(mockMod.updateStatusCalls[0].resolution.action, 'done');
+
+    pushedData = JSON.parse(fs.readFileSync(pushedFile, 'utf8'));
+    assert.equal(pushedData[s3Id], undefined, 'item must be removed from inbox-pushed.json');
   } finally {
     cleanup();
   }

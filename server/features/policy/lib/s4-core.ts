@@ -1624,18 +1624,21 @@ export function readHumanVerdicts(mawHome: string): HumanVerdict[] {
   try {
     const content = fs.readFileSync(filePath, 'utf8');
     const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-    const results: HumanVerdict[] = [];
+    const map = new Map<string, HumanVerdict>();
     for (const l of lines) {
       try {
         const v = JSON.parse(l) as HumanVerdict;
         if (v && v.job_id && v.verdict) {
-          results.push(v);
+          const existing = map.get(v.job_id);
+          if (!existing || !existing.ts || (v.ts && v.ts >= existing.ts)) {
+            map.set(v.job_id, v);
+          }
         }
       } catch {
         // Skip malformed line
       }
     }
-    return results;
+    return Array.from(map.values());
   } catch {
     return [];
   }

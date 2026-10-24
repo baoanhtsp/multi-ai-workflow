@@ -8,6 +8,7 @@ import {
   readHumanVerdicts,
   readJsonSafe,
   writeJsonAtomic,
+  type HumanVerdict,
   type S4AuditEntry,
 } from '../../policy/lib/s4-core.ts';
 
@@ -150,6 +151,10 @@ export function computeScoreboard(
   const ledgerJobIds = new Set(jobs.map((j) => j.job_id).filter(Boolean));
   const { rows: auditRows } = readAuditRows(paths.auditFile, 0);
   const humanVerdicts = readHumanVerdicts(paths.mawHome);
+  const humanVerdictsMap = new Map<string, HumanVerdict>();
+  for (const hv of humanVerdicts) {
+    humanVerdictsMap.set(hv.job_id, hv);
+  }
 
   // Group raw stats by `${agent}:${role}`
   const statsMap = new Map<string, RawStat>();
@@ -199,6 +204,18 @@ export function computeScoreboard(
       }
     }
 
+    // N4: Apply latest S5 human verdict per job_id on top of ledger row (wins over log-parsed review)
+    const hv = humanVerdictsMap.get(job.job_id);
+    let effectiveReview = job.review;
+    if (hv) {
+      const sc = typeof hv.score === 'number' ? hv.score : Number.parseFloat(String(hv.score ?? ''));
+      effectiveReview = {
+        verdict: hv.verdict,
+        score: Number.isFinite(sc) ? sc : (job.review?.score ?? undefined),
+        rounds: job.review?.rounds ?? 1,
+      };
+    }
+
     const mode = (job.mode || 'task').toLowerCase();
 
     // Mode attribution:
@@ -223,10 +240,10 @@ export function computeScoreboard(
         }
 
         // Reviews
-        if (job.review && typeof job.review.score === 'number') {
+        if (effectiveReview && typeof effectiveReview.score === 'number') {
           s.reviewed++;
-          s.scores.push(job.review.score);
-          if ((job.review.verdict || '').toUpperCase() === 'APPROVED') {
+          s.scores.push(effectiveReview.score);
+          if ((effectiveReview.verdict || '').toUpperCase() === 'APPROVED') {
             s.approved++;
           }
         }
@@ -249,15 +266,15 @@ export function computeScoreboard(
           s.failures++;
         }
 
-        if (job.review && typeof job.review.score === 'number') {
+        if (effectiveReview && typeof effectiveReview.score === 'number') {
           s.reviewed++;
-          s.scores.push(job.review.score);
-          if ((job.review.verdict || '').toUpperCase() === 'APPROVED') {
+          s.scores.push(effectiveReview.score);
+          if ((effectiveReview.verdict || '').toUpperCase() === 'APPROVED') {
             s.approved++;
           }
         }
-        if (job.review && typeof job.review.rounds === 'number' && job.review.rounds > 1) {
-          s.fixRounds.push(job.review.rounds - 1);
+        if (effectiveReview && typeof effectiveReview.rounds === 'number' && effectiveReview.rounds > 1) {
+          s.fixRounds.push(effectiveReview.rounds - 1);
         }
       }
     }

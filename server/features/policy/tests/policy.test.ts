@@ -498,3 +498,63 @@ test('HTTP status codes regression (Item 1): real HTTP server returns 400 on inv
   }
 });
 
+test('regression Item 5: policy_preview redacts project .env secrets and custom secret_patterns', async () => {
+  const { tmp, ctx, cleanup } = createTempPolicyEnv();
+  try {
+    const projectDir = path.win32.join(tmp, 'my_proj');
+    fs.mkdirSync(projectDir, { recursive: true });
+
+    // 1. Create project .env file with a secret
+    fs.writeFileSync(
+      path.win32.join(projectDir, '.env'),
+      'DATABASE_PASSWORD=SuperSecretPassw0rd!\nSTRIPE_KEY=sk_live_9999988888\n',
+      'utf8'
+    );
+
+    // 2. Configure secret_patterns in policy config
+    const policyDir = ctx.paths.featureDataDir('policy');
+    fs.mkdirSync(policyDir, { recursive: true });
+    const policyConfig = createDefaultPolicyConfig();
+    policyConfig.global.secret_patterns = ['CUSTOM_API_TOKEN_[A-Za-z0-9]+'];
+    writeJsonAtomic(path.win32.join(policyDir, 'policies.json'), policyConfig);
+
+    // 3. Call policy_preview action handler
+    const previewRoute = policyFeature.routes?.policy_preview;
+    assert.ok(previewRoute);
+
+    const inputPrompt =
+      'Connect with SuperSecretPassw0rd! and custom token CUSTOM_API_TOKEN_xyz123 to proceed';
+    const mockReq = {
+      ...ctx,
+      body: {
+        role: 'backend',
+        project_path: projectDir,
+        text: inputPrompt,
+      },
+    } as any;
+    const res = (await previewRoute.handler(mockReq, mockReq)) as any;
+
+    assert.ok(res);
+    assert.equal(res.ok, true);
+    assert.ok(res.redacted, 'redacted text must be returned');
+
+    // Verify .env secret was redacted
+    assert.ok(
+      !res.redacted.includes('SuperSecretPassw0rd!'),
+      'SuperSecretPassw0rd! must be redacted'
+    );
+    assert.ok(
+      res.redacted.includes('[REDACTED:ENV]') || res.redacted.includes('[REDACTED'),
+      'must include redacted tag'
+    );
+
+    // Verify custom secret pattern was redacted
+    assert.ok(
+      !res.redacted.includes('CUSTOM_API_TOKEN_xyz123'),
+      'CUSTOM_API_TOKEN_xyz123 must be redacted'
+    );
+  } finally {
+    cleanup();
+  }
+});
+

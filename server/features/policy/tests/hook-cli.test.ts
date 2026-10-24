@@ -289,6 +289,33 @@ test('regression Item 8: hook-cli before-review fails closed on invalid checks.j
     assert.equal(resFatal.parsed.block, true, 'must fail-closed on error for before-review');
     assert.ok(resFatal.parsed.reason.includes('Test gate error:'));
     assert.ok(resFatal.parsed.reason.includes('[S4:gate]'));
+
+    // 3. Empty workdir blocks Test gate: no workdir [S4:gate]
+    const resEmptyWorkdir = await runHookCli(
+      'before-review',
+      JSON.stringify({}),
+      { MAW_HOME: paths.mawHome, USERPROFILE: paths.userProfile, MAW_JOB_PROJECT: '' }
+    );
+    assert.equal(resEmptyWorkdir.exitCode, 0);
+    assert.equal(resEmptyWorkdir.parsed.block, true);
+    assert.equal(resEmptyWorkdir.parsed.reason, 'Test gate: no workdir [S4:gate]');
+
+    // 4. Existing but unreadable .maw/checks.json (e.g. directory instead of file)
+    const unreadableDir = path.win32.join(tmp, 'unreadable_proj');
+    const unreadableMaw = path.win32.join(unreadableDir, '.maw');
+    fs.mkdirSync(unreadableMaw, { recursive: true });
+    // Creating checks.json as a directory makes fs.readFileSync throw EISDIR / EPERM
+    fs.mkdirSync(path.win32.join(unreadableMaw, 'checks.json'));
+
+    const resUnreadable = await runHookCli(
+      'before-review',
+      JSON.stringify({ project: unreadableDir }),
+      { MAW_HOME: paths.mawHome, USERPROFILE: paths.userProfile }
+    );
+    assert.equal(resUnreadable.exitCode, 0);
+    assert.equal(resUnreadable.parsed.block, true);
+    assert.ok(resUnreadable.parsed.reason.includes('Test gate: unreadable .maw/checks.json:'));
+    assert.ok(resUnreadable.parsed.reason.includes('[S4:gate]'));
   } finally {
     cleanup();
   }

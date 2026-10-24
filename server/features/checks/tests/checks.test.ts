@@ -356,7 +356,8 @@ test('gate staleness: required check has state stale and gate not green, non-req
         output_tail: 'PASS',
         at: new Date().toISOString(),
         head: gitInfo.head,
-        dirty_signature: 'clean',
+        command_sha: computeCheckCommandSha(config.checks[0]),
+        dirty_signature: computeDirtySignature(dir, gitInfo.porcelainLines),
       },
       {
         id: 'optional_test',
@@ -367,7 +368,8 @@ test('gate staleness: required check has state stale and gate not green, non-req
         output_tail: 'PASS',
         at: new Date().toISOString(),
         head: gitInfo.head,
-        dirty_signature: 'clean',
+        command_sha: computeCheckCommandSha(config.checks[1]),
+        dirty_signature: computeDirtySignature(dir, gitInfo.porcelainLines),
       },
     ];
 
@@ -516,12 +518,22 @@ test('regression Item 6: command_sha marks check stale when command or cwd chang
     const item2 = gate2.items.find((it) => it.id === 'test_cmd');
     assert.ok(item2);
     assert.equal(item2.state, 'stale', 'check must be stale when command changes');
+
+    // 3. Stored result without command_sha: gate marks stale (no legacy pass)
+    const resultWithoutSha = {
+      ...previousResult,
+      command_sha: undefined,
+    };
+    const gate3 = await computeGate(paths, dir, config1, [resultWithoutSha as any], true, true);
+    const item3 = gate3.items.find((it) => it.id === 'test_cmd');
+    assert.ok(item3);
+    assert.equal(item3.state, 'stale', 'check without command_sha must be marked stale with no legacy pass');
   } finally {
     cleanup();
   }
 });
 
-test('regression Item 7: computeDirtySignature changes when tracked file is edited a second time', () => {
+test('regression Item 7: computeDirtySignature changes on tracked edit, hashes untracked content, and fails closed with unique nonce', () => {
   const { dir, cleanup } = createTempProject();
   try {
     const testFile = path.win32.join(dir, 'tracked.txt');
@@ -529,7 +541,7 @@ test('regression Item 7: computeDirtySignature changes when tracked file is edit
     child_process.execFileSync('git', ['add', 'tracked.txt'], { cwd: dir, windowsHide: true });
     child_process.execFileSync('git', ['commit', '-m', 'add tracked'], { cwd: dir, windowsHide: true });
 
-    // First edit
+    // 1. First edit on tracked file
     fs.writeFileSync(testFile, 'first edit\n', 'utf8');
     const info1 = getGitInfo(dir);
     const sig1 = computeDirtySignature(dir, info1.porcelainLines);
@@ -541,6 +553,40 @@ test('regression Item 7: computeDirtySignature changes when tracked file is edit
 
     assert.deepEqual(info1.porcelainLines, info2.porcelainLines, 'porcelain lines are identical between edits');
     assert.notEqual(sig1, sig2, 'dirty signature must change when content changes even if porcelain line is identical');
+
+    // Commit changes to make tracked clean
+    child_process.execFileSync('git', ['commit', '-am', 'commit edits'], { cwd: dir, windowsHide: true });
+
+    // 2. Untracked file <= 2MB: content change must change signature even if file size is identical
+    const untrackedFile = path.win32.join(dir, 'untracked.txt');
+    fs.writeFileSync(untrackedFile, 'ABCDEF', 'utf8'); // 6 bytes
+    const uInfo1 = getGitInfo(dir);
+    const uSig1 = computeDirtySignature(dir, uInfo1.porcelainLines);
+
+    fs.writeFileSync(untrackedFile, 'ZYXWVU', 'utf8'); // 6 bytes, identical size!
+    const uInfo2 = getGitInfo(dir);
+    const uSig2 = computeDirtySignature(dir, uInfo2.porcelainLines);
+
+    assert.notEqual(uSig1, uSig2, 'untracked file content change must change dirty signature via sha1 hash');
+
+    // 3. Fail-closed with unique nonce when git calls fail
+    const nonGitDir = path.win32.join(
+      path.dirname(dir),
+      `maw_non_git_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+    );
+    fs.mkdirSync(nonGitDir, { recursive: true });
+    try {
+      const nonce1 = computeDirtySignature(nonGitDir, [' M some_file.txt']);
+      const nonce2 = computeDirtySignature(nonGitDir, [' M some_file.txt']);
+
+      assert.ok(nonce1.startsWith('nonce_'), `must return nonce when git fails, got ${nonce1}`);
+      assert.ok(nonce2.startsWith('nonce_'), `must return nonce when git fails, got ${nonce2}`);
+      assert.notEqual(nonce1, nonce2, 'consecutive failures must produce unique nonces');
+    } finally {
+      try {
+        fs.rmSync(nonGitDir, { recursive: true, force: true });
+      } catch {}
+    }
   } finally {
     cleanup();
   }

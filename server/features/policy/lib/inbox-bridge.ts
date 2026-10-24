@@ -3,7 +3,11 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createFeatureContext, type MawFeatureContext } from '../../../lib/feature.ts';
 import type { ServerPaths } from '../../../lib/paths.ts';
-import { applyRecoveryItem, type RecoveryData } from '../../fallback/index.ts';
+import {
+  withRecoveryLock,
+  type RecoveryData,
+  type RecoveryItem,
+} from '../../fallback/index.ts';
 import {
   approvePolicyApproval,
   collectAttentionItems,
@@ -11,7 +15,14 @@ import {
   rejectPolicyApproval,
   type PolicyApproval,
 } from '../index.ts';
-import { readJsonSafe, writeJsonAtomic, type AttentionItem } from './s4-core.ts';
+import {
+  appendJsonl,
+  readJsonSafe,
+  rebuildRunBody,
+  replaceAgent,
+  writeJsonAtomic,
+  type AttentionItem,
+} from './s4-core.ts';
 
 export const VALID_INBOX_KINDS = new Set([
   'needs_login',
@@ -84,9 +95,20 @@ export interface InboxModule {
     input: InboxItemInput,
     options?: { onlyIfAbsent?: boolean }
   ) => { item: InboxItem; created: boolean } | Promise<{ item: InboxItem; created: boolean }>;
+  updateInboxItemStatus?: (
+    paths: ServerPaths,
+    id: string,
+    status: string,
+    resolution?: { action: string; by: string; at: string; text?: string; job_id?: string }
+  ) => InboxItem | null;
   onInboxResolved?: (
     listener: (item: InboxItem) => Promise<boolean | void> | boolean | void
   ) => (() => void) | void;
+}
+
+export interface PushedEntry {
+  s3_id: string;
+  pushed_at: string;
 }
 
 let customInboxModulePath: string | null = null;
@@ -185,8 +207,9 @@ export async function handleInboxResolved(item: InboxItem): Promise<boolean> {
       }
 
       if (targetApr) {
-        await approvePolicyApproval(ctx, targetApr.id, true);
-        return true;
+        // N2: Shared approval logic; if startJob throws, reverts to pending and returns false
+        const res = await approvePolicyApproval(ctx, targetApr.id, true);
+        return res.ok;
       }
       return false;
     }
@@ -211,31 +234,51 @@ export async function handleInboxResolved(item: InboxItem): Promise<boolean> {
     }
 
     if (action === 'retry') {
+      // N1: S3 itself calls ctx.startJob(item.retry), then fires listener with resolution.job_id.
+      // Do NOT start anything; inside withRecoveryLock mark the recovery item 'started'
       const fallbackDir = ctx.paths.featureDataDir('fallback');
       const recFile = path.win32.join(fallbackDir, 'recovery.json');
-      const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+      const newJobId = item.resolution?.job_id || null;
 
-      let targetRec = recoveryId ? recData.items.find((r) => r.id === recoveryId) : undefined;
-      if (!targetRec && item.job_id) {
-        targetRec = recData.items.find(
-          (r) =>
-            r.source_job_id === item.job_id &&
-            (r.status === 'waiting' || r.status === 'suggested' || r.status === 'failed' || r.status === 'gave_up')
-        );
-      }
-      if (!targetRec) {
-        targetRec = recData.items.find(
-          (r) =>
-            (r.id === item.id || r.source_job_id === item.id) &&
-            (r.status === 'waiting' || r.status === 'suggested' || r.status === 'failed' || r.status === 'gave_up')
-        );
-      }
+      await withRecoveryLock(async () => {
+        const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+        let targetRec = recoveryId ? recData.items.find((r) => r.id === recoveryId) : undefined;
+        if (!targetRec && item.job_id) {
+          targetRec = recData.items.find((r) => r.source_job_id === item.job_id);
+        }
+        if (!targetRec) {
+          targetRec = recData.items.find((r) => r.id === item.id || r.source_job_id === item.id);
+        }
 
-      if (targetRec) {
-        await applyRecoveryItem(ctx, targetRec.id);
-        return true;
-      }
-      return false;
+        if (targetRec) {
+          if (targetRec.status === 'waiting' || targetRec.status === 'suggested') {
+            targetRec.status = 'started';
+            targetRec.new_job_id = newJobId;
+            writeJsonAtomic(recFile, recData);
+            appendJsonl(path.win32.join(fallbackDir, 'audit.jsonl'), {
+              ts: new Date().toISOString(),
+              action: 'recovery_apply',
+              details: {
+                id: targetRec.id,
+                new_job_id: newJobId,
+                from: 'inbox_retry',
+              },
+            });
+          } else {
+            // no-op if no longer waiting/suggested; log info audit
+            appendJsonl(path.win32.join(fallbackDir, 'audit.jsonl'), {
+              ts: new Date().toISOString(),
+              action: 'inbox_retry_ignored',
+              details: {
+                id: targetRec.id,
+                status: targetRec.status,
+                job_id: targetRec.source_job_id,
+              },
+            });
+          }
+        }
+      });
+      return true;
     }
 
     if (action === 'dismiss') {
@@ -268,14 +311,49 @@ export async function syncAttentionToInbox(ctx: MawFeatureContext, force = false
   }
 
   const pushedFile = path.win32.join(ctx.paths.featureDataDir('policy'), 'inbox-pushed.json');
-  const pushedData = readJsonSafe<string[]>(pushedFile, []).data;
-  const pushedSet = new Set(pushedData);
+  const rawPushed = readJsonSafe<any>(pushedFile, {}).data;
+  const pushedMap: Record<string, PushedEntry> = {};
+
+  if (Array.isArray(rawPushed)) {
+    for (const id of rawPushed) {
+      if (typeof id === 'string') {
+        pushedMap[id] = { s3_id: id, pushed_at: new Date().toISOString() };
+      }
+    }
+  } else if (rawPushed && typeof rawPushed === 'object') {
+    for (const [k, v] of Object.entries(rawPushed)) {
+      if (v && typeof v === 'object' && 's3_id' in v) {
+        pushedMap[k] = v as PushedEntry;
+      } else {
+        pushedMap[k] = { s3_id: String(v || k), pushed_at: new Date().toISOString() };
+      }
+    }
+  }
 
   const attentionItems = collectAttentionItems(ctx);
+  const currentAttIdSet = new Set(attentionItems.map((it) => it.id));
   let changed = false;
 
+  // N3: Reconcile the inbox: close S3 items whose S4 attention item is gone
+  for (const [attId, entry] of Object.entries(pushedMap)) {
+    if (!currentAttIdSet.has(attId)) {
+      if (typeof inbox.updateInboxItemStatus === 'function') {
+        try {
+          inbox.updateInboxItemStatus(ctx.paths, entry.s3_id, 'done', {
+            action: 'done',
+            by: 's4',
+            at: new Date().toISOString(),
+          });
+        } catch {}
+      }
+      delete pushedMap[attId];
+      changed = true;
+    }
+  }
+
+  // Push open attention items to S3
   for (const item of attentionItems) {
-    if (pushedSet.has(item.id)) continue;
+    if (pushedMap[item.id]) continue;
 
     let kind = 'custom';
     let actions: string[] = ['dismiss'];
@@ -320,6 +398,54 @@ export async function syncAttentionToInbox(ctx: MawFeatureContext, force = false
     const aprAction = item.actions?.find((a) => a.action === 'policy_approve');
     const aprId = (aprAction?.body as any)?.id;
 
+    // N1: Rebuild run body for recovery/fallback items so S3 can run it on retry
+    let retryBody: Record<string, unknown> | null = null;
+    if (recId) {
+      const fallbackDir = ctx.paths.featureDataDir('fallback');
+      const recFile = path.win32.join(fallbackDir, 'recovery.json');
+      const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
+      const recItem = recData.items.find((r) => r.id === recId);
+      if (recItem) {
+        const sourceMetaFile = path.win32.join(ctx.paths.jobsDir, `${recItem.source_job_id}.json`);
+        const promptFile = path.win32.join(ctx.paths.jobsDir, `${recItem.source_job_id}.prompt.txt`);
+        let meta: Record<string, unknown> = {};
+        if (fs.existsSync(sourceMetaFile)) {
+          try {
+            meta = JSON.parse(fs.readFileSync(sourceMetaFile, 'utf8'));
+          } catch {}
+        }
+        if (Object.keys(meta).length > 0) {
+          try {
+            let body = rebuildRunBody(meta, promptFile);
+            const targetAgent = recItem.fallback_agent || recItem.agent;
+            const validAgentIds = new Set(ctx.registry.agents.map((a) => a.id.toLowerCase()));
+            if (
+              targetAgent &&
+              targetAgent !== recItem.agent &&
+              recItem.agent !== 'unknown' &&
+              validAgentIds.has(recItem.agent) &&
+              validAgentIds.has(targetAgent)
+            ) {
+              body = replaceAgent(body, recItem.agent, targetAgent);
+            }
+            retryBody = body;
+          } catch {
+            retryBody = null;
+          }
+        }
+      }
+    }
+
+    // Only offer 'retry' when a run body can be rebuilt; otherwise offer [open, dismiss]
+    if (actions.includes('retry')) {
+      if (!retryBody) {
+        actions = actions.filter((a) => a !== 'retry');
+        if (!actions.includes('open')) {
+          actions.unshift('open');
+        }
+      }
+    }
+
     const input: InboxItemInput = {
       kind,
       title: item.title,
@@ -337,13 +463,14 @@ export async function syncAttentionToInbox(ctx: MawFeatureContext, force = false
         actions: item.actions,
       },
       actions,
+      retry: retryBody ?? undefined,
       dedupe_key: item.id,
     };
 
     try {
-      await inbox.addInboxItem(ctx.paths, input, { onlyIfAbsent: true });
-      pushedSet.add(item.id);
-      pushedData.push(item.id);
+      const res = await inbox.addInboxItem(ctx.paths, input, { onlyIfAbsent: true });
+      const s3Id = (res as any)?.item?.id || item.id;
+      pushedMap[item.id] = { s3_id: s3Id, pushed_at: new Date().toISOString() };
       changed = true;
     } catch {
       // Ignore individual add errors
@@ -351,7 +478,11 @@ export async function syncAttentionToInbox(ctx: MawFeatureContext, force = false
   }
 
   if (changed) {
-    const bounded = pushedData.slice(-2000);
-    writeJsonAtomic(pushedFile, bounded);
+    const entries = Object.entries(pushedMap);
+    const boundedMap: Record<string, PushedEntry> = {};
+    for (const [k, v] of entries.slice(-2000)) {
+      boundedMap[k] = v;
+    }
+    writeJsonAtomic(pushedFile, boundedMap);
   }
 }

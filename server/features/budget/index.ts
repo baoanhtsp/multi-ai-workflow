@@ -131,7 +131,17 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
   const budgetDir = ctx.paths.featureDataDir('budget');
   const ledgerFile = path.win32.join(budgetDir, 'ledger.jsonl');
 
+  // Read S5 human verdicts if present ($MAW_HOME/data/review/verdicts.jsonl)
+  const humanVerdictsList = readHumanVerdicts(ctx.paths.mawHome);
+  const humanVerdictsMap = new Map<string, HumanVerdict>();
+  for (const hv of humanVerdictsList) {
+    humanVerdictsMap.set(hv.job_id, hv); // latest entry per job_id wins
+  }
+
+  const existingRows: LedgerRow[] = [];
   const seenJobIds = new Set<string>();
+  let ledgerUpdated = false;
+
   if (fs.existsSync(ledgerFile)) {
     try {
       const existingLines = fs
@@ -140,12 +150,42 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
         .filter((l) => l.trim().length > 0);
       for (const line of existingLines) {
         try {
-          const obj = JSON.parse(line) as { job_id?: string };
-          if (obj.job_id) seenJobIds.add(obj.job_id);
+          const row = JSON.parse(line) as LedgerRow;
+          if (row.job_id) {
+            seenJobIds.add(row.job_id);
+            // Apply late S5 human review verdict if present (N4)
+            const hv = humanVerdictsMap.get(row.job_id);
+            if (hv) {
+              const sc = typeof hv.score === 'number' ? hv.score : Number.parseFloat(String(hv.score ?? ''));
+              const newScore = Number.isFinite(sc) ? sc : (row.review?.score ?? null);
+              if (row.review?.verdict !== hv.verdict || row.review?.score !== newScore) {
+                row.review = {
+                  verdict: hv.verdict,
+                  score: newScore,
+                  rounds: row.review?.rounds ?? 1,
+                };
+                ledgerUpdated = true;
+              }
+            }
+          }
+          existingRows.push(row);
         } catch {
           // Ignore
         }
       }
+    } catch {
+      // Ignore
+    }
+  }
+
+  // Rewrite ledger if existing rows were updated with late human review verdicts
+  if (ledgerUpdated) {
+    try {
+      fs.writeFileSync(
+        ledgerFile,
+        existingRows.map((r) => JSON.stringify(r)).join('\n') + '\n',
+        'utf8'
+      );
     } catch {
       // Ignore
     }
@@ -176,13 +216,6 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
   }
 
   const jobsDir = ctx.paths.jobsDir;
-
-  // Read S5 human verdicts if present ($MAW_HOME/data/review/verdicts.jsonl)
-  const humanVerdictsList = readHumanVerdicts(ctx.paths.mawHome);
-  const humanVerdictsMap = new Map<string, HumanVerdict>();
-  for (const hv of humanVerdictsList) {
-    humanVerdictsMap.set(hv.job_id, hv); // latest entry per job_id wins
-  }
 
   for (const meta of jobs) {
     const jobId = String(meta.job_id ?? '').trim();
@@ -223,35 +256,33 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
       }
     }
 
-    // Review parsing (meta.review -> S5 human verdict -> log parsing)
+    // Review parsing (S5 human verdict wins over meta.review and log parsing - N4)
     let reviewVerdict: string | null = null;
     let reviewScore: number | null = null;
     let reviewRounds: number | null = null;
 
-    if (meta.review && typeof meta.review === 'object' && !Array.isArray(meta.review)) {
+    const hv = humanVerdictsMap.get(jobId);
+    if (hv) {
+      reviewVerdict = hv.verdict;
+      const sc = typeof hv.score === 'number' ? hv.score : Number.parseFloat(String(hv.score ?? ''));
+      if (Number.isFinite(sc)) reviewScore = sc;
+      reviewRounds = 1;
+    } else if (meta.review && typeof meta.review === 'object' && !Array.isArray(meta.review)) {
       const r = meta.review as Record<string, unknown>;
       if (r.verdict) reviewVerdict = String(r.verdict);
       if (Number.isFinite(Number(r.score))) reviewScore = Number(r.score);
       if (Number.isFinite(Number(r.rounds))) reviewRounds = Number(r.rounds);
     } else {
-      const hv = humanVerdictsMap.get(jobId);
-      if (hv) {
-        reviewVerdict = hv.verdict;
-        const sc = typeof hv.score === 'number' ? hv.score : Number.parseFloat(String(hv.score ?? ''));
-        if (Number.isFinite(sc)) reviewScore = sc;
-        reviewRounds = 1;
-      } else {
-        const logFile = path.win32.join(jobsDir, `${jobId}.log`);
-        if (fs.existsSync(logFile)) {
-          try {
-            const logText = fs.readFileSync(logFile, 'utf8');
-            const parsedRev = parseReviewFromLog(logText);
-            reviewVerdict = parsedRev.verdict;
-            reviewScore = parsedRev.score;
-            reviewRounds = parsedRev.rounds;
-          } catch {
-            // Ignore
-          }
+      const logFile = path.win32.join(jobsDir, `${jobId}.log`);
+      if (fs.existsSync(logFile)) {
+        try {
+          const logText = fs.readFileSync(logFile, 'utf8');
+          const parsedRev = parseReviewFromLog(logText);
+          reviewVerdict = parsedRev.verdict;
+          reviewScore = parsedRev.score;
+          reviewRounds = parsedRev.rounds;
+        } catch {
+          // Ignore
         }
       }
     }

@@ -437,3 +437,79 @@ test('scoreboard: incorporates S5 human review verdicts for un-ledgered jobs wit
     cleanup();
   }
 });
+
+test('regression N4 & N5: late S5 human verdict overrides ledger row review, and repeated lines count once using latest by ts', () => {
+  const { paths, cleanup } = createTempScoreboardEnv();
+  try {
+    const registry = loadAgentRegistry(paths);
+    const budgetDir = paths.featureDataDir('budget');
+    fs.mkdirSync(budgetDir, { recursive: true });
+
+    // 1. Existing ledger row with an automatic review verdict (e.g. CHANGES_REQUESTED, score: 5.0)
+    const ledgerRow = {
+      job_id: 'job_ledgered_rev',
+      team_run_id: 'tr_1',
+      mode: 'task',
+      agent: 'claude',
+      role: 'backend',
+      status: 'DONE',
+      started_at: new Date(Date.now() - 3600000).toISOString(),
+      duration_s: 60,
+      calls: 1,
+      in_tokens: 100,
+      out_tokens: 100,
+      cost_usd: 0.05,
+      review: {
+        verdict: 'CHANGES_REQUESTED',
+        score: 5.0,
+        rounds: 2,
+      },
+    };
+    fs.writeFileSync(path.join(budgetDir, 'ledger.jsonl'), JSON.stringify(ledgerRow) + '\n', 'utf8');
+
+    // 2. Late S5 verdicts file contains multiple lines for the same job_id (N5 deduplication)
+    // Line 1: earlier timestamp with score 7.0
+    // Line 2: latest timestamp with APPROVED, score 9.5 (N4 human override)
+    const reviewDir = path.join(paths.mawHome, 'data', 'review');
+    fs.mkdirSync(reviewDir, { recursive: true });
+
+    const verdict1 = {
+      ts: '2026-10-25T10:00:00.000Z',
+      job_id: 'job_ledgered_rev',
+      agent: 'claude',
+      role: 'backend',
+      verdict: 'CHANGES_REQUESTED',
+      score: 7.0,
+      note: 'Initial review',
+    };
+    const verdict2 = {
+      ts: '2026-10-25T10:15:00.000Z', // later ts wins
+      job_id: 'job_ledgered_rev',
+      agent: 'claude',
+      role: 'backend',
+      verdict: 'APPROVED',
+      score: 9.5,
+      note: 'Approved after fixes',
+    };
+
+    fs.writeFileSync(
+      path.join(reviewDir, 'verdicts.jsonl'),
+      JSON.stringify(verdict1) + '\n' + JSON.stringify(verdict2) + '\n',
+      'utf8'
+    );
+
+    const result = computeScoreboard(paths, registry, { days: 7 });
+    const stat = result.rows.find((s) => s.agent === 'claude' && s.role === 'backend');
+
+    assert.ok(stat, 'claude:backend stat should exist');
+    // Must count exactly 1 job (not 2 or 3 times)
+    assert.equal(stat.tasks, 1);
+    assert.equal(stat.reviewed, 1, 'must count exactly once despite repeated verdict lines');
+    // Human verdict score 9.5 must override ledger score 5.0 and verdict1 score 7.0
+    assert.equal(stat.avg_score, 9.5);
+    assert.equal(stat.approval_rate, 1);
+    assert.equal(result.totals.jobs, 1);
+  } finally {
+    cleanup();
+  }
+});

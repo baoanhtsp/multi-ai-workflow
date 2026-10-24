@@ -9,6 +9,7 @@ import {
   appendJsonl,
   createAttentionId,
   createDefaultPolicyConfig,
+  extractProjectEnvSecrets,
   isPathInsideProject,
   loadPolicyConfig,
   matchCommand,
@@ -438,7 +439,7 @@ export async function approvePolicyApproval(
   ctx: MawFeatureContext,
   id: string,
   rerun = true
-): Promise<{ ok: boolean; item: PolicyApproval; job_id?: string }> {
+): Promise<{ ok: boolean; item?: PolicyApproval; job_id?: string; error?: string }> {
   const approvalsFile = path.win32.join(ctx.paths.featureDataDir('policy'), 'approvals.json');
   const approvals = readJsonSafe<PolicyApproval[]>(approvalsFile, []).data;
   const apr = approvals.find((a) => a.id === id);
@@ -453,19 +454,66 @@ export async function approvePolicyApproval(
     );
   }
 
+  // Tentatively mark approved
   apr.status = 'approved';
   apr.approved_at = new Date().toISOString();
   writeJsonAtomic(approvalsFile, approvals);
 
   let newJobId: string | undefined;
   if (rerun) {
-    const jobs = await ctx.readJobs();
-    const sourceJob = jobs.find((j) => String(j.job_id) === apr.job_id);
-    if (sourceJob) {
+    try {
+      const jobs = await ctx.readJobs();
+      const sourceJob = jobs.find((j) => String(j.job_id) === apr.job_id);
+      if (!sourceJob) {
+        throw new Error(`Source job '${apr.job_id}' not found for rerun.`);
+      }
       const promptFile = path.win32.join(ctx.paths.jobsDir, `${apr.job_id}.prompt.txt`);
       const runBody = rebuildRunBody(sourceJob, promptFile);
       const started = await ctx.startJob(runBody);
       newJobId = String(started.job_id || '');
+    } catch (err: any) {
+      // Revert the approval to pending - never leave approval approved without rerun (N2)
+      apr.status = 'pending';
+      delete apr.approved_at;
+      writeJsonAtomic(approvalsFile, approvals);
+
+      const errMsg = err instanceof Error ? err.message : String(err);
+
+      // Record a recovery_failed item in recovery.json with the error
+      await withRecoveryLock(async () => {
+        const fallbackDir = ctx.paths.featureDataDir('fallback');
+        const recFile = path.win32.join(fallbackDir, 'recovery.json');
+        const recData = readJsonSafe<RecoveryData>(recFile, {
+          processed_jobs: [],
+          items: [],
+        }).data;
+
+        const recoveryItem: RecoveryItem = {
+          id: `rec_${crypto.randomBytes(6).toString('hex')}`,
+          created_at: new Date().toISOString(),
+          kind: 'approval',
+          status: 'failed',
+          source_job_id: apr.job_id,
+          root_job_id: apr.job_id,
+          new_job_id: null,
+          agent: apr.agent,
+          role: apr.role,
+          fallback_agent: null,
+          attempt: 1,
+          next_at: null,
+          reason: `Approval rerun failed: ${errMsg}`,
+          error: errMsg,
+        };
+
+        recData.items.push(recoveryItem);
+        if (recData.items.length > 500) {
+          recData.items = recData.items.slice(-500);
+        }
+        writeJsonAtomic(recFile, recData);
+      });
+
+      appendPolicyAudit(ctx, 'policy_approve_failed', { id, error: errMsg });
+      return { ok: false, error: errMsg };
     }
   }
 
@@ -618,6 +666,11 @@ export const feature: MawFeature = {
         const body = (req.body || {}) as Record<string, unknown>;
         const role = String(body.role || 'backend').trim().toLowerCase();
         const text = typeof body.text === 'string' ? body.text : undefined;
+        const rawProj = (body.project_path || body.project || '').toString().trim();
+        let projectPath = '';
+        if (rawProj) {
+          projectPath = resolveProjectPath(rawProj, ctx.paths.projectsRoot) || rawProj;
+        }
 
         const { config } = loadPolicyConfig(ctx.paths.featureDataDir('policy'));
         const brief = generatePolicyBrief(role, config);
@@ -626,7 +679,15 @@ export const feature: MawFeature = {
         const matches: { deny: string[]; approve: string[] } = { deny: [], approve: [] };
 
         if (text !== undefined) {
-          redacted = redactSecrets(text);
+          const envSecrets =
+            config.global.redact_env_files !== false && projectPath
+              ? extractProjectEnvSecrets(projectPath)
+              : [];
+          redacted = redactSecrets(
+            text,
+            envSecrets,
+            config.global.secret_patterns || []
+          );
           const globalCfg = config.global;
           const roleCfg = config.roles[role] || {};
           const allowCmds = Array.from(
@@ -785,7 +846,11 @@ export const feature: MawFeature = {
           throw new ApiValidationError('id is required.', 400);
         }
         const rerun = body.rerun !== undefined ? Boolean(body.rerun) : true;
-        return await approvePolicyApproval(ctx, id, rerun);
+        const res = await approvePolicyApproval(ctx, id, rerun);
+        if (!res.ok) {
+          throw new ApiValidationError(`Failed to run approved job: ${res.error}`, 500);
+        }
+        return res;
       },
     },
 

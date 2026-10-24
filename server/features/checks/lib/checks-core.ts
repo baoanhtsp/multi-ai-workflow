@@ -464,13 +464,16 @@ export function detectChecks(projectPath: string): ChecksConfig {
 
 export function getProjectChecksSha256(projectPath: string): { sha256: string; content: string } | null {
   const configFile = path.win32.join(projectPath, '.maw', 'checks.json');
-  if (!fs.existsSync(configFile)) return null;
   try {
     const content = fs.readFileSync(configFile, 'utf8');
     const sha256 = crypto.createHash('sha256').update(content, 'utf8').digest('hex');
     return { sha256, content };
-  } catch {
-    return null;
+  } catch (err: any) {
+    if (err && (err.code === 'ENOENT' || err.code === 'ENOTDIR')) {
+      return null;
+    }
+    // Re-throw so callers can distinguish ENOENT from other read errors
+    throw err;
   }
 }
 
@@ -908,9 +911,12 @@ export function computeDirtySignature(
   hasher.update(porcelainLines.join('\n'));
 
   if (projectPath) {
+    let diffSucceeded = false;
+    let diffOutput: Buffer | string | null = null;
+
+    // 1. Diff of tracked changes
     try {
-      // 1. Diff of tracked changes
-      const diffOutput = child_process.execFileSync(
+      diffOutput = child_process.execFileSync(
         'git',
         ['diff', 'HEAD', '--no-ext-diff', '--binary'],
         {
@@ -920,10 +926,10 @@ export function computeDirtySignature(
           stdio: ['ignore', 'pipe', 'ignore'],
         }
       );
-      hasher.update(diffOutput);
+      diffSucceeded = true;
     } catch {
       try {
-        const diffOutput = child_process.execFileSync(
+        diffOutput = child_process.execFileSync(
           'git',
           ['diff', '--no-ext-diff', '--binary'],
           {
@@ -933,11 +939,21 @@ export function computeDirtySignature(
             stdio: ['ignore', 'pipe', 'ignore'],
           }
         );
-        hasher.update(diffOutput);
-      } catch {}
+        diffSucceeded = true;
+      } catch {
+        diffSucceeded = false;
+      }
     }
 
-    // 2. Untracked files metadata: path:size:mtimeMs
+    if (!diffSucceeded || diffOutput === null) {
+      // Git call failed: fail closed with a unique nonce
+      return `nonce_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+    }
+
+    hasher.update(diffOutput);
+
+    // 2. Untracked files: hash content for files <= 2 MB; size+mtime for larger
+    let untrackedFiles: string[] = [];
     try {
       const untrackedRaw = child_process
         .execFileSync('git', ['ls-files', '--others', '--exclude-standard'], {
@@ -947,18 +963,34 @@ export function computeDirtySignature(
           stdio: ['ignore', 'pipe', 'ignore'],
         })
         .toString('utf8');
-      const untrackedFiles = untrackedRaw
+      untrackedFiles = untrackedRaw
         .split(/\r?\n/)
         .map((f) => f.trim())
         .filter(Boolean);
-      for (const u of untrackedFiles) {
-        const absU = path.resolve(projectPath, u);
-        try {
-          const stat = fs.statSync(absU);
+    } catch {
+      // Git call failed: fail closed with a unique nonce
+      return `nonce_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+    }
+
+    for (const u of untrackedFiles) {
+      const absU = path.resolve(projectPath, u);
+      try {
+        const stat = fs.statSync(absU);
+        if (stat.isFile()) {
+          if (stat.size <= 2 * 1024 * 1024) {
+            const content = fs.readFileSync(absU);
+            const contentHash = crypto.createHash('sha1').update(content).digest('hex');
+            hasher.update(`\n${u}:content:${contentHash}`);
+          } else {
+            hasher.update(`\n${u}:${stat.size}:${stat.mtimeMs}`);
+          }
+        } else {
           hasher.update(`\n${u}:${stat.size}:${stat.mtimeMs}`);
-        } catch {}
+        }
+      } catch {
+        hasher.update(`\n${u}:missing`);
       }
-    } catch {}
+    }
   }
 
   return hasher.digest('hex').slice(0, 16);
@@ -1118,11 +1150,13 @@ export async function computeGate(
     }
 
     // Staleness check (Item 6 & Item 7)
+    // A stored check result WITHOUT command_sha must be treated as stale (no legacy pass).
     const currentCommandSha = c.command_sha || computeCheckCommandSha(c);
     const isStale =
+      !r.command_sha ||
+      r.command_sha !== currentCommandSha ||
       (gitInfo.isGit &&
-        (r.head !== gitInfo.head || (r.dirty_signature && r.dirty_signature !== currentDirtySig))) ||
-      (r.command_sha !== undefined && r.command_sha !== currentCommandSha);
+        (r.head !== gitInfo.head || r.dirty_signature !== currentDirtySig));
 
     if (isStale) {
       items.push({

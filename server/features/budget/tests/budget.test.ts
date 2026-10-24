@@ -395,3 +395,78 @@ test('syncLedger: uses S5 human review verdict from data/review/verdicts.jsonl w
     cleanup();
   }
 });
+
+test('regression N4: syncLedger updates existing ledger row when late S5 human review verdict arrives, and dedupes multiple lines by latest ts', async () => {
+  const { paths, ctx, cleanup } = createTempEnv();
+  try {
+    const budgetDir = paths.featureDataDir('budget');
+    fs.mkdirSync(budgetDir, { recursive: true });
+    const ledgerFile = path.win32.join(budgetDir, 'ledger.jsonl');
+
+    // 1. Existing row in ledger.jsonl with old review verdict
+    const oldRow = {
+      job_id: 'job_late_s5_override',
+      team_run_id: 'tr_old',
+      mode: 'task',
+      agent: 'claude',
+      role: 'backend',
+      status: 'DONE',
+      started_at: '2026-10-25T11:00:00.000Z',
+      duration_s: 30,
+      calls: 1,
+      in_tokens: 50,
+      out_tokens: 50,
+      cost_usd: 0.02,
+      review: {
+        verdict: 'CHANGES_REQUESTED',
+        score: 5.0,
+        rounds: 3,
+      },
+    };
+    fs.writeFileSync(ledgerFile, JSON.stringify(oldRow) + '\n', 'utf8');
+
+    // 2. Late S5 verdicts arrive in data/review/verdicts.jsonl
+    // Line 1: earlier timestamp
+    // Line 2: latest timestamp with APPROVED, score 9.8
+    const reviewDir = path.win32.join(paths.mawHome, 'data', 'review');
+    fs.mkdirSync(reviewDir, { recursive: true });
+    const v1 = {
+      ts: '2026-10-25T11:10:00.000Z',
+      job_id: 'job_late_s5_override',
+      agent: 'claude',
+      role: 'backend',
+      verdict: 'CHANGES_REQUESTED',
+      score: 6.0,
+      note: 'Need fixes',
+    };
+    const v2 = {
+      ts: '2026-10-25T11:20:00.000Z',
+      job_id: 'job_late_s5_override',
+      agent: 'claude',
+      role: 'backend',
+      verdict: 'APPROVED',
+      score: 9.8,
+      note: 'Final human approval',
+    };
+    fs.writeFileSync(
+      path.win32.join(reviewDir, 'verdicts.jsonl'),
+      JSON.stringify(v1) + '\n' + JSON.stringify(v2) + '\n',
+      'utf8'
+    );
+
+    // 3. syncLedger runs
+    await syncLedger(ctx);
+
+    // Verify existing row was rewritten with latest human verdict
+    const lines = fs.readFileSync(ledgerFile, 'utf8').trim().split('\n');
+    assert.equal(lines.length, 1);
+    const updated = JSON.parse(lines[0]!);
+    assert.equal(updated.job_id, 'job_late_s5_override');
+    assert.equal(updated.review?.verdict, 'APPROVED');
+    assert.equal(updated.review?.score, 9.8);
+    // Rounds should be preserved from existing row if present
+    assert.equal(updated.review?.rounds, 3);
+  } finally {
+    cleanup();
+  }
+});
