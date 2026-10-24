@@ -145,7 +145,24 @@ async function setupWorktreeEnv(): Promise<WorktreeTestEnv> {
 
       return { ok: true, job_id: jobId, pid: 9999, status: 'RUNNING' };
     },
-  };
+    callAction: async (action: string, _opts?: { query?: Record<string, string>; body?: Record<string, unknown> }) => {
+      if (action === 'checks_run') {
+        return { ok: true, running: true };
+      }
+      if (action === 'checks_status') {
+        return {
+          ok: true,
+          pending: false,
+          gate: { green: true },
+          results: [{ id: 'unit', label: 'unit', status: 'pass', exit_code: 0, duration_s: 1, tail: 'ok' }],
+        };
+      }
+      if (action === 'checks_gate') {
+        return { ok: true, green: true, items: [] };
+      }
+      throw new Error(`Unknown action ${action}`);
+    },
+  } as any;
 
   return { tempBase, projectsRoot, repoDir, mawHome, jobsDir, paths, recordedJobs, ctx };
 }
@@ -1352,6 +1369,87 @@ test('S1 Worktrees Y4: job_fork with base:"result" fails with 409 when source wo
     assert.ok(caughtErr, 'job_fork with base: result should throw 409 when source worktree missing');
     assert.equal(caughtErr.statusCode, 409);
     assert.equal(caughtErr.message, "The source job's worktree is gone; fork from the project instead.");
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees S4-1: Best-of-N judge tests refused with 400 when S4 callAction is absent', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    const ctxWithoutCallAction = { ...env.ctx };
+    delete (ctxWithoutCallAction as any).callAction;
+
+    let caughtErr: any = null;
+    try {
+      await handleBestOfStart(ctxWithoutCallAction, {
+        project_path: env.repoDir,
+        prompt: 'Check absent S4',
+        role: 'backend',
+        candidates: [{ agent: 'antigravity' }, { agent: 'claude' }],
+        judge: 'tests',
+      });
+    } catch (err: any) {
+      caughtErr = err;
+    }
+
+    assert.ok(caughtErr, 'Should throw 400 when S4 callAction is absent');
+    assert.equal(caughtErr.statusCode, 400);
+    assert.equal(caughtErr.message, 'Test gate (S4 checks) is not available');
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees S4-2: Merge gate blocks with blocked: "checks" when checks_gate is red', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    const wtRes = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      base: 'master',
+      name: 's4-gate-wt',
+      origin: 'manual',
+    });
+    const wtPath = wtRes.worktree.worktree_path;
+    fs.writeFileSync(path.win32.join(wtPath, 'feat.txt'), 'feature code\n', 'utf8');
+
+    // Custom ctx where checks_gate returns red
+    let receivedOverrideToken: string | undefined = undefined;
+    const s4Ctx = {
+      ...env.ctx,
+      callAction: async (action: string, opts?: { query?: Record<string, string>; body?: Record<string, unknown> }) => {
+        if (action === 'checks_gate') {
+          receivedOverrideToken = opts?.query?.override_token;
+          if (receivedOverrideToken === 'tok_valid_123') {
+            return { ok: true, green: true, overridden: true, items: [] };
+          }
+          return { ok: true, green: false, items: [{ label: 'lint', status: 'fail' }] };
+        }
+        throw new Error(`Unexpected action ${action}`);
+      },
+    };
+
+    // Attempt merge without override - should be blocked by checks
+    const blockedRes = await handleWorktreeMerge(s4Ctx as any, {
+      id: 's4-gate-wt',
+      strategy: 'merge',
+      confirm: true,
+    });
+    assert.equal(blockedRes.ok, true);
+    assert.equal(blockedRes.merged, false);
+    assert.equal(blockedRes.blocked, 'checks');
+    assert.deepEqual(blockedRes.checks, { ok: true, green: false, items: [{ label: 'lint', status: 'fail' }] });
+
+    // Attempt merge with override token - should succeed
+    const passRes = await handleWorktreeMerge(s4Ctx as any, {
+      id: 's4-gate-wt',
+      strategy: 'merge',
+      confirm: true,
+      checks_override_token: 'tok_valid_123',
+    });
+    assert.equal(passRes.ok, true);
+    assert.equal(passRes.merged, true);
+    assert.equal(receivedOverrideToken, 'tok_valid_123');
   } finally {
     cleanupWorktreeEnv(env);
   }

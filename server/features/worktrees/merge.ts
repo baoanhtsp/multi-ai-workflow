@@ -6,6 +6,7 @@ import { getTempDir, isFileSafe } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { createCheckpoint, gitRun, snapshotTree } from '../checkpoints/snapshot.ts';
+import { loadCleanupConfig } from './cleanup.ts';
 import {
   loadWorktreesStore,
   saveWorktreesStore,
@@ -242,6 +243,40 @@ export async function handleWorktreeMerge(
       }
     }
 
+    // 3b. S4 test gate (when the checks feature is loaded and ctx.callAction exists, R11)
+    let checksResult: Record<string, unknown> | null = null;
+    const hasCallAction = typeof (ctx as { callAction?: unknown }).callAction === 'function';
+    if (hasCallAction) {
+      try {
+        const callAction = (ctx as unknown as {
+          callAction: (
+            action: string,
+            opts?: { query?: Record<string, string>; body?: Record<string, unknown> }
+          ) => Promise<Record<string, unknown>>;
+        }).callAction;
+        const gateQuery: Record<string, string> = {
+          project_path: wtPath,
+          scope: 'merge',
+        };
+        const overrideToken = String(body.checks_override_token ?? '').trim();
+        if (overrideToken) {
+          gateQuery.override_token = overrideToken;
+        }
+        const gateRes = await callAction('checks_gate', { query: gateQuery });
+        checksResult = gateRes;
+        if (gateRes && gateRes.green === false) {
+          return {
+            ok: true,
+            merged: false,
+            blocked: 'checks',
+            checks: gateRes,
+          };
+        }
+      } catch {
+        // Without S4 / if checks_gate fails to resolve, gate is skipped and checks carries null
+      }
+    }
+
     // Main checkout verification: must be on base branch and clean
     const currentBranchRes = await gitRun(['symbolic-ref', '--short', '-q', 'HEAD'], {
       cwd: repoPath,
@@ -378,7 +413,9 @@ export async function handleWorktreeMerge(
     };
     record.updated_at = new Date().toISOString();
 
-    const removeWorktree = body.remove !== false;
+    const cleanupCfg = loadCleanupConfig(ctx);
+    const keepDays = cleanupCfg.keep_after_merge_days;
+    const removeWorktree = body.remove !== undefined ? body.remove === true : keepDays === 0;
     let removed = false;
     let removeError: string | undefined = undefined;
 
@@ -399,6 +436,10 @@ export async function handleWorktreeMerge(
         removed = false;
         removeError = rmRes.stderr.trim().slice(0, 400);
       }
+    } else {
+      if (keepDays > 0) {
+        record.remove_after = new Date(Date.now() + keepDays * 86400 * 1000).toISOString();
+      }
     }
 
     await saveWorktreesStore(dataDir, store);
@@ -408,6 +449,7 @@ export async function handleWorktreeMerge(
       merged: true,
       commit: mergeCommit,
       spec_guard: specGuardResult,
+      checks: checksResult,
       removed,
     };
     if (removeError) {

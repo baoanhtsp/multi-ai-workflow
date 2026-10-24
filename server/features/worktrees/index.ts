@@ -19,6 +19,16 @@ import {
   loadBestOfRun,
 } from './bestof.ts';
 import {
+  ensureCleanupSweepStarted,
+  handleCleanupApply,
+  handleCleanupPreview,
+  handleCleanupRestore,
+  handleCleanupTrash,
+  loadCleanupConfig,
+  saveCleanupConfig,
+  scanCleanup,
+} from './cleanup.ts';
+import {
   handleGitBranchCreate,
   handleGitBranchSwitch,
   handleGitDiff,
@@ -186,10 +196,42 @@ export const feature: MawFeature = {
       }
     }
 
+    // Read cleanup status from cleanup-latest.json (no git in status)
+    ensureCleanupSweepStarted(ctx);
+    let cleanupStatus = {
+      scanned_at: null as string | null,
+      count: 0,
+      size_bytes: 0,
+      by_project: {} as Record<string, number>,
+    };
+    const cleanupLatestFile = path.win32.join(dataDir, 'cleanup-latest.json');
+    if (isFileSafe(cleanupLatestFile)) {
+      try {
+        const rawCleanup = JSON.parse(fs.readFileSync(cleanupLatestFile, 'utf8')) as {
+          scanned_at?: string;
+          count?: number;
+          size_bytes?: number;
+          by_project?: Record<string, number>;
+        };
+        cleanupStatus = {
+          scanned_at: rawCleanup.scanned_at || null,
+          count: typeof rawCleanup.count === 'number' ? rawCleanup.count : 0,
+          size_bytes: typeof rawCleanup.size_bytes === 'number' ? rawCleanup.size_bytes : 0,
+          by_project:
+            rawCleanup.by_project && typeof rawCleanup.by_project === 'object'
+              ? rawCleanup.by_project
+              : {},
+        };
+      } catch {
+        // Ignore corrupt latest file
+      }
+    }
+
     return {
       active,
       jobs,
       bestof_active: bestofActive,
+      cleanup: cleanupStatus,
     };
   },
   routes: {
@@ -723,6 +765,56 @@ export const feature: MawFeature = {
       method: 'POST',
       handler: async (ctx, req) => {
         return await handleGitBranchCreate(ctx, req.body);
+      },
+    },
+
+    cleanup_config: {
+      method: 'GET',
+      handler: async (ctx) => {
+        return { ok: true, config: loadCleanupConfig(ctx) };
+      },
+    },
+
+    cleanup_config_save: {
+      method: 'POST',
+      handler: async (ctx, req) => {
+        return { ok: true, config: saveCleanupConfig(ctx, req.body) };
+      },
+    },
+
+    cleanup_preview: {
+      method: 'GET',
+      handler: async (ctx, req) => {
+        return await handleCleanupPreview(ctx, req.url.searchParams);
+      },
+    },
+
+    cleanup_apply: {
+      method: 'POST',
+      handler: async (ctx, req) => {
+        return await handleCleanupApply(ctx, req.body);
+      },
+    },
+
+    cleanup_trash: {
+      method: 'GET',
+      handler: async (ctx, req) => {
+        return await handleCleanupTrash(ctx, req.url.searchParams);
+      },
+    },
+
+    cleanup_restore: {
+      method: 'POST',
+      handler: async (ctx, req) => {
+        return await handleCleanupRestore(ctx, req.body);
+      },
+    },
+
+    cleanup_scan: {
+      method: 'GET',
+      handler: async (ctx, req) => {
+        const projectPath = req.url.searchParams.get('project_path') ?? undefined;
+        return await scanCleanup(ctx, projectPath);
       },
     },
   },

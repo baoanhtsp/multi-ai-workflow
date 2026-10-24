@@ -14,12 +14,6 @@ import { loadWorktreesStore, withStoreLock } from './store.ts';
 
 export const BESTOF_ID_REGEX = /^bo\d{14}[0-9a-f]{2}$/i;
 
-export interface BestOfCheck {
-  name: string;
-  command: string[] | string;
-  timeout_s?: number;
-}
-
 export interface BestOfCandidate {
   i: number;
   agent: string;
@@ -33,7 +27,7 @@ export interface BestOfCandidate {
   duration_s?: number;
   diff: { files: number; additions: number; deletions: number } | null;
   tests: {
-    status: 'pass' | 'fail' | 'none' | 'running' | 'error';
+    status: 'pass' | 'fail' | 'none' | 'running' | 'error' | 'unavailable';
     results: Array<{ name: string; exit_code: number | null; duration_s: number; tail: string }>;
   } | null;
   council: {
@@ -262,8 +256,9 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
     const needTests = run.judge === 'tests' || run.judge === 'both';
     const needCouncil = run.judge === 'council' || run.judge === 'both';
 
-    // 2a. Tests in background promise (N2, R2-2, R2-3)
+    // 2a. Tests through S4 only (revised 2026-10-25 after S4 review)
     if (needTests) {
+      const hasCallAction = typeof (ctx as { callAction?: unknown }).callAction === 'function';
       for (const c of run.candidates) {
         const runKey = `${run.id}_${c.i}`;
         // R2-2: Treat tests.status: 'running' but NOT in activeCheckRuns (server restarted) as "start again"
@@ -271,30 +266,11 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
           !c.tests || (c.tests.status === 'running' && !activeCheckRuns.has(runKey));
 
         if (shouldRunChecks) {
-          const wtRec = store.worktrees.find((w) => w.id === c.worktree_id);
-          const repo = run.project_path;
-          const checksFile = path.win32.join(repo, '.maw', 'checks.json');
-
-          if (!wtRec || !fs.existsSync(wtRec.worktree_path) || !isFileSafe(checksFile)) {
-            c.tests = { status: 'none', results: [] };
+          if (!hasCallAction) {
+            c.tests = { status: 'unavailable', results: [] };
           } else {
-            let checks: BestOfCheck[] = [];
-            try {
-              const rawChecks = JSON.parse(fs.readFileSync(checksFile, 'utf8')) as unknown;
-              if (Array.isArray(rawChecks)) {
-                checks = rawChecks as BestOfCheck[];
-              } else if (
-                rawChecks &&
-                typeof rawChecks === 'object' &&
-                Array.isArray((rawChecks as Record<string, unknown>).checks)
-              ) {
-                checks = (rawChecks as { checks: BestOfCheck[] }).checks;
-              }
-            } catch {
-              checks = [];
-            }
-
-            if (checks.length === 0) {
+            const wtRec = store.worktrees.find((w) => w.id === c.worktree_id);
+            if (!wtRec || !fs.existsSync(wtRec.worktree_path)) {
               c.tests = { status: 'none', results: [] };
             } else {
               c.tests = { status: 'running', results: [] };
@@ -306,82 +282,53 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
 
                 (async () => {
                   try {
-                    const testResults: Array<{
-                      name: string;
-                      exit_code: number | null;
-                      duration_s: number;
-                      tail: string;
-                    }> = [];
+                    const callAction = (ctx as unknown as {
+                      callAction: (
+                        action: string,
+                        opts?: { query?: Record<string, string>; body?: Record<string, unknown> }
+                      ) => Promise<Record<string, unknown>>;
+                    }).callAction;
 
-                    let allPassed = true;
-                    let hadError = false;
+                    await callAction('checks_run', { body: { project_path: wtPath } });
 
-                    for (const chk of checks) {
-                      const chkName = String(chk.name || 'check');
-                      const timeoutMs = (chk.timeout_s ?? 600) * 1000;
-                      let commandArgs: string[] = [];
-                      let program = '';
+                    let statusRes: Record<string, unknown> | null = null;
+                    const pollIntervalMs = 500;
+                    const timeoutMs = 600_000;
+                    const startTime = Date.now();
 
-                      if (Array.isArray(chk.command)) {
-                        commandArgs = chk.command.map(String);
-                      } else if (typeof chk.command === 'string') {
-                        commandArgs = chk.command.split(/\s+/).filter(Boolean);
-                      }
-
-                      if (commandArgs.length === 0) continue;
-                      program = commandArgs[0]!;
-                      const restArgs = commandArgs.slice(1);
-
-                      const startTime = Date.now();
-                      let exitCode: number | null = 1;
-                      let stdout = '';
-                      let stderr = '';
-
-                      if (/\.(cmd|bat)$/i.test(program) || program.toLowerCase() === 'npm') {
-                        const safeArgRegex = /^[A-Za-z0-9_./:=@+-]+$/;
-                        if (!restArgs.every((a) => safeArgRegex.test(a))) {
-                          hadError = true;
-                          testResults.push({
-                            name: chkName,
-                            exit_code: null,
-                            duration_s: 0,
-                            tail: 'Disallowed argument characters in cmd execution.',
-                          });
-                          continue;
-                        }
-                        const cmdRes = await runCommand(
-                          'cmd.exe',
-                          ['/d', '/s', '/c', program, ...restArgs],
-                          { cwd: wtPath, timeoutMs }
-                        );
-                        exitCode = cmdRes.code;
-                        stdout = cmdRes.stdout;
-                        stderr = cmdRes.stderr;
-                      } else {
-                        const procRes = await runCommand(program, restArgs, {
-                          cwd: wtPath,
-                          timeoutMs,
-                        });
-                        exitCode = procRes.code;
-                        stdout = procRes.stdout;
-                        stderr = procRes.stderr;
-                      }
-
-                      const dur = Math.round((Date.now() - startTime) / 1000);
-                      const tail = `${stdout}\n${stderr}`.trim().slice(-1000);
-                      testResults.push({
-                        name: chkName,
-                        exit_code: exitCode,
-                        duration_s: dur,
-                        tail,
+                    while (Date.now() - startTime < timeoutMs) {
+                      statusRes = await callAction('checks_status', {
+                        query: { project_path: wtPath },
                       });
-
-                      if (exitCode !== 0) {
-                        allPassed = false;
+                      if (!statusRes || !statusRes.pending) {
+                        break;
                       }
+                      await new Promise((r) => setTimeout(r, pollIntervalMs));
                     }
 
-                    const status = hadError ? 'error' : allPassed ? 'pass' : 'fail';
+                    const gate = statusRes?.gate as { green?: boolean } | undefined;
+                    const rawResults = Array.isArray(statusRes?.results)
+                      ? (statusRes.results as Array<Record<string, unknown>>)
+                      : [];
+                    const testResults = rawResults.map((r) => ({
+                      name: String(r.label || r.name || r.id || 'check'),
+                      exit_code: typeof r.exit_code === 'number' ? r.exit_code : null,
+                      duration_s: typeof r.duration_s === 'number' ? r.duration_s : 0,
+                      tail: String(r.tail ?? ''),
+                    }));
+
+                    let status: 'pass' | 'fail' | 'error' = 'fail';
+                    if (statusRes?.error || statusRes?.ok === false) {
+                      status = 'error';
+                    } else if (gate && gate.green === true) {
+                      status = 'pass';
+                    } else if (gate && gate.green === false) {
+                      status = 'fail';
+                    } else if (rawResults.some((r) => r.status === 'error')) {
+                      status = 'error';
+                    } else {
+                      status = 'fail';
+                    }
 
                     await withRunLock(runId, async () => {
                       const freshRun = loadBestOfRun(dataDir, runId);
@@ -399,34 +346,29 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
                       }
                     });
                   } catch (err) {
-                    // R2-3: Catch unhandled rejection and record tests.status: 'error' under withRunLock
-                    try {
-                      const msg = err instanceof Error ? err.message : String(err);
-                      await withRunLock(runId, async () => {
-                        const freshRun = loadBestOfRun(dataDir, runId);
-                        if (freshRun) {
-                          const targetCand = freshRun.candidates.find(
-                            (cand) => cand.i === candidateIndex
-                          );
-                          if (targetCand) {
-                            targetCand.tests = {
-                              status: 'error',
-                              results: [
-                                {
-                                  name: 'runner',
-                                  exit_code: null,
-                                  duration_s: 0,
-                                  tail: msg,
-                                },
-                              ],
-                            };
-                            saveBestOfRun(dataDir, freshRun);
-                          }
+                    const msg = err instanceof Error ? err.message : String(err);
+                    await withRunLock(runId, async () => {
+                      const freshRun = loadBestOfRun(dataDir, runId);
+                      if (freshRun) {
+                        const targetCand = freshRun.candidates.find(
+                          (cand) => cand.i === candidateIndex
+                        );
+                        if (targetCand) {
+                          targetCand.tests = {
+                            status: 'error',
+                            results: [
+                              {
+                                name: 's4_checks',
+                                exit_code: null,
+                                duration_s: 0,
+                                tail: msg,
+                              },
+                            ],
+                          };
+                          saveBestOfRun(dataDir, freshRun);
                         }
-                      });
-                    } catch {
-                      // Swallow internal logger error
-                    }
+                      }
+                    });
                   } finally {
                     activeCheckRuns.delete(runKey);
                   }
@@ -572,9 +514,9 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
       const bFailed = b.job_status !== 'DONE';
       if (aFailed !== bFailed) return aFailed ? 1 : -1;
 
-      // 2. Tests: pass > none > fail/error
+      // 2. Tests: pass > none/unavailable > fail/error
       const testRank = (t: BestOfCandidate['tests']) => {
-        if (!t || t.status === 'none') return 2;
+        if (!t || t.status === 'none' || t.status === 'unavailable') return 2;
         if (t.status === 'pass') return 1;
         return 3;
       };
@@ -639,6 +581,11 @@ export async function handleBestOfStart(
   const judge = String(body.judge ?? 'both').trim().toLowerCase();
   if (!['council', 'tests', 'both'].includes(judge)) {
     throw new ApiValidationError("Invalid judge. Must be 'council', 'tests', or 'both'.", 400);
+  }
+
+  const hasCallAction = typeof (ctx as { callAction?: unknown }).callAction === 'function';
+  if (judge === 'tests' && !hasCallAction) {
+    throw new ApiValidationError('Test gate (S4 checks) is not available', 400);
   }
 
   const rawCandidates = body.candidates;
