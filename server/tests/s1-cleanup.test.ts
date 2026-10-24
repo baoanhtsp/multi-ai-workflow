@@ -434,7 +434,7 @@ test('S1 Cleanup: path outside .maw-wt refused on apply', async () => {
       id: 'wt-outside',
       project_path: env.repoDir,
       worktree_path: outsidePath,
-      branch: 'maw/wt-outside',
+      branch: 'main',
       base: 'main',
       base_commit: '12345678',
       port: 4499,
@@ -784,11 +784,14 @@ test('S1 Cleanup K7 & K8: worktree branch deletion backs up unmerged clean branc
       base: 'main',
     });
 
-    // Mark wt-k7 as kept_worktree in past
+    // Mark wt-k7 as kept_worktree in past (squash merge with branch_tip set)
     const store = await loadWorktreesStore(dataDir);
     const rec = store.worktrees.find((w: WorktreeRecord) => w.id === 'wt-k7')!;
+    const wtHeadRes = await runCommand('git', ['rev-parse', 'HEAD'], { cwd: wtPath });
+    const wtHead = wtHeadRes.stdout.trim();
     rec.status = 'merged';
     rec.remove_after = new Date(Date.now() - 3600 * 1000).toISOString();
+    rec.merged = { strategy: 'squash', commit: wtHead, at: new Date().toISOString(), branch_tip: wtHead };
     await saveWorktreesStore(dataDir, store);
 
     // Apply cleanup for wt-k7
@@ -998,11 +1001,14 @@ test('S1 Cleanup Z3: unmerged branch deletion is blocked when trash backup fails
     await runCommand('git', ['add', '.'], { cwd: wtPath });
     await runCommand('git', ['commit', '-m', 'feat: unmerged commit on wt-z3'], { cwd: wtPath });
 
-    // Mark as kept_worktree in past
+    // Mark as kept_worktree in past (squash merge with branch_tip set)
     const store = await loadWorktreesStore(dataDir);
     const rec = store.worktrees.find((w) => w.id === 'wt-z3-unmerged')!;
+    const wtHeadRes = await runCommand('git', ['rev-parse', 'HEAD'], { cwd: wtPath });
+    const wtHead = wtHeadRes.stdout.trim();
     rec.status = 'merged';
     rec.remove_after = new Date(Date.now() - 3600 * 1000).toISOString();
+    rec.merged = { strategy: 'squash', commit: wtHead, at: new Date().toISOString(), branch_tip: wtHead };
     await saveWorktreesStore(dataDir, store);
 
     // Block update-ref by creating .git/refs/maw/trash as a file
@@ -1082,6 +1088,179 @@ test('S1 Cleanup Z5: selective prune does not prune external worktrees outside .
 
     // Clean up external worktree registration
     await runCommand('git', ['worktree', 'prune'], { cwd: env.repoDir });
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup E1: legacy merged records without branch_tip require ancestor check and are not trusted alone', async () => {
+  const env = await setupCleanupEnv();
+  try {
+    const dataDir = env.paths.featureDataDir('worktrees');
+
+    // 1. Branch: maw/legacy-e1 is NOT an ancestor of main, but record status is merged without branch_tip
+    await runCommand('git', ['checkout', '-b', 'maw/legacy-e1'], { cwd: env.repoDir });
+    fs.writeFileSync(path.win32.join(env.repoDir, 'e1.txt'), 'unmerged commit\n', 'utf8');
+    await runCommand('git', ['add', '.'], { cwd: env.repoDir });
+    await runCommand('git', ['commit', '-m', 'feat: unmerged e1'], { cwd: env.repoDir });
+    await runCommand('git', ['checkout', 'main'], { cwd: env.repoDir });
+
+    const store = await loadWorktreesStore(dataDir);
+    store.worktrees.push({
+      id: 'wt-legacy-e1-br',
+      project_path: env.repoDir,
+      worktree_path: path.win32.join(env.tempBase, 'wt-dummy-e1'),
+      branch: 'maw/legacy-e1',
+      base: 'main',
+      base_commit: '12345678',
+      port: 4492,
+      origin: 'manual',
+      status: 'merged',
+      // Legacy merged record: NO branch_tip
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+    await saveWorktreesStore(dataDir, store);
+
+    const cfg = loadCleanupConfig(env.ctx);
+    const candidates = await getCleanupCandidates(env.ctx, env.repoDir, cfg);
+
+    // E1: Without branch_tip, merged = isAncestor only. Since maw/legacy-e1 is NOT an ancestor, it is not merged_branch
+    const mergedCand = candidates.find((c) => c.name === 'maw/legacy-e1' && c.kind === 'merged_branch');
+    assert.equal(mergedCand, undefined, 'Legacy merged branch without branch_tip must not be trusted as merged_branch');
+
+    // 2. Kept worktree: worktree with unmerged commit, record status merged without branch_tip
+    const wtRes = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'wt-legacy-e1-wt',
+      base: 'main',
+    });
+    const wtPath = wtRes.worktree.worktree_path;
+    fs.writeFileSync(path.win32.join(wtPath, 'unmerged.txt'), 'unmerged work\n', 'utf8');
+    await runCommand('git', ['add', '.'], { cwd: wtPath });
+    await runCommand('git', ['commit', '-m', 'feat: unmerged commit on wt-legacy-e1-wt'], { cwd: wtPath });
+
+    const updatedStore = await loadWorktreesStore(dataDir);
+    const wtRec = updatedStore.worktrees.find((w) => w.id === 'wt-legacy-e1-wt')!;
+    wtRec.status = 'merged';
+    wtRec.remove_after = new Date(Date.now() - 3600 * 1000).toISOString();
+    delete wtRec.merged; // Legacy record: NO branch_tip
+    await saveWorktreesStore(dataDir, updatedStore);
+
+    const candsAfterWt = await getCleanupCandidates(env.ctx, env.repoDir, cfg);
+    const keptCand = candsAfterWt.find((c) => c.name === 'wt-legacy-e1-wt' && c.kind === 'kept_worktree');
+    assert.equal(keptCand, undefined, 'Legacy merged worktree without branch_tip and unmerged commit must not be kept_worktree');
+
+    const staleCand = candsAfterWt.find((c) => c.name === 'wt-legacy-e1-wt');
+    assert.ok(staleCand, 'Must be detected as stale/risky worktree');
+    assert.equal(staleCand!.kind, 'stale_worktree');
+    assert.equal(staleCand!.risky, true);
+    assert.equal(staleCand!.default_selected, false);
+
+    // Sweep must not auto-remove it
+    await runAutomaticSweep(env.ctx);
+    assert.ok(fs.existsSync(wtPath), 'Sweep must not auto-remove legacy worktree without branch_tip');
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup E2: only the selected prunable registration is removed; unselected are untouched', async () => {
+  const env = await setupCleanupEnv();
+  try {
+    const containerDir = path.win32.join(env.projectsRoot, '.maw-wt', 'sample-repo');
+    fs.mkdirSync(containerDir, { recursive: true });
+
+    // 1. First prunable inside container
+    const wt1Path = path.win32.join(containerDir, 'wt-e2-1');
+    await runCommand('git', ['worktree', 'add', '-b', 'maw/e2-1', wt1Path, 'main'], { cwd: env.repoDir });
+    fs.rmSync(wt1Path, { recursive: true, force: true });
+
+    // 2. Second prunable inside container (unselected)
+    const wt2Path = path.win32.join(containerDir, 'wt-e2-2');
+    await runCommand('git', ['worktree', 'add', '-b', 'maw/e2-2', wt2Path, 'main'], { cwd: env.repoDir });
+    fs.rmSync(wt2Path, { recursive: true, force: true });
+
+    // 3. External prunable outside container (unselected)
+    const outsidePath = path.win32.join(env.tempBase, 'external-e2');
+    await runCommand('git', ['worktree', 'add', '-b', 'ext-e2', outsidePath, 'main'], { cwd: env.repoDir });
+    fs.rmSync(outsidePath, { recursive: true, force: true });
+
+    // Apply cleanup for ONLY wt-e2-1
+    const applyRes = await handleCleanupApply(env.ctx, {
+      project_path: env.repoDir,
+      items: ['orphan_worktree:wt-e2-1'],
+      confirm: true,
+      confirm_risky: ['orphan_worktree:wt-e2-1'],
+    });
+
+    assert.equal(applyRes.ok, true);
+    assert.equal(applyRes.deleted.length, 1);
+    assert.equal(applyRes.deleted[0]!.id, 'orphan_worktree:wt-e2-1');
+
+    // Verify git worktree list: only wt-e2-1 is removed; unselected registrations remain
+    const wtListRes = await runCommand('git', ['worktree', 'list', '--porcelain'], { cwd: env.repoDir });
+    assert.ok(!wtListRes.stdout.includes('wt-e2-1'), 'Selected prunable worktree must be removed');
+    assert.ok(wtListRes.stdout.includes('wt-e2-2'), 'Unselected prunable worktree in .maw-wt must NOT be touched');
+    assert.ok(wtListRes.stdout.includes('external-e2'), 'Unselected external worktree must NOT be touched');
+
+    // Clean up remaining worktree registrations
+    await runCommand('git', ['worktree', 'prune'], { cwd: env.repoDir });
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Cleanup E3: failed git status --porcelain counts as dirty and requires confirm_risky', async () => {
+  const env = await setupCleanupEnv();
+  try {
+    const dataDir = env.paths.featureDataDir('worktrees');
+
+    const wtRes = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'wt-e3-corrupt',
+      base: 'main',
+    });
+    const wtPath = wtRes.worktree.worktree_path;
+
+    // Mark as kept_worktree in past with branch_tip matching HEAD
+    const wtHeadRes = await runCommand('git', ['rev-parse', 'HEAD'], { cwd: wtPath });
+    const wtHead = wtHeadRes.stdout.trim();
+    const store = await loadWorktreesStore(dataDir);
+    const rec = store.worktrees.find((w) => w.id === 'wt-e3-corrupt')!;
+    rec.status = 'merged';
+    rec.remove_after = new Date(Date.now() - 3600 * 1000).toISOString();
+    rec.merged = { strategy: 'merge', commit: wtHead, at: new Date().toISOString(), branch_tip: wtHead };
+    await saveWorktreesStore(dataDir, store);
+
+    // Corrupt the worktree's git reference by making .git an invalid directory so git status fails
+    const dotGit = path.win32.join(wtPath, '.git');
+    fs.rmSync(dotGit, { recursive: true, force: true });
+    fs.mkdirSync(dotGit); // Making .git an empty directory causes git status to fail with fatal error
+
+    const cfg = loadCleanupConfig(env.ctx);
+    const candidates = await getCleanupCandidates(env.ctx, env.repoDir, cfg);
+    const corruptCand = candidates.find((c) => c.name === 'wt-e3-corrupt');
+
+    assert.ok(corruptCand, 'Corrupt worktree must be detected');
+    // E3: Failed git status counts as dirty and risky
+    assert.equal(corruptCand!.dirty, true, 'Failed git status must count as dirty');
+    assert.equal(corruptCand!.risky, true, 'Corrupt worktree must be risky');
+    assert.equal(corruptCand!.default_selected, false, 'Corrupt worktree must not be default selected');
+
+    // Sweep must not auto-remove it
+    await runAutomaticSweep(env.ctx);
+    assert.ok(fs.existsSync(wtPath), 'Sweep must never auto-remove corrupt/dirty worktree');
+
+    // Apply without confirm_risky must skip
+    const skipRes = await handleCleanupApply(env.ctx, {
+      project_path: env.repoDir,
+      items: [corruptCand!.id],
+      confirm: true,
+    });
+    assert.equal(skipRes.deleted.length, 0);
+    assert.equal(skipRes.skipped.length, 1);
+    assert.equal(skipRes.skipped[0]!.reason, 'needs confirm_risky');
   } finally {
     cleanupTestEnv(env);
   }

@@ -479,7 +479,7 @@ export async function getCleanupCandidates(
     const rec = projectStoreRecords.find((w) => w.branch === b.name);
     const branchBase = rec?.base || repoBase;
 
-    // Check if merged (Z1)
+    // Check if merged (Z1, E1)
     const tipRes = await gitRun(['rev-parse', b.name], { cwd: repoPath, allowFailure: true });
     const currentTip = tipRes.code === 0 ? tipRes.stdout.trim() : '';
 
@@ -489,15 +489,13 @@ export async function getCleanupCandidates(
     );
     const isAncestor = ancRes.code === 0;
     const recordedTip = rec?.merged?.branch_tip;
+
+    // E1: Without branch_tip, merged = merge-base --is-ancestor <tip> <base> only.
     let isMerged = false;
     if (isAncestor) {
       isMerged = true;
-    } else if (rec && rec.status === 'merged') {
-      if (recordedTip) {
-        isMerged = currentTip === recordedTip;
-      } else {
-        isMerged = true;
-      }
+    } else if (rec && rec.status === 'merged' && recordedTip) {
+      isMerged = currentTip === recordedTip;
     }
 
     if (isMerged) {
@@ -578,23 +576,26 @@ export async function getCleanupCandidates(
         const recordedMergedTip = rec.merged?.branch_tip;
         const branchBase = rec.base || repoBase;
 
+        // E1: Without branch_tip, merged = isAncestor only.
         const ancRes = await gitRun(
-          ['merge-base', '--is-ancestor', currentWtHead, branchBase],
+          ['merge-base', '--is-ancestor', currentWtHead || rec.branch, branchBase],
           { cwd: repoPath, allowFailure: true }
         );
         const isAncestor = ancRes.code === 0;
-        const hasMovedPastTip =
-          Boolean(recordedMergedTip) &&
-          currentWtHead !== '' &&
-          currentWtHead !== recordedMergedTip &&
-          !isAncestor;
-        const isStillMerged = !hasMovedPastTip;
+
+        let isStillMerged = false;
+        if (isAncestor) {
+          isStillMerged = true;
+        } else if (recordedMergedTip && currentWtHead !== '') {
+          isStillMerged = currentWtHead === recordedMergedTip;
+        }
 
         const statusRes = await gitRun(['status', '--porcelain'], {
           cwd: rec.worktree_path,
           allowFailure: true,
         });
-        const dirty = statusRes.code === 0 && statusRes.stdout.trim() !== '';
+        // E3: Failed git status counts as dirty
+        const dirty = statusRes.code !== 0 || statusRes.stdout.trim() !== '';
         const sizeInfo = computeFolderSize(rec.worktree_path);
 
         if (isStillMerged) {
@@ -663,7 +664,8 @@ export async function getCleanupCandidates(
             cwd: rec.worktree_path,
             allowFailure: true,
           });
-          const dirty = statusRes.code === 0 && statusRes.stdout.trim() !== '';
+          // E3: Failed git status counts as dirty
+          const dirty = statusRes.code !== 0 || statusRes.stdout.trim() !== '';
           const sizeInfo = computeFolderSize(rec.worktree_path);
 
           candidates.push({
@@ -780,7 +782,8 @@ export async function getCleanupCandidates(
             cwd: gwt.path,
             allowFailure: true,
           });
-          const dirty = statusRes.code === 0 && statusRes.stdout.trim() !== '';
+          // E3: Failed git status counts as dirty
+          const dirty = statusRes.code !== 0 || statusRes.stdout.trim() !== '';
           const sizeInfo = computeFolderSize(gwt.path);
           candidates.push({
             id: `orphan_worktree:${folderName}`,
@@ -1021,7 +1024,6 @@ export async function applyCleanupCandidates(
 
   const deleted: Array<{ id: string; kind: string; name: string; backup_ref?: string; note?: string }> = [];
   const skipped: Array<{ id: string; reason: string }> = [];
-  const appliedPrunableItems: Array<{ id: string; name: string; path: string }> = [];
   let freedBytes = 0;
 
   const dataDir = ctx.paths.featureDataDir('worktrees');
@@ -1031,6 +1033,30 @@ export async function applyCleanupCandidates(
     if (!cand) {
       skipped.push({ id, reason: 'no longer a candidate' });
       continue;
+    }
+
+    // Core boundary check: any worktree path must be inside .maw-wt
+    if (
+      cand.kind === 'kept_worktree' ||
+      cand.kind === 'orphan_worktree' ||
+      cand.kind === 'stale_worktree'
+    ) {
+      const wtPath = cand.path;
+      if (!wtPath) {
+        skipped.push({ id, reason: 'missing worktree path' });
+        continue;
+      }
+      if (fs.existsSync(wtPath)) {
+        if (!isInsideMawWt(wtPath, repoPath)) {
+          skipped.push({ id, reason: 'path outside .maw-wt or invalid' });
+          continue;
+        }
+      } else {
+        if (!isUnderMawWtContainer(wtPath, repoPath)) {
+          skipped.push({ id, reason: 'path outside .maw-wt or invalid' });
+          continue;
+        }
+      }
     }
 
     if (cand.risky || cand.dirty) {
@@ -1136,19 +1162,19 @@ export async function applyCleanupCandidates(
           continue;
         }
 
-        // K2 / Z5: Prunable worktree whose folder is missing
+        // K2 / E2: Prunable worktree whose folder is missing
         if (!fs.existsSync(wtPath)) {
           if (!isUnderMawWtContainer(wtPath, repoPath)) {
             skipped.push({ id, reason: 'path outside .maw-wt or invalid' });
             continue;
           }
-          appliedPrunableItems.push({ id, name: cand.name, path: wtPath });
+          await removeSpecificWorktreeRegistration(repoPath, wtPath);
           const auditEntry = {
             Timestamp: new Date().toISOString(),
             Tool: 'maw-s1',
             Action: 'cleanup_delete',
             Project: repoPath,
-            Detail: `orphan_worktree ${cand.name} [pruned missing worktree]`,
+            Detail: `orphan_worktree ${cand.name} [pruned missing worktree registration]`,
           };
           appendAuditEntry(ctx.paths.auditFile, auditEntry);
           appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
@@ -1414,52 +1440,6 @@ export async function applyCleanupCandidates(
       }
     } catch (err) {
       skipped.push({ id, reason: err instanceof Error ? err.message : String(err) });
-    }
-  }
-
-  // Z5: Run prune ONLY when a prunable (a) item was applied, and ONLY if every prunable registration
-  // reported by git worktree list --porcelain is inside the .maw-wt container;
-  // otherwise remove just that registration directly and skip global prune.
-  if (appliedPrunableItems.length > 0) {
-    const listRes = await gitRun(['worktree', 'list', '--porcelain'], {
-      cwd: repoPath,
-      allowFailure: true,
-    });
-    const prunableOutsideMawWt: string[] = [];
-
-    if (listRes.code === 0 && listRes.stdout.trim()) {
-      let currentPath = '';
-      let isCurrentPrunable = false;
-
-      for (const line of listRes.stdout.split(/\r?\n/)) {
-        const t = line.trim();
-        if (t.startsWith('worktree ')) {
-          if (currentPath && (isCurrentPrunable || !fs.existsSync(currentPath))) {
-            if (!isUnderMawWtContainer(currentPath, repoPath)) {
-              prunableOutsideMawWt.push(currentPath);
-            }
-          }
-          currentPath = t.slice('worktree '.length).trim();
-          isCurrentPrunable = false;
-        } else if (t.startsWith('prunable')) {
-          isCurrentPrunable = true;
-        }
-      }
-      if (currentPath && (isCurrentPrunable || !fs.existsSync(currentPath))) {
-        if (!isUnderMawWtContainer(currentPath, repoPath)) {
-          prunableOutsideMawWt.push(currentPath);
-        }
-      }
-    }
-
-    if (prunableOutsideMawWt.length === 0) {
-      // Every prunable registration is inside .maw-wt -> safe to run global prune
-      await gitRun(['worktree', 'prune'], { cwd: repoPath, allowFailure: true });
-    } else {
-      // Registrations outside .maw-wt exist -> prune only the specific applied registrations
-      for (const item of appliedPrunableItems) {
-        await removeSpecificWorktreeRegistration(repoPath, item.path);
-      }
     }
   }
 
