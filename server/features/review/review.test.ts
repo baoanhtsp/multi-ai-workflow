@@ -7,12 +7,16 @@ import { resolveServerPaths } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import {
+  buildHunkPatch,
+  computeFileId,
   computeHunkId,
   parseUnifiedDiff,
   unquoteGitPath,
+  type DiffFile,
 } from './diff.ts';
+import { createSafetySnapshot } from './git.ts';
 import { feature as reviewFeature } from './index.ts';
-import { computeReviewKey, loadReviewSession } from './session.ts';
+import { computeReviewKey, loadReviewSession, saveReviewSession } from './session.ts';
 
 test('diff parser handles modify, add, delete, rename, binary, no-newline, CRLF, and quoted paths', () => {
   // 1. Quoted path unescaping
@@ -73,6 +77,10 @@ test('diff parser handles modify, add, delete, rename, binary, no-newline, CRLF,
   assert.equal(h1.new_lines, 4);
   assert.ok(h1.lines.some(([p, t]) => p === '\\' && t.includes('No newline')));
 
+  // File ID stability and 12-char hex
+  assert.equal(typeof f1.id, 'string');
+  assert.equal(f1.id.length, 12);
+
   // Hunk ID stability
   const computedId = computeHunkId(f1.path, h1.header, h1.rawLines);
   assert.equal(h1.id, computedId);
@@ -83,17 +91,23 @@ test('diff parser handles modify, add, delete, rename, binary, no-newline, CRLF,
   assert.equal(f2.path, 'src/new.ts');
   assert.equal(f2.old_path, 'src/old.ts');
   assert.equal(f2.status, 'R');
+  assert.equal(typeof f2.id, 'string');
+  assert.equal(f2.id.length, 12);
 
   // File 3: Deleted
   const f3 = res.files[2]!;
   assert.equal(f3.path, 'deleted.txt');
   assert.equal(f3.status, 'D');
+  assert.equal(typeof f3.id, 'string');
+  assert.equal(f3.id.length, 12);
 
   // File 4: Binary
   const f4 = res.files[3]!;
   assert.equal(f4.path, 'image.png');
   assert.equal(f4.binary, true);
   assert.equal(f4.status, 'B');
+  assert.equal(typeof f4.id, 'string');
+  assert.equal(f4.id.length, 12);
 });
 
 test('diff parser guards: too_large and truncated', () => {
@@ -767,6 +781,23 @@ test('review binary reject: untracked binary removed, tracked binary restored wi
     startJob: async () => ({ ok: true }),
   };
 
+  const diffBefore = (await reviewFeature.routes.review_diff.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_diff'),
+      query: new URLSearchParams({ project_path: projectDir, source: 'worktree' }),
+      body: {},
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+  const untrackedEntry = diffBefore.files.find((f: any) => f.path === 'untracked.bin');
+  const trackedEntry = diffBefore.files.find((f: any) => f.path === 'image.png');
+  assert.ok(untrackedEntry?.id);
+  assert.ok(trackedEntry?.id);
+
   // Reject untracked binary file
   const rejectUntrackedRes = (await reviewFeature.routes.review_hunk.handler(
     fakeCtx as any,
@@ -778,6 +809,8 @@ test('review binary reject: untracked binary removed, tracked binary restored wi
         project_path: projectDir,
         source: 'worktree',
         path: 'untracked.bin',
+        hunk_id: null,
+        file_id: untrackedEntry.id,
         action: 'reject',
         confirm: true,
       },
@@ -806,6 +839,8 @@ test('review binary reject: untracked binary removed, tracked binary restored wi
         project_path: projectDir,
         source: 'worktree',
         path: 'image.png',
+        hunk_id: null,
+        file_id: trackedEntry.id,
         action: 'reject',
         confirm: true,
       },
@@ -1132,7 +1167,24 @@ test('diff parser & whole-file reject: pure rename has no hunks, full=1 lifts 40
     startJob: async () => ({ ok: true }),
   };
 
-  // Reject whole file rename
+  // Fetch diff to get file.id for rename
+  const diffBefore = (await reviewFeature.routes.review_diff.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_diff'),
+      query: new URLSearchParams({ project_path: projectDir, source: 'worktree' }),
+      body: {},
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+  const renameFile = diffBefore.files.find((f: any) => f.path === 'a/bar.txt');
+  assert.ok(renameFile);
+  assert.ok(renameFile.id);
+
+  // Reject whole file rename with file_id
   const rejectRes = (await reviewFeature.routes.review_hunk.handler(
     fakeCtx as any,
     {
@@ -1144,6 +1196,7 @@ test('diff parser & whole-file reject: pure rename has no hunks, full=1 lifts 40
         source: 'worktree',
         path: 'a/bar.txt',
         hunk_id: null,
+        file_id: renameFile.id,
         action: 'reject',
         confirm: true,
       },
@@ -1444,6 +1497,22 @@ test('review binary reject: branch binary uses merge-base and rejects 409 if fil
     startJob: async () => ({ ok: true }),
   };
 
+  const branchDiff = (await reviewFeature.routes.review_diff.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_diff'),
+      query: new URLSearchParams({ project_path: projectDir, source: 'branch', ref: 'feature-bin', base: 'main' }),
+      body: {},
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+  const binFileEntry = branchDiff.files.find((f: any) => f.path === 'image.bin');
+  assert.ok(binFileEntry);
+  assert.ok(binFileEntry.id);
+
   // Modify file in worktree after the diff to trigger 409
   fs.writeFileSync(binFile, Buffer.from([0x00, 0x99, 0x99, 0x99]));
 
@@ -1462,6 +1531,7 @@ test('review binary reject: branch binary uses merge-base and rejects 409 if fil
             base: 'main',
             path: 'image.bin',
             hunk_id: null,
+            file_id: binFileEntry.id,
             action: 'reject',
             confirm: true,
           },
@@ -1491,6 +1561,7 @@ test('review binary reject: branch binary uses merge-base and rejects 409 if fil
         base: 'main',
         path: 'image.bin',
         hunk_id: null,
+        file_id: binFileEntry.id,
         action: 'reject',
         confirm: true,
       },
@@ -1504,6 +1575,442 @@ test('review binary reject: branch binary uses merge-base and rejects 409 if fil
   assert.equal(rejectRes.state, 'rejected');
   const restoredBytes = fs.readFileSync(binFile);
   assert.deepEqual(restoredBytes, Buffer.from([0x00, 0x01, 0x02, 0x03]));
+
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('whole-file reject requires file_id, returns 409 if file diff changed, and leaves file untouched', async () => {
+  const tmpRoot = path.win32.join(os.tmpdir(), `maw_file_id_test_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const projectDir = path.win32.join(projectsRoot, 'file-id-repo');
+  const mawHome = path.win32.join(tmpRoot, '.maw');
+  fs.mkdirSync(projectDir, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    repoRoot: projectDir,
+    mawHome,
+  });
+
+  await runCommand('git', ['-C', projectDir, 'init', '-b', 'main']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.name', 'Tester']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.email', 'tester@example.com']);
+
+  // Initial commit
+  fs.writeFileSync(path.win32.join(projectDir, 'tracked.txt'), 'tracked file\n');
+  await runCommand('git', ['-C', projectDir, 'add', 'tracked.txt']);
+  await runCommand('git', ['-C', projectDir, 'commit', '-m', 'initial']);
+
+  // Add an untracked file
+  const untrackedFile = path.win32.join(projectDir, 'new-untracked.txt');
+  fs.writeFileSync(untrackedFile, 'initial untracked content\n');
+
+  const fakeCtx = {
+    paths,
+    registry: { agents: [] } as any,
+    readJobs: async () => [],
+    startJob: async () => ({ ok: true }),
+  };
+
+  // 1. View diff: verify file.id exists and has 12 chars
+  const diff1 = (await reviewFeature.routes.review_diff.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_diff'),
+      query: new URLSearchParams({ project_path: projectDir, source: 'worktree' }),
+      body: {},
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  const fEntry = diff1.files.find((f: any) => f.path === 'new-untracked.txt');
+  assert.ok(fEntry);
+  assert.equal(typeof fEntry.id, 'string');
+  assert.equal(fEntry.id.length, 12);
+  const oldFileId = fEntry.id;
+
+  // 2. Reject whole file without file_id ⇒ 400
+  await assert.rejects(
+    async () => {
+      await reviewFeature.routes.review_hunk.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=review_hunk'),
+          query: new URLSearchParams(),
+          body: {
+            project_path: projectDir,
+            source: 'worktree',
+            path: 'new-untracked.txt',
+            hunk_id: null,
+            action: 'reject',
+            confirm: true,
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400 && err.message.includes('file_id is required')
+  );
+
+  // 3. Modify untracked file in worktree
+  fs.appendFileSync(untrackedFile, 'second line appended\n');
+  const currentContent = fs.readFileSync(untrackedFile, 'utf8');
+
+  // 4. Whole-file reject with old file_id ⇒ 409 "The diff changed; reload it." and file is untouched
+  await assert.rejects(
+    async () => {
+      await reviewFeature.routes.review_hunk.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=review_hunk'),
+          query: new URLSearchParams(),
+          body: {
+            project_path: projectDir,
+            source: 'worktree',
+            path: 'new-untracked.txt',
+            hunk_id: null,
+            file_id: oldFileId,
+            action: 'reject',
+            confirm: true,
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409 && err.message.includes('The diff changed; reload it.')
+  );
+
+  // Verify file is untouched
+  assert.equal(fs.readFileSync(untrackedFile, 'utf8'), currentContent);
+
+  // 5. Reload diff to obtain new file_id
+  const diff2 = (await reviewFeature.routes.review_diff.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_diff'),
+      query: new URLSearchParams({ project_path: projectDir, source: 'worktree' }),
+      body: {},
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+  const fEntry2 = diff2.files.find((f: any) => f.path === 'new-untracked.txt');
+  assert.ok(fEntry2);
+  assert.notEqual(fEntry2.id, oldFileId);
+
+  // 6. Whole-file reject with matching new file_id succeeds
+  const rejectRes = (await reviewFeature.routes.review_hunk.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_hunk'),
+      query: new URLSearchParams(),
+      body: {
+        project_path: projectDir,
+        source: 'worktree',
+        path: 'new-untracked.txt',
+        hunk_id: null,
+        file_id: fEntry2.id,
+        action: 'reject',
+        confirm: true,
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(rejectRes.ok, true);
+  assert.equal(rejectRes.state, 'rejected');
+  assert.ok(!fs.existsSync(untrackedFile), 'Untracked file should be deleted on reject');
+
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('createSafetySnapshot fails closed on git command failures (409) before worktree is touched', async () => {
+  const tmpRoot = path.win32.join(os.tmpdir(), `maw_snapshot_fail_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const projectDir = path.win32.join(projectsRoot, 'snap-fail-repo');
+  const mawHome = path.win32.join(tmpRoot, '.maw');
+  fs.mkdirSync(projectDir, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    repoRoot: projectDir,
+    mawHome,
+  });
+
+  await runCommand('git', ['-C', projectDir, 'init', '-b', 'main']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.name', 'Tester']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.email', 'tester@example.com']);
+
+  fs.writeFileSync(path.win32.join(projectDir, 'doc.txt'), 'version 1\n');
+  await runCommand('git', ['-C', projectDir, 'add', 'doc.txt']);
+  await runCommand('git', ['-C', projectDir, 'commit', '-m', 'v1']);
+
+  // 1. Direct createSafetySnapshot failure on read-tree
+  const failReadTreeRunner = async (_cmd: string, args: string[]) => {
+    if (args.includes('read-tree')) {
+      return { code: 1, stdout: '', stderr: 'fatal: mock read-tree error\nsecond line' };
+    }
+    return runCommand(_cmd, args);
+  };
+
+  await assert.rejects(
+    async () => {
+      await createSafetySnapshot(projectDir, paths, { runner: failReadTreeRunner as any });
+    },
+    (err: any) =>
+      err instanceof ApiValidationError &&
+      err.statusCode === 409 &&
+      err.message === 'Safety snapshot failed: fatal: mock read-tree error'
+  );
+
+  // 2. Direct createSafetySnapshot failure on add -A
+  const failAddRunner = async (_cmd: string, args: string[]) => {
+    if (args.includes('add')) {
+      return { code: 128, stdout: '', stderr: 'fatal: mock add failure\n' };
+    }
+    return runCommand(_cmd, args);
+  };
+
+  await assert.rejects(
+    async () => {
+      await createSafetySnapshot(projectDir, paths, { runner: failAddRunner as any });
+    },
+    (err: any) =>
+      err instanceof ApiValidationError &&
+      err.statusCode === 409 &&
+      err.message === 'Safety snapshot failed: fatal: mock add failure'
+  );
+
+  // 3. Direct createSafetySnapshot failure on write-tree
+  const failWriteTreeRunner = async (_cmd: string, args: string[]) => {
+    if (args.includes('write-tree')) {
+      return { code: 1, stdout: '', stderr: 'fatal: mock write-tree failure' };
+    }
+    return runCommand(_cmd, args);
+  };
+
+  await assert.rejects(
+    async () => {
+      await createSafetySnapshot(projectDir, paths, { runner: failWriteTreeRunner as any });
+    },
+    (err: any) =>
+      err instanceof ApiValidationError &&
+      err.statusCode === 409 &&
+      err.message === 'Safety snapshot failed: fatal: mock write-tree failure'
+  );
+
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('header-only reject patch only for genuine rename or mode-only change; too_large/omitted throws 409', () => {
+  // 1. too_large file throws 409
+  const tooLargeFile: DiffFile = {
+    id: '1234567890ab',
+    path: 'huge.txt',
+    old_path: 'huge.txt',
+    status: 'M',
+    binary: false,
+    untracked: false,
+    too_large: true,
+    omitted: false,
+    additions: 100,
+    deletions: 50,
+    hunks: [],
+    headerLines: ['diff --git a/huge.txt b/huge.txt'],
+  };
+  assert.throws(
+    () => buildHunkPatch(tooLargeFile, null),
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409 && err.message === 'Load the full file before rejecting it.'
+  );
+
+  // 2. omitted file throws 409
+  const omittedFile: DiffFile = {
+    ...tooLargeFile,
+    path: 'omitted.txt',
+    too_large: false,
+    omitted: true,
+  };
+  assert.throws(
+    () => buildHunkPatch(omittedFile, null),
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409 && err.message === 'Load the full file before rejecting it.'
+  );
+
+  // 3. Normal modified file with empty hunks (not genuine rename or mode change) throws error
+  const fakeEmptyFile: DiffFile = {
+    id: '1234567890ac',
+    path: 'file.txt',
+    old_path: 'file.txt',
+    status: 'M',
+    binary: false,
+    untracked: false,
+    too_large: false,
+    omitted: false,
+    additions: 0,
+    deletions: 0,
+    hunks: [],
+    headerLines: ['diff --git a/file.txt b/file.txt', 'index 1234567..89abcdef 100644'],
+  };
+  assert.throws(
+    () => buildHunkPatch(fakeEmptyFile, null),
+    /Hunk all not found in file file.txt/
+  );
+
+  // 4. Genuine rename (status 'R') allows header-only patch
+  const renameFile: DiffFile = {
+    id: '1234567890ad',
+    path: 'b.txt',
+    old_path: 'a.txt',
+    status: 'R',
+    change: 'R',
+    binary: false,
+    untracked: false,
+    too_large: false,
+    omitted: false,
+    additions: 0,
+    deletions: 0,
+    hunks: [],
+    headerLines: [
+      'diff --git a/a.txt b/b.txt',
+      'similarity index 100%',
+      'rename from a.txt',
+      'rename to b.txt',
+    ],
+  };
+  const patch = buildHunkPatch(renameFile, null);
+  assert.ok(patch.includes('rename from a.txt'));
+  assert.ok(patch.includes('rename to b.txt'));
+
+  // 5. Mode-only change allows header-only patch
+  const modeFile: DiffFile = {
+    id: '1234567890ae',
+    path: 'script.sh',
+    old_path: 'script.sh',
+    status: 'M',
+    change: 'M',
+    binary: false,
+    untracked: false,
+    too_large: false,
+    omitted: false,
+    additions: 0,
+    deletions: 0,
+    hunks: [],
+    headerLines: [
+      'diff --git a/script.sh b/script.sh',
+      'old mode 100644',
+      'new mode 100755',
+    ],
+  };
+  const modePatch = buildHunkPatch(modeFile, null);
+  assert.ok(modePatch.includes('old mode 100644'));
+  assert.ok(modePatch.includes('new mode 100755'));
+});
+
+test('review_comment op edit on sent comment clears sent_at', async () => {
+  const tmpRoot = path.win32.join(os.tmpdir(), `maw_comment_sent_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const projectDir = path.win32.join(projectsRoot, 'comment-repo');
+  const mawHome = path.win32.join(tmpRoot, '.maw');
+  fs.mkdirSync(projectDir, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    repoRoot: projectDir,
+    mawHome,
+  });
+
+  await runCommand('git', ['-C', projectDir, 'init', '-b', 'main']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.name', 'Tester']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.email', 'tester@example.com']);
+  fs.writeFileSync(path.win32.join(projectDir, 'main.txt'), 'hello\n');
+  await runCommand('git', ['-C', projectDir, 'add', 'main.txt']);
+  await runCommand('git', ['-C', projectDir, 'commit', '-m', 'init']);
+
+  const fakeCtx = {
+    paths,
+    registry: { agents: [] } as any,
+    readJobs: async () => [],
+    startJob: async () => ({ ok: true }),
+  };
+
+  // 1. Add comment
+  const addRes = (await reviewFeature.routes.review_comment.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_comment'),
+      query: new URLSearchParams(),
+      body: {
+        project_path: projectDir,
+        source: 'worktree',
+        op: 'add',
+        path: 'main.txt',
+        line: 1,
+        side: 'new',
+        quote: 'hello',
+        body: 'Initial comment body',
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(addRes.ok, true);
+  assert.equal(addRes.comments.length, 1);
+  const commentId = addRes.comments[0].id;
+  assert.equal(addRes.comments[0].sent_at, null);
+
+  // 2. Simulate comment having been sent (set sent_at in session)
+  const reviewKey = computeReviewKey(projectDir, 'worktree', '', '');
+  const session = loadReviewSession(reviewKey, projectDir, 'worktree', '', '', paths);
+  session.comments[0]!.sent_at = '2026-10-24T19:00:00.000Z';
+  saveReviewSession(session, paths);
+
+  // 3. Edit comment via review_comment op 'edit'
+  const editRes = (await reviewFeature.routes.review_comment.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_comment'),
+      query: new URLSearchParams(),
+      body: {
+        project_path: projectDir,
+        source: 'worktree',
+        op: 'edit',
+        id: commentId,
+        body: 'Updated comment text that should be sent again',
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(editRes.ok, true);
+  const updatedComment = editRes.comments.find((c: any) => c.id === commentId);
+  assert.ok(updatedComment);
+  assert.equal(updatedComment.body, 'Updated comment text that should be sent again');
+  assert.equal(updatedComment.sent_at, null, 'sent_at must be cleared on edit');
 
   try {
     fs.rmSync(tmpRoot, { recursive: true, force: true });

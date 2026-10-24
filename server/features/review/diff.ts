@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { ApiValidationError } from '../../lib/validate.ts';
 
 export type DiffHunkLine = [prefix: ' ' | '-' | '+' | '\\', text: string];
 
@@ -14,6 +15,7 @@ export interface DiffHunk {
 }
 
 export interface DiffFile {
+  id: string;
   path: string;
   old_path: string;
   status: 'M' | 'A' | 'D' | 'R' | 'B';
@@ -135,6 +137,16 @@ export function computeHunkId(filePath: string, header: string, rawLines: string
   return crypto.createHash('sha1').update(payload).digest('hex').slice(0, 12);
 }
 
+export function computeFileId(filePath: string, rawDiffText: string): string {
+  const normalizedPath = filePath.replace(/\\/g, '/');
+  const cleanText = rawDiffText
+    .split(/\r?\n/)
+    .map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l))
+    .join('\n');
+  const payload = `${normalizedPath}\n${cleanText}`;
+  return crypto.createHash('sha1').update(payload).digest('hex').slice(0, 12);
+}
+
 export function parseUnifiedDiff(
   rawDiffInput: string,
   options?: { full?: boolean; targetPath?: string; untracked?: boolean }
@@ -165,6 +177,7 @@ export function parseUnifiedDiff(
       oldStart: number;
       newStart: number;
     }>;
+    rawLines: string[];
     isBinary: boolean;
     oldPath: string;
     newPath: string;
@@ -203,6 +216,7 @@ export function parseUnifiedDiff(
       curChunk = {
         headerLines: [line],
         hunkChunks: [],
+        rawLines: [line],
         isBinary: false,
         oldPath: '',
         newPath: '',
@@ -224,6 +238,7 @@ export function parseUnifiedDiff(
       continue;
     }
 
+    curChunk.rawLines.push(line);
     curChunk.totalBytes += Buffer.byteLength(line, 'utf8') + 1;
 
     // Check for hunk header
@@ -438,7 +453,11 @@ export function parseUnifiedDiff(
     totalAdditions += fileAdditions;
     totalDeletions += fileDeletions;
 
+    const fullRawDiffText = chunk.rawLines.join('\n');
+    const fileId = computeFileId(finalPath, fullRawDiffText);
+
     files.push({
+      id: fileId,
       path: finalPath,
       old_path: finalOldPath,
       status: chunk.isBinary ? 'B' : chunk.status,
@@ -466,6 +485,10 @@ export function parseUnifiedDiff(
 }
 
 export function buildHunkPatch(file: DiffFile, hunkId: string | null): string {
+  if (file.too_large || file.omitted) {
+    throw new ApiValidationError('Load the full file before rejecting it.', 409);
+  }
+
   const hunksToInclude =
     hunkId === null
       ? file.hunks
@@ -473,7 +496,16 @@ export function buildHunkPatch(file: DiffFile, hunkId: string | null): string {
 
   // Pure renames or mode-only changes have no hunks; git apply -R accepts a header-only patch
   if (hunksToInclude.length === 0) {
-    if (hunkId === null && file.headerLines.length > 0) {
+    const isGenuineRenameOrMode =
+      file.status === 'R' ||
+      file.headerLines.some(
+        (l) =>
+          l.startsWith('old mode ') ||
+          l.startsWith('new mode ') ||
+          l.startsWith('rename from ') ||
+          l.startsWith('rename to ')
+      );
+    if (hunkId === null && isGenuineRenameOrMode && file.headerLines.length > 0) {
       return `${file.headerLines.join('\n')}\n`;
     }
     throw new Error(`Hunk ${hunkId ?? 'all'} not found in file ${file.path}`);

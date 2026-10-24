@@ -95,6 +95,7 @@ export const feature: MawFeature = {
 
         // Strip internal rawLines and headerLines to reduce payload size
         const sanitizedFiles = diffRun.diffResult.files.map((file) => ({
+          id: file.id,
           path: file.path,
           old_path: file.old_path,
           status: file.status,
@@ -168,6 +169,10 @@ export const feature: MawFeature = {
           req.body.hunk_id !== undefined && req.body.hunk_id !== null && req.body.hunk_id !== ''
             ? String(req.body.hunk_id).trim()
             : null;
+        const fileId =
+          req.body.file_id !== undefined && req.body.file_id !== null && req.body.file_id !== ''
+            ? String(req.body.file_id).trim()
+            : null;
         const action = String(req.body.action ?? '').trim().toLowerCase();
         const confirm = Boolean(req.body.confirm);
         const context =
@@ -206,12 +211,27 @@ export const feature: MawFeature = {
           throw new ApiValidationError('The diff changed; reload it.', 409);
         }
 
-        let targetHunk = null;
-        if (hunkId !== null) {
-          targetHunk = file.hunks.find((h) => h.id === hunkId);
-          if (!targetHunk) {
+        let targetHunk: (typeof file.hunks)[number] | null = null;
+        if (hunkId === null) {
+          if (action === 'reject' && !fileId) {
+            throw new ApiValidationError('file_id is required for whole-file reject.', 400);
+          }
+          if (fileId && file.id !== fileId) {
             throw new ApiValidationError('The diff changed; reload it.', 409);
           }
+        } else {
+          if (fileId && file.id !== fileId) {
+            throw new ApiValidationError('The diff changed; reload it.', 409);
+          }
+          const found = file.hunks.find((h) => h.id === hunkId);
+          if (!found) {
+            throw new ApiValidationError('The diff changed; reload it.', 409);
+          }
+          targetHunk = found;
+        }
+
+        if (action === 'reject' && (file.too_large || file.omitted)) {
+          throw new ApiValidationError('Load the full file before rejecting it.', 409);
         }
 
         const reviewKey = computeReviewKey(projectPath, source, diffRun.ref, diffRun.base);
@@ -443,6 +463,7 @@ export const feature: MawFeature = {
               throw new ApiValidationError('Comment body must be 1 to 4000 characters.', 400);
             }
             comment.body = body;
+            comment.sent_at = null;
             comment.updated_at = new Date().toISOString();
           } else if (op === 'delete') {
             const id = String(req.body.id ?? '').trim();

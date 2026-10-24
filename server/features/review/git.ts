@@ -8,6 +8,7 @@ import { resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import {
   buildHunkPatch,
+  computeFileId,
   parseUnifiedDiff,
   type DiffFile,
   type ParsedDiffResult,
@@ -432,6 +433,7 @@ async function appendUntrackedFilesDiff(options: {
     // Tracked files are already in combinedParsed.files; once total reaches 300, omit remainder
     if (combinedParsed.files.length >= 300) {
       combinedParsed.files.push({
+        id: computeFileId(uFile, ''),
         path: uFile,
         old_path: uFile,
         status: 'A',
@@ -466,6 +468,7 @@ async function appendUntrackedFilesDiff(options: {
 
     if (fileSize > maxBytes) {
       combinedParsed.files.push({
+        id: computeFileId(uFile, ''),
         path: uFile,
         old_path: uFile,
         status: 'A',
@@ -497,6 +500,10 @@ async function appendUntrackedFilesDiff(options: {
     uDiffArgs.push('--no-index', '--', '/dev/null', uFile);
 
     const uDiffRes = await runCommand('git', uDiffArgs);
+    if (uDiffRes.code !== 0 && uDiffRes.code !== 1) {
+      const firstErr = (uDiffRes.stderr || 'git diff --no-index failed').trim().split(/\r?\n/)[0]!.trim();
+      throw new ApiValidationError(`git diff failed: ${firstErr}`, 400);
+    }
     if (uDiffRes.stdout) {
       const chunkBytes = Buffer.byteLength(uDiffRes.stdout, 'utf8');
       if (totalRawBytes + chunkBytes > 5 * 1024 * 1024) {
@@ -515,6 +522,23 @@ async function appendUntrackedFilesDiff(options: {
       combinedParsed.stats.files = combinedParsed.files.length;
       combinedParsed.stats.additions += uParsed.stats.additions;
       combinedParsed.stats.deletions += uParsed.stats.deletions;
+    } else if (fileSize === 0) {
+      combinedParsed.files.push({
+        id: computeFileId(uFile, ''),
+        path: uFile,
+        old_path: uFile,
+        status: 'A',
+        change: 'A',
+        binary: false,
+        untracked: true,
+        too_large: false,
+        omitted: false,
+        additions: 0,
+        deletions: 0,
+        hunks: [],
+        headerLines: [],
+      });
+      combinedParsed.stats.files = combinedParsed.files.length;
     }
   }
 }
@@ -939,17 +963,21 @@ export async function runReviewDiff(
 
 export async function createSafetySnapshot(
   targetPath: string,
-  paths: ServerPaths
+  paths: ServerPaths,
+  options?: { runner?: typeof runCommand; customTmpIndex?: string }
 ): Promise<string> {
+  const runner = options?.runner ?? runCommand;
   const tmpDir = path.win32.join(paths.featureDataDir('review'), 'tmp');
   if (!fs.existsSync(tmpDir)) {
     fs.mkdirSync(tmpDir, { recursive: true });
   }
 
-  const tmpIndex = path.win32.join(
-    tmpDir,
-    `index_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`
-  );
+  const tmpIndex =
+    options?.customTmpIndex ??
+    path.win32.join(
+      tmpDir,
+      `index_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`
+    );
   const now = new Date();
   const pad = (n: number): string => String(n).padStart(2, '0');
   const tsFormatted = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
@@ -966,20 +994,29 @@ export async function createSafetySnapshot(
   };
 
   try {
-    const hasHeadRes = await runCommand('git', ['-C', targetPath, 'rev-parse', '--verify', 'HEAD']);
+    const hasHeadRes = await runner('git', ['-C', targetPath, 'rev-parse', '--verify', 'HEAD']);
     const hasHead = hasHeadRes.code === 0;
 
     if (hasHead) {
-      await runCommand('git', ['-C', targetPath, 'read-tree', 'HEAD'], { env: envWithIndex });
+      const readTreeRes = await runner('git', ['-C', targetPath, 'read-tree', 'HEAD'], { env: envWithIndex });
+      if (readTreeRes.code !== 0) {
+        const firstErr = (readTreeRes.stderr || 'read-tree failed').trim().split(/\r?\n/)[0]!.trim();
+        throw new ApiValidationError(`Safety snapshot failed: ${firstErr}`, 409);
+      }
     }
 
-    await runCommand('git', ['-C', targetPath, 'add', '-A'], { env: envWithIndex });
+    const addRes = await runner('git', ['-C', targetPath, 'add', '-A'], { env: envWithIndex });
+    if (addRes.code !== 0) {
+      const firstErr = (addRes.stderr || 'git add failed').trim().split(/\r?\n/)[0]!.trim();
+      throw new ApiValidationError(`Safety snapshot failed: ${firstErr}`, 409);
+    }
 
-    const writeTreeRes = await runCommand('git', ['-C', targetPath, 'write-tree'], {
+    const writeTreeRes = await runner('git', ['-C', targetPath, 'write-tree'], {
       env: envWithIndex,
     });
     if (writeTreeRes.code !== 0 || !writeTreeRes.stdout.trim()) {
-      throw new Error(`write-tree failed: ${writeTreeRes.stderr}`);
+      const firstErr = (writeTreeRes.stderr || 'write-tree failed').trim().split(/\r?\n/)[0]!.trim();
+      throw new ApiValidationError(`Safety snapshot failed: ${firstErr}`, 409);
     }
     const treeSha = writeTreeRes.stdout.trim();
 
@@ -989,13 +1026,14 @@ export async function createSafetySnapshot(
     }
     commitTreeArgs.push('-m', `maw review safety ${now.toISOString()}`);
 
-    const commitTreeRes = await runCommand('git', commitTreeArgs, { env: envWithIndex });
+    const commitTreeRes = await runner('git', commitTreeArgs, { env: envWithIndex });
     if (commitTreeRes.code !== 0 || !commitTreeRes.stdout.trim()) {
-      throw new Error(`commit-tree failed: ${commitTreeRes.stderr}`);
+      const firstErr = (commitTreeRes.stderr || 'commit-tree failed').trim().split(/\r?\n/)[0]!.trim();
+      throw new ApiValidationError(`Safety snapshot failed: ${firstErr}`, 409);
     }
     const commitSha = commitTreeRes.stdout.trim();
 
-    const updateRefRes = await runCommand('git', [
+    const updateRefRes = await runner('git', [
       '-C',
       targetPath,
       'update-ref',
@@ -1003,7 +1041,8 @@ export async function createSafetySnapshot(
       commitSha,
     ]);
     if (updateRefRes.code !== 0) {
-      throw new Error(`update-ref failed: ${updateRefRes.stderr}`);
+      const firstErr = (updateRefRes.stderr || 'update-ref failed').trim().split(/\r?\n/)[0]!.trim();
+      throw new ApiValidationError(`Safety snapshot failed: ${firstErr}`, 409);
     }
 
     return snapshotRef;
@@ -1030,6 +1069,10 @@ export async function executeRejectHunk(options: {
   paths: ServerPaths;
 }): Promise<void> {
   const { targetPath, file, hunkId, source, beforeRef, ref, base, paths } = options;
+
+  if (file.too_large || file.omitted) {
+    throw new ApiValidationError('Load the full file before rejecting it.', 409);
+  }
 
   if (file.binary) {
     if (hunkId !== null) {
