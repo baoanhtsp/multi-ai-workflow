@@ -60,6 +60,37 @@ test('MCP server stdio JSON-RPC protocol end-to-end', async () => {
     }
 
     if (action === 'job_status') {
+      const jobId = url.searchParams.get('job_id');
+      const offset = Number(url.searchParams.get('offset') ?? 0);
+
+      if (jobId === 'job_big_log') {
+        const fullSize = 20000;
+        if (offset === 0) {
+          res.writeHead(200);
+          res.end(
+            JSON.stringify({
+              ok: true,
+              job_id: 'job_big_log',
+              status: 'RUNNING',
+              full_log_size: fullSize,
+              log_chunk: 'OLD_PREFIX_OFFSET_0_OUTPUT',
+            })
+          );
+        } else {
+          res.writeHead(200);
+          res.end(
+            JSON.stringify({
+              ok: true,
+              job_id: 'job_big_log',
+              status: 'RUNNING',
+              full_log_size: fullSize,
+              log_chunk: 'REAL_END_TAIL_AT_OFFSET_' + offset,
+            })
+          );
+        }
+        return;
+      }
+
       res.writeHead(200);
       res.end(
         JSON.stringify({
@@ -68,6 +99,7 @@ test('MCP server stdio JSON-RPC protocol end-to-end', async () => {
           status: 'DONE',
           exit_code: 0,
           elapsed_sec: 5,
+          full_log_size: 50,
           log_chunk: 'Build succeeded.\nTests passed 100%.\n',
         })
       );
@@ -208,6 +240,32 @@ test('MCP server stdio JSON-RPC protocol end-to-end', async () => {
     });
     const callRes4 = await waitForResponse(6);
     assert.equal(callRes4.error.code, -32601);
+
+    // 7. Malformed JSON returns parse error -32700 with id null (Item 10)
+    child.stdin.write('{"invalid json\n');
+    const parseErrRes = await waitForResponse(null as any);
+    assert.equal(parseErrRes.id, null);
+    assert.equal(parseErrRes.error.code, -32700);
+    assert.equal(parseErrRes.error.message, 'Parse error');
+
+    // 8. job_status tail offset query for big log (Item 8)
+    sendRpc({
+      jsonrpc: '2.0',
+      id: 8,
+      method: 'tools/call',
+      params: {
+        name: 'job_status',
+        arguments: {
+          job_id: 'job_big_log',
+          tail_bytes: 4000,
+        },
+      },
+    });
+    const bigJobRes = await waitForResponse(8);
+    assert.equal(Boolean(bigJobRes.result.isError), false);
+    const parsedBig = JSON.parse(bigJobRes.result.content[0].text);
+    assert.ok(parsedBig.log_tail.includes('REAL_END_TAIL_AT_OFFSET_16000'));
+    assert.ok(!parsedBig.log_tail.includes('OLD_PREFIX_OFFSET_0_OUTPUT'));
   } finally {
     child.kill();
     await new Promise<void>((resolve) => fakeServer.close(() => resolve()));

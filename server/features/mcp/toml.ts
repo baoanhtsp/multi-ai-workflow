@@ -14,21 +14,20 @@ export function isMaskedValue(val: string): boolean {
   return typeof val === 'string' && val.startsWith('••••');
 }
 
-export function maskExtraValue(val: unknown, keyName: string = ''): unknown {
+export function maskExtraValue(val: unknown, keyName: string = '', underSecretContainer: boolean = false): unknown {
   if (val === null || val === undefined) return val;
+  const isSecretContainer = keyName.toLowerCase() === 'env' || keyName.toLowerCase() === 'env_http_headers';
+  const isSecret = underSecretContainer || isSecretContainer || SECRET_KEY_REGEX.test(keyName);
   if (typeof val === 'string') {
-    if (SECRET_KEY_REGEX.test(keyName)) {
-      return maskEnvValue(val);
-    }
-    return val;
+    return isSecret ? maskEnvValue(val) : val;
   }
   if (Array.isArray(val)) {
-    return val.map((item) => maskExtraValue(item, keyName));
+    return val.map((item) => maskExtraValue(item, keyName, isSecret));
   }
   if (typeof val === 'object') {
     const res: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
-      res[k] = maskExtraValue(v, k);
+      res[k] = maskExtraValue(v, k, underSecretContainer || isSecretContainer);
     }
     return res;
   }
@@ -37,7 +36,7 @@ export function maskExtraValue(val: unknown, keyName: string = ''): unknown {
 
 export function maskInlineTomlEnv(inlineEnvContent: string): string {
   return inlineEnvContent.replace(
-    /([A-Za-z0-9_.-]+\s*=\s*)(("[^"]*")|('[^']*')|([^\s,}]+))/g,
+    /((?:[A-Za-z0-9_.-]+|"[^"]*"|'[^']*')\s*=\s*)(("[^"]*")|('[^']*')|([^\s,}]+))/g,
     (_match, prefix, val) => {
       const parsed = parseTomlString(val);
       return `${prefix}${JSON.stringify(maskEnvValue(parsed))}`;
@@ -53,10 +52,11 @@ export function maskAllEnvsInToml(tomlContent: string): string {
 
   for (const line of lines) {
     const trimmed = line.trim();
-    // Header for [mcp_servers.<name>.env]
-    const envHeaderMatch = /^\s*\[\s*mcp_servers\.([A-Za-z0-9_-]+)\.env\s*\]/.exec(trimmed);
-    if (envHeaderMatch) {
-      inEnvSubTable = true;
+    // Header for [mcp_servers.<name>.<subtable>]
+    const subHeaderMatch = /^\s*\[\s*mcp_servers\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\s*\]/.exec(trimmed);
+    if (subHeaderMatch) {
+      const sub = subHeaderMatch[2]!;
+      inEnvSubTable = sub === 'env' || SECRET_KEY_REGEX.test(sub);
       inMcpServerTable = false;
       outLines.push(line);
       continue;
@@ -103,16 +103,29 @@ export function maskAllEnvsInToml(tomlContent: string): string {
       }
     }
 
-    // Mask secret keys in mcp_servers table lines
+    // Mask secret keys in mcp_servers table lines (Item 3: mask any string leaf under secret keys)
     if (inMcpServerTable) {
       const kvMatch = /^(\s*([A-Za-z0-9_.-]+)\s*=\s*)(.+)$/.exec(line);
       if (kvMatch) {
+        const prefix = kvMatch[1]!;
         const keyName = kvMatch[2]!;
+        const rawVal = kvMatch[3]!.trim();
         if (SECRET_KEY_REGEX.test(keyName)) {
-          const rawVal = kvMatch[3]!.trim();
           if ((rawVal.startsWith('"') && rawVal.endsWith('"')) || (rawVal.startsWith("'") && rawVal.endsWith("'"))) {
             const parsed = parseTomlString(rawVal);
-            outLines.push(`${kvMatch[1]}${JSON.stringify(maskEnvValue(parsed))}`);
+            outLines.push(`${prefix}${JSON.stringify(maskEnvValue(parsed))}`);
+            continue;
+          }
+          if (rawVal.startsWith('{') && rawVal.endsWith('}')) {
+            const inner = rawVal.slice(1, -1);
+            outLines.push(`${prefix}{${maskInlineTomlEnv(inner)}}`);
+            continue;
+          }
+          if (rawVal.startsWith('[') && rawVal.endsWith(']')) {
+            const maskedArr = rawVal.replace(/(("[^"]*")|('[^']*'))/g, (val) => {
+              return JSON.stringify(maskEnvValue(parseTomlString(val)));
+            });
+            outLines.push(`${prefix}${maskedArr}`);
             continue;
           }
         }

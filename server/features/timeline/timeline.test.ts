@@ -341,3 +341,110 @@ test('Timeline Round 3 Item 9: totals do not double count multi-tool sub-items',
     cleanup();
   }
 });
+
+test('Item 9: timeline cost attribution with overlapping jobs and project filter dropping empty WorkDir', () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    const registry = loadAgentRegistry(paths);
+    const now = new Date();
+    const t0 = new Date(now.getTime() - 100_000);
+    const tJob1Start = t0.toISOString();
+    const tJob1End = new Date(t0.getTime() + 40_000).toISOString();
+    const tJob2Start = new Date(t0.getTime() + 10_000).toISOString();
+    const tJob2End = new Date(t0.getTime() + 30_000).toISOString();
+
+    // Two concurrent overlapping jobs in same project
+    appendTimelineEvent(paths, {
+      ts: tJob1Start,
+      event: 'job-start',
+      job_id: 'job_overlap_1',
+      mode: 'task',
+      agent: 'claude',
+      role: 'backend',
+      project: paths.repoRoot,
+      status: 'DONE',
+      start: tJob1Start,
+      end: tJob1End,
+    });
+
+    appendTimelineEvent(paths, {
+      ts: tJob2Start,
+      event: 'job-start',
+      job_id: 'job_overlap_2',
+      mode: 'task',
+      agent: 'codex',
+      role: 'reviewer',
+      project: paths.repoRoot,
+      status: 'DONE',
+      start: tJob2Start,
+      end: tJob2End,
+    });
+
+    // Audit rows
+    fs.mkdirSync(path.dirname(paths.auditFile), { recursive: true });
+    const auditRows = [
+      // Row A: Tool claude at t0 + 15s (inside both windows) -> matches Job 1 agent
+      {
+        Timestamp: new Date(t0.getTime() + 15_000).toISOString(),
+        Tool: 'claude',
+        Role: 'backend',
+        WorkDir: paths.repoRoot,
+        InputTokens: 1000,
+        OutputTokens: 500,
+      },
+      // Row B: Tool codex at t0 + 20s (inside both windows) -> matches Job 2 agent
+      {
+        Timestamp: new Date(t0.getTime() + 20_000).toISOString(),
+        Tool: 'codex',
+        Role: 'reviewer',
+        WorkDir: paths.repoRoot,
+        InputTokens: 2000,
+        OutputTokens: 1000,
+      },
+      // Row C: Tool gemini at t0 + 25s (inside both windows) -> matches neither, assigned to Job 2 (latest start: +10s > +0s)
+      {
+        Timestamp: new Date(t0.getTime() + 25_000).toISOString(),
+        Tool: 'gemini',
+        Role: 'critic',
+        WorkDir: paths.repoRoot,
+        InputTokens: 500,
+        OutputTokens: 200,
+      },
+      // Row D: Row without WorkDir at t0 + 15s -> must be dropped when project filter is set
+      {
+        Timestamp: new Date(t0.getTime() + 15_000).toISOString(),
+        Tool: 'claude',
+        Role: 'backend',
+        WorkDir: '',
+        InputTokens: 99999,
+        OutputTokens: 99999,
+      },
+    ];
+    fs.writeFileSync(paths.auditFile, auditRows.map((r) => JSON.stringify(r)).join('\n') + '\n', 'utf8');
+
+    // Build timeline with project filter
+    const data = buildTimeline(paths, registry, { project: paths.repoRoot });
+
+    const claudeLane = data.lanes.find((l) => l.agent === 'claude');
+    const codexLane = data.lanes.find((l) => l.agent === 'codex');
+
+    const job1 = claudeLane?.items.find((it) => it.id === 'job_overlap_1');
+    const job2 = codexLane?.items.find((it) => it.id === 'job_overlap_2');
+
+    assert.ok(job1, 'job1 must be present');
+    assert.ok(job2, 'job2 must be present');
+
+    // Job 1 should only have Row A (1000 in, 500 out), NOT Row B, Row C, or Row D
+    assert.equal(job1.tokens.in, 1000, 'Job 1 must get only matching claude audit row');
+    assert.equal(job1.tokens.out, 500);
+
+    // Job 2 should have Row B (2000 in, 1000 out) + Row C (500 in, 200 out) = 2500 in, 1200 out
+    assert.equal(job2.tokens.in, 2500, 'Job 2 must get matching codex row + later-start gemini row');
+    assert.equal(job2.tokens.out, 1200);
+
+    // Row D (without WorkDir) was dropped, not added to either job
+    assert.ok(job1.tokens.in < 90000 && job2.tokens.in < 90000, 'Row without WorkDir must be dropped');
+  } finally {
+    cleanup();
+  }
+});

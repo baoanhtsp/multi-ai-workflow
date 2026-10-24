@@ -85,7 +85,8 @@ Describe "S3 Hooks (30-health.ps1, 30-timeline.ps1)" {
             $res.Block | Should -Be $false
         }
 
-        It "blocks when user registry in MAW_HOME provides status_cmd that exits 1 with Not logged in" {
+        It "blocks when user registry in MAW_HOME provides status_cmd that exits 1 with Not logged in (using real Invoke-NativeProcess)" {
+            . (Join-Path $repoRoot "antigravity\skills\claude-leader\scripts\lib\maw-common.ps1")
             $healthDataDir = Join-Path $env:MAW_HOME "data\health"
             $cacheFile = Join-Path $healthDataDir "cache.json"
             Remove-Item -LiteralPath $cacheFile -Force -ErrorAction SilentlyContinue

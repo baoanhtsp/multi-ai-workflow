@@ -178,7 +178,7 @@ try {
         $exitCode = 0
         try {
             if (Get-Command "Invoke-NativeProcess" -ErrorAction SilentlyContinue) {
-                $procRes = Invoke-NativeProcess -FilePath $bin -ArgumentList $cmdArgs -TimeoutSeconds 5
+                $procRes = Invoke-NativeProcess -FilePath $bin -ArgumentList $cmdArgs -TimeoutMs 5000
                 $out = "$($procRes.StdOut)`n$($procRes.StdErr)"
                 $exitCode = $procRes.ExitCode
             } else {

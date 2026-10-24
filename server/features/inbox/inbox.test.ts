@@ -620,3 +620,62 @@ test('Inbox Round 3 Item 6: reply path rolls back to open on startJob failure', 
     cleanup();
   }
 });
+
+test('Item 5: pre-existing atomic claim lock rejects with 409 without calling startJob', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  let startJobCalls = 0;
+
+  const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+  ctx.startJob = async () => {
+    startJobCalls++;
+    return { ok: true, job_id: 'job_retry_item5_success' };
+  };
+
+  try {
+    const { item } = addInboxItem(paths, {
+      kind: 'failed',
+      title: 'Item with atomic claim test',
+      actions: ['retry', 'reply', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        prompt: 'Retry prompt',
+      },
+    });
+
+    // Create pre-existing claim lock file in data/inbox/claims/<id>.lock
+    const claimsDir = path.join(paths.featureDataDir('inbox'), 'claims');
+    fs.mkdirSync(claimsDir, { recursive: true });
+    const claimFile = path.join(claimsDir, `${item.id}.lock`);
+    fs.writeFileSync(claimFile, 'pid:9999\n', 'utf8');
+
+    // 1. Retry with pre-existing claim => 409, startJob not called
+    await assert.rejects(
+      async () => await performInboxAction(ctx, item.id, 'retry', undefined, 'ui'),
+      (err: any) => err.statusCode === 409 && err.message.includes('already being processed')
+    );
+    assert.equal(startJobCalls, 0, 'startJob must not be called when claim file exists');
+    assert.equal(getInboxItem(paths, item.id)?.status, 'open');
+
+    // 2. Reply with pre-existing claim => 409, startJob not called
+    await assert.rejects(
+      async () => await performInboxAction(ctx, item.id, 'reply', 'Clarification while claimed', 'ui'),
+      (err: any) => err.statusCode === 409 && err.message.includes('already being processed')
+    );
+    assert.equal(startJobCalls, 0, 'startJob must not be called on reply when claim file exists');
+    assert.equal(getInboxItem(paths, item.id)?.status, 'open');
+
+    // Remove pre-existing claim file
+    fs.unlinkSync(claimFile);
+
+    // 3. Now retry succeeds, calls startJob, sets status to done, and lock file is released
+    const retryRes = await performInboxAction(ctx, item.id, 'retry', undefined, 'ui');
+    assert.equal(retryRes.ok, true);
+    assert.equal(startJobCalls, 1, 'startJob must be called once');
+    assert.equal(getInboxItem(paths, item.id)?.status, 'done');
+    assert.equal(fs.existsSync(claimFile), false, 'Claim file should be cleaned up after status update');
+  } finally {
+    cleanup();
+  }
+});

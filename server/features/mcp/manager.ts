@@ -169,11 +169,12 @@ export function readPlatformServers(filePath: string, platform: 'claude' | 'code
         if (Array.isArray(def.args)) {
           s.args = def.args.map(String);
         }
-        if (def.env && typeof def.env === 'object' && !Array.isArray(def.env)) {
-          s.env = {};
-          for (const [ek, ev] of Object.entries(def.env)) {
-            s.env[ek] = String(ev ?? '');
-          }
+      }
+
+      if (def.env && typeof def.env === 'object' && !Array.isArray(def.env)) {
+        s.env = {};
+        for (const [ek, ev] of Object.entries(def.env)) {
+          s.env[ek] = String(ev ?? '');
         }
       }
 
@@ -286,8 +287,30 @@ export function renderPlatformFile(
     }
   }
 
+  const origMcpServers =
+    rootObj.mcpServers && typeof rootObj.mcpServers === 'object' && !Array.isArray(rootObj.mcpServers)
+      ? (rootObj.mcpServers as Record<string, unknown>)
+      : {};
+
+  const setNames = new Set((options.set ?? []).map((x) => x.name.toLowerCase()));
   const mcpServersMap: Record<string, unknown> = {};
+
   for (const s of activeServers) {
+    let origKey: string | undefined = undefined;
+    if (origMcpServers[s.name] !== undefined) {
+      origKey = s.name;
+    } else {
+      origKey = Object.keys(origMcpServers).find((k) => k.toLowerCase() === s.name.toLowerCase());
+    }
+
+    if (!setNames.has(s.name.toLowerCase()) && origKey && origMcpServers[origKey] !== undefined) {
+      const origObj = origMcpServers[origKey];
+      if (typeof origObj === 'object' && origObj !== null) {
+        mcpServersMap[origKey] = options.maskEnv ? maskExtraValue(origObj) : origObj;
+        continue;
+      }
+    }
+
     const sObj: Record<string, unknown> = {};
     if (s.transport === 'http' || s.url) {
       if (platform === 'gemini') {
@@ -299,20 +322,22 @@ export function renderPlatformFile(
     } else {
       sObj.command = s.command ?? 'node';
       sObj.args = s.args ?? [];
-      if (s.env && Object.keys(s.env).length > 0) {
-        const envCopy: Record<string, string> = {};
-        for (const [ek, ev] of Object.entries(s.env)) {
-          envCopy[ek] = options.maskEnv ? maskEnvValue(ev) : ev;
-        }
-        sObj.env = envCopy;
-      }
     }
+
+    if (s.env && Object.keys(s.env).length > 0) {
+      const envCopy: Record<string, string> = {};
+      for (const [ek, ev] of Object.entries(s.env)) {
+        envCopy[ek] = options.maskEnv ? maskEnvValue(ev) : ev;
+      }
+      sObj.env = envCopy;
+    }
+
     if (s.extra) {
       for (const [ek, ev] of Object.entries(s.extra)) {
         sObj[ek] = ev;
       }
     }
-    mcpServersMap[s.name] = sObj;
+    mcpServersMap[origKey ?? s.name] = sObj;
   }
 
   rootObj.mcpServers = mcpServersMap;

@@ -114,19 +114,63 @@ export function writeTelegramState(paths: ServerPaths, state: TelegramStateData)
   const dataDir = paths.featureDataDir('telegram');
   const stateFile = path.win32.join(dataDir, 'state.json');
 
+  // Re-read current disk state to prevent lost updates across concurrent callers (Round 2 Item 6)
+  const diskState = readTelegramState(paths);
+
+  // 1. offset: max of current and disk
+  const mergedOffset = Math.max(Number(state.offset ?? 0), Number(diskState.offset ?? 0));
+
+  // 2. msg_map: union of disk and memory (incoming caller overrides on key collision)
+  const mergedMsgMap: Record<string, string> = {
+    ...diskState.msg_map,
+    ...state.msg_map,
+  };
+
+  // 3. push_since: newest ISO timestamp
+  let mergedPushSince = state.push_since;
+  if (diskState.push_since) {
+    if (!mergedPushSince || diskState.push_since > mergedPushSince) {
+      mergedPushSince = diskState.push_since;
+    }
+  }
+
+  // 4. last_digest: newest morning and evening stamps
+  const mergedDigest = {
+    morning: (state.last_digest?.morning || diskState.last_digest?.morning)
+      ? (state.last_digest?.morning > diskState.last_digest?.morning ? state.last_digest.morning : diskState.last_digest.morning)
+      : '',
+    evening: (state.last_digest?.evening || diskState.last_digest?.evening)
+      ? (state.last_digest?.evening > diskState.last_digest?.evening ? state.last_digest.evening : diskState.last_digest.evening)
+      : '',
+  };
+
+  const finalState: TelegramStateData = {
+    offset: mergedOffset,
+    push_since: mergedPushSince,
+    last_digest: mergedDigest,
+    msg_map: mergedMsgMap,
+  };
+
+  // Mutate caller state object so subsequent caller operations see merged values
+  state.offset = finalState.offset;
+  state.push_since = finalState.push_since;
+  state.last_digest = finalState.last_digest;
+  state.msg_map = finalState.msg_map;
+
   // Cap msg_map at 500
-  const keys = Object.keys(state.msg_map);
+  const keys = Object.keys(finalState.msg_map);
   if (keys.length > 500) {
     const kept = keys.slice(keys.length - 500);
     const newMap: Record<string, string> = {};
     for (const k of kept) {
-      newMap[k] = state.msg_map[k]!;
+      newMap[k] = finalState.msg_map[k]!;
     }
+    finalState.msg_map = newMap;
     state.msg_map = newMap;
   }
 
   const tempFile = `${stateFile}.${process.pid}.${Date.now()}.tmp`;
-  fs.writeFileSync(tempFile, JSON.stringify(state, null, 2), 'utf8');
+  fs.writeFileSync(tempFile, JSON.stringify(finalState, null, 2), 'utf8');
   fs.renameSync(tempFile, stateFile);
 }
 
@@ -338,8 +382,6 @@ export class TelegramPoller {
   }
 
   async start(): Promise<boolean> {
-    if (this.isRunning) return true;
-
     const notifyCfg = loadInternalNotifyConfig(this.paths.notifyCfgFile);
     if (!notifyCfg.telegram_bot_token.trim() || !notifyCfg.telegram_chat_id.trim()) {
       this.lastError = 'Bot token or chat ID not configured.';
@@ -347,56 +389,74 @@ export class TelegramPoller {
     }
 
     const tgCfg = readTelegramConfig(this.paths);
-    if (!tgCfg.inbound) {
+    const needsTimers = Boolean(tgCfg.push_inbox || tgCfg.digest.enabled);
+    const needsInbound = Boolean(tgCfg.inbound);
+
+    if (!needsTimers && !needsInbound) {
+      this.stop();
       return false;
     }
 
-    const acquired = tryAcquirePollerLock(this.paths);
-    if (!acquired) {
-      return false;
+    // Acquire lock and initialize client + timers if not yet running
+    if (!this.heartbeatTimer) {
+      const acquired = tryAcquirePollerLock(this.paths);
+      if (!acquired) {
+        return false;
+      }
+
+      this.client = new TelegramClient({
+        token: notifyCfg.telegram_bot_token,
+        baseUrl: this.customBaseUrl,
+        fetchFn: this.customFetch,
+      });
+
+      // Set push_since on initial start if not yet set
+      const state = readTelegramState(this.paths);
+      if (!state.push_since) {
+        state.push_since = new Date().toISOString();
+        writeTelegramState(this.paths, state);
+      }
+
+      // Start 20s heartbeat timer
+      this.heartbeatTimer = setInterval(() => {
+        refreshPollerHeartbeat(this.paths);
+      }, 20000);
+      this.heartbeatTimer.unref();
+
+      // Start 60s digest check timer
+      this.digestTimer = setInterval(() => {
+        void this.checkDigest();
+        void this.pushNewInboxItems();
+      }, 60000);
+      this.digestTimer.unref();
+
+      if (tgCfg.push_inbox) {
+        void this.pushNewInboxItems();
+      }
     }
 
-    // Set push_since on initial start if not yet set (Item 8)
-    const state = readTelegramState(this.paths);
-    if (!state.push_since) {
-      state.push_since = new Date().toISOString();
-      writeTelegramState(this.paths, state);
+    // Handle inbound loop
+    if (needsInbound && !this.isRunning) {
+      this.isRunning = true;
+      this.abortController = new AbortController();
+      void this.pollLoop();
+    } else if (!needsInbound && this.isRunning) {
+      this.isRunning = false;
+      if (this.abortController) {
+        this.abortController.abort();
+        this.abortController = null;
+      }
     }
 
-    this.client = new TelegramClient({
-      token: notifyCfg.telegram_bot_token,
-      baseUrl: this.customBaseUrl,
-      fetchFn: this.customFetch,
-    });
-
-    this.isRunning = true;
-    this.abortController = new AbortController();
-
-    // Start 20s heartbeat timer
-    this.heartbeatTimer = setInterval(() => {
-      refreshPollerHeartbeat(this.paths);
-    }, 20000);
-    this.heartbeatTimer.unref();
-
-    // Start 60s digest check timer
-    this.digestTimer = setInterval(() => {
-      void this.checkDigest();
-      void this.pushNewInboxItems();
-    }, 60000);
-    this.digestTimer.unref();
-
-    // Start loop
-    void this.pollLoop();
     return true;
   }
 
   stop(): void {
-    if (!this.isRunning) return;
-    this.isRunning = false;
     if (this.abortController) {
       this.abortController.abort();
       this.abortController = null;
     }
+    this.isRunning = false;
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -539,21 +599,24 @@ export class TelegramPoller {
       }
 
       if (targetInboxItem) {
-        if (this.ctx && targetInboxItem.actions.includes('reply')) {
-          try {
-            await performInboxAction(this.ctx, targetInboxItem.id, 'reply', rawText, 'telegram');
-            await this.client?.sendMessage(chatId, `Reply processed for ${targetInboxItem.title} ✓`);
-          } catch (err) {
-            await this.client?.sendMessage(chatId, `Reply failed: ${(err as Error)?.message ?? 'Unknown error'}`);
-          }
-        } else {
-          updateInboxItemStatus(this.paths, targetInboxItem.id, 'done', {
-            action: 'reply',
-            text: rawText,
-            by: 'telegram',
-            at: new Date().toISOString(),
-          });
-          await this.client?.sendMessage(chatId, 'noted');
+        if (!targetInboxItem.actions.includes('reply')) {
+          await this.client?.sendMessage(
+            chatId,
+            `This item needs /approve ${targetInboxItem.id} or /reject ${targetInboxItem.id}`
+          );
+          return;
+        }
+
+        if (!this.ctx) {
+          await this.client?.sendMessage(chatId, `Cannot process reply: server context not ready.`);
+          return;
+        }
+
+        try {
+          await performInboxAction(this.ctx, targetInboxItem.id, 'reply', rawText, 'telegram');
+          await this.client?.sendMessage(chatId, `Reply processed for ${targetInboxItem.title} ✓`);
+        } catch (err) {
+          await this.client?.sendMessage(chatId, `Reply failed: ${(err as Error)?.message ?? 'Unknown error'}`);
         }
         return;
       }

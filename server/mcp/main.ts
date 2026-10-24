@@ -39,10 +39,11 @@ function sendError(
   message: string,
   data?: unknown
 ): void {
-  if (id === undefined || id === null) return;
+  // Suppress replies only for notifications (id is undefined and not a parse error)
+  if (id === undefined && code !== -32700) return;
   sendJson({
     jsonrpc: '2.0',
-    id,
+    id: id ?? null,
     error: {
       code,
       message,
@@ -237,24 +238,39 @@ async function handleToolCall(
   }
 
   if (name === 'job_status') {
-    const tailBytes = Math.min(16000, Number(args.tail_bytes ?? 4000));
-    const res = await callMawApi('job_status', 'GET', {
+    const tailBytes = Math.min(16000, Math.max(1, Number(args.tail_bytes ?? 4000)));
+    const initRes = await callMawApi('job_status', 'GET', {
       job_id: args.job_id,
       offset: 0,
     });
-    if (!res.ok || !res.data) {
+    if (!initRes.ok || !initRes.data) {
       return {
         isError: true,
-        content: [{ type: 'text', text: `Job status query failed: ${res.error ?? 'Unknown error'}` }],
+        content: [{ type: 'text', text: `Job status query failed: ${initRes.error ?? 'Unknown error'}` }],
       };
     }
-    const fullLog = String(res.data.log_chunk ?? '');
-    const tailText = fullLog.length > tailBytes ? fullLog.slice(-tailBytes) : fullLog;
+
+    let finalData = initRes.data;
+    const fullSize = Number(initRes.data.full_log_size ?? 0);
+    const targetOffset = Math.max(0, fullSize - tailBytes);
+
+    if (targetOffset > 0) {
+      const tailRes = await callMawApi('job_status', 'GET', {
+        job_id: args.job_id,
+        offset: targetOffset,
+      });
+      if (tailRes.ok && tailRes.data) {
+        finalData = tailRes.data;
+      }
+    }
+
+    const logChunk = String(finalData.log_chunk ?? '');
+    const tailText = logChunk.length > tailBytes ? logChunk.slice(-tailBytes) : logChunk;
     const summary = {
-      job_id: res.data.job_id,
-      status: res.data.status,
-      exit_code: res.data.exit_code,
-      elapsed_sec: res.data.elapsed_sec,
+      job_id: finalData.job_id,
+      status: finalData.status,
+      exit_code: finalData.exit_code,
+      elapsed_sec: finalData.elapsed_sec,
       log_tail: tailText,
     };
     return {

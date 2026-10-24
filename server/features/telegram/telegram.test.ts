@@ -556,3 +556,201 @@ test('Telegram Major 6 regression: /retry, callback query, and reply invoke perf
     cleanup();
   }
 });
+
+test('Telegram Review #2 Item 2: reply to mapped approval item sends usage hint and leaves item open', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    const notifyCfg = {
+      desktop_toast: true,
+      webhook_url: '',
+      telegram_bot_token: '123456:FAKE_TOKEN',
+      telegram_chat_id: '12345',
+    };
+    fs.mkdirSync(path.dirname(paths.notifyCfgFile), { recursive: true });
+    fs.writeFileSync(paths.notifyCfgFile, JSON.stringify(notifyCfg), 'utf8');
+
+    writeTelegramConfig(paths, {
+      inbound: true,
+      push_inbox: true,
+      digest: { enabled: false, morning: '08:30', evening: '18:00' },
+    });
+
+    const dataDir = paths.featureDataDir('inbox');
+    fs.mkdirSync(dataDir, { recursive: true });
+    const itemsFile = path.join(dataDir, 'items.json');
+    const approvalItem = {
+      id: 'i_appr_1',
+      kind: 'approval',
+      severity: 'warn',
+      title: 'Deployment approval needed',
+      detail: 'Deploy to prod?',
+      actions: ['approve', 'reject', 'dismiss'],
+      status: 'open',
+      resolution: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(itemsFile, JSON.stringify({ version: 1, items: [approvalItem] }), 'utf8');
+
+    // Map message 500 -> approval item i_appr_1
+    const stateFile = path.join(paths.featureDataDir('telegram'), 'state.json');
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({
+        offset: 0,
+        push_since: new Date().toISOString(),
+        last_digest: { morning: '', evening: '' },
+        msg_map: { '500': 'i_appr_1' },
+      }),
+      'utf8'
+    );
+
+    const sentMessages: string[] = [];
+    let tick = 0;
+    const mockFetch: typeof fetch = async (input, init) => {
+      const urlStr = String(input);
+      if (urlStr.includes('/getUpdates')) {
+        tick++;
+        if (tick === 1) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: [
+                {
+                  update_id: 1,
+                  message: {
+                    message_id: 600,
+                    chat: { id: 12345 },
+                    text: 'Looks good to me, proceed',
+                    reply_to_message: {
+                      message_id: 500,
+                      text: '[approval] Deployment approval needed',
+                    },
+                  },
+                },
+              ],
+            }),
+            { status: 200 }
+          );
+        }
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+      if (urlStr.includes('/sendMessage')) {
+        const bodyObj = JSON.parse(String(init?.body ?? '{}'));
+        sentMessages.push(bodyObj.text);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 601 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    const poller = new TelegramPoller(paths, {
+      fetchFn: mockFetch,
+      baseUrl: 'http://fake-telegram.local',
+    });
+
+    await poller.start();
+    await new Promise((r) => setTimeout(r, 150));
+    poller.stop();
+
+    // Verify response text instructed /approve or /reject
+    assert.equal(sentMessages.length, 1);
+    assert.ok(
+      sentMessages[0]!.includes('This item needs /approve i_appr_1 or /reject i_appr_1'),
+      'Must prompt with approve or reject command'
+    );
+
+    // Verify item remains open and untouched
+    const diskItems = JSON.parse(fs.readFileSync(itemsFile, 'utf8'));
+    assert.equal(diskItems.items[0].status, 'open', 'Item must remain open');
+    assert.equal(diskItems.items[0].resolution, null, 'Resolution must remain null');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Telegram Review #2 Item 6: writeTelegramState prevents lost updates by merging concurrent disk changes', () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    // 1. Initial state
+    writeTelegramState(paths, {
+      offset: 10,
+      push_since: '2026-10-25T01:00:00.000Z',
+      last_digest: { morning: '2026-10-25', evening: '' },
+      msg_map: { '100': 'itemA' },
+    });
+
+    // 2. Simulate writer A loading state at offset 10, msg_map { 100: itemA }
+    const stateA = readTelegramState(paths);
+
+    // 3. Meanwhile writer B writes new msg_map { 200: itemB } and newer push_since
+    writeTelegramState(paths, {
+      offset: 10,
+      push_since: '2026-10-25T01:30:00.000Z',
+      last_digest: { morning: '2026-10-25', evening: '' },
+      msg_map: { '200': 'itemB' },
+    });
+
+    // 4. Now writer A advances offset to 15 and adds msg_map { 300: itemC }
+    stateA.offset = 15;
+    stateA.msg_map['300'] = 'itemC';
+    writeTelegramState(paths, stateA);
+
+    // 5. Read back: must have union of msg_map (100, 200, 300), max offset (15), newest push_since
+    const merged = readTelegramState(paths);
+    assert.equal(merged.offset, 15, 'Offset must be max');
+    assert.equal(merged.push_since, '2026-10-25T01:30:00.000Z', 'push_since must be newest');
+    assert.equal(merged.msg_map['100'], 'itemA');
+    assert.equal(merged.msg_map['200'], 'itemB', 'Writer B update must not be wiped');
+    assert.equal(merged.msg_map['300'], 'itemC');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Telegram Review #2 Item 7: poller runs push/digest timers when inbound is false but push_inbox is true', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    const notifyCfg = {
+      desktop_toast: true,
+      webhook_url: '',
+      telegram_bot_token: '123456:FAKE_TOKEN',
+      telegram_chat_id: '12345',
+    };
+    fs.mkdirSync(path.dirname(paths.notifyCfgFile), { recursive: true });
+    fs.writeFileSync(paths.notifyCfgFile, JSON.stringify(notifyCfg), 'utf8');
+
+    // Inbound is false, but push_inbox is true
+    writeTelegramConfig(paths, {
+      inbound: false,
+      push_inbox: true,
+      digest: { enabled: false, morning: '08:30', evening: '18:00' },
+    });
+
+    const sentMessages: string[] = [];
+    const mockFetch: typeof fetch = async (input, init) => {
+      const urlStr = String(input);
+      if (urlStr.includes('/sendMessage')) {
+        const bodyObj = JSON.parse(String(init?.body ?? '{}'));
+        sentMessages.push(bodyObj.text);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 888 } }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    const poller = new TelegramPoller(paths, {
+      fetchFn: mockFetch,
+      baseUrl: 'http://fake-telegram.local',
+    });
+
+    const started = await poller.start();
+    assert.equal(started, true, 'Poller must start timers under lock even when inbound is false');
+
+    const status = poller.getStatus();
+    assert.equal(status.polling, false, 'Inbound polling loop must be false');
+    assert.equal(status.owner, 'this', 'Poller lock must be owned by this server');
+
+    poller.stop();
+  } finally {
+    cleanup();
+  }
+});

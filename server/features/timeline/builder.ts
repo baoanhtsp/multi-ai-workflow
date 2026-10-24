@@ -141,6 +141,15 @@ export function buildTimeline(
   const auditRows = parseAuditRows(paths.auditFile);
   const normFilterProject = options?.project ? normalizeProjectPath(options.project) : undefined;
 
+  // Filter audit rows by project when project filter is set (Item 9: drop rows without WorkDir)
+  const candidateAuditRows = auditRows.filter((row) => {
+    if (normFilterProject) {
+      if (!row.WorkDir) return false;
+      if (normalizeProjectPath(row.WorkDir) !== normFilterProject) return false;
+    }
+    return true;
+  });
+
   // Group events by job_id or handoff id
   const itemsMap = new Map<string, TimelineItem>();
   const multiToolSubItems: Array<{ laneAgent: string; item: TimelineItem }> = [];
@@ -190,19 +199,60 @@ export function buildTimeline(
     }
   }
 
-  // Join audit rows: WorkDir equals job project and Timestamp within [start, end + 5s]
-  for (const [jobId, item] of itemsMap.entries()) {
-    const itemStartMs = new Date(item.start).getTime();
-    const itemEndMs = item.end ? new Date(item.end).getTime() + 5000 : Date.now() + 5000;
-    const normItemProj = item.project_path ? normalizeProjectPath(item.project_path) : '';
+  // Map job agents for matching
+  const jobAgentMap = new Map<string, string>();
+  for (const ev of allEvents) {
+    if (ev.job_id && ev.agent) {
+      jobAgentMap.set(ev.job_id, ev.agent.toLowerCase());
+    }
+  }
 
-    const matchedAudit = auditRows.filter((row) => {
-      if (normItemProj && row.WorkDir && normalizeProjectPath(row.WorkDir) !== normItemProj) {
-        return false;
-      }
-      const rowMs = new Date(row.Timestamp).getTime();
-      return rowMs >= itemStartMs && rowMs <= itemEndMs;
-    });
+  // Item 9: Assign each audit row to at most one job (matching tool first, else latest start)
+  const jobAuditMap = new Map<string, typeof auditRows>();
+
+  for (const row of candidateAuditRows) {
+    const rowMs = new Date(row.Timestamp).getTime();
+    if (Number.isNaN(rowMs)) continue;
+    const rowProj = row.WorkDir ? normalizeProjectPath(row.WorkDir) : '';
+    const rowTool = String(row.Tool ?? '').toLowerCase();
+
+    const candidateJobs: Array<{ id: string; item: TimelineItem; startMs: number; endMs: number }> = [];
+    for (const [id, item] of itemsMap.entries()) {
+      const startMs = new Date(item.start).getTime();
+      const endMs = item.end ? new Date(item.end).getTime() + 5000 : Date.now() + 5000;
+      if (rowMs < startMs || rowMs > endMs) continue;
+
+      const itemProj = item.project_path ? normalizeProjectPath(item.project_path) : '';
+      if (rowProj && itemProj && rowProj !== itemProj) continue;
+
+      candidateJobs.push({ id, item, startMs, endMs });
+    }
+
+    if (candidateJobs.length === 0) continue;
+
+    // Preference: matching tool/agent first, else latest start
+    const toolMatches = candidateJobs.filter((c) => jobAgentMap.get(c.id) === rowTool);
+    let chosen: { id: string; item: TimelineItem; startMs: number; endMs: number };
+
+    if (toolMatches.length > 0) {
+      toolMatches.sort((a, b) => b.startMs - a.startMs);
+      chosen = toolMatches[0]!;
+    } else {
+      candidateJobs.sort((a, b) => b.startMs - a.startMs);
+      chosen = candidateJobs[0]!;
+    }
+
+    let list = jobAuditMap.get(chosen.id);
+    if (!list) {
+      list = [];
+      jobAuditMap.set(chosen.id, list);
+    }
+    list.push(row);
+  }
+
+  // Join attributed audit rows to items
+  for (const [jobId, item] of itemsMap.entries()) {
+    const matchedAudit = jobAuditMap.get(jobId) ?? [];
 
     let totalCost = 0;
     let totalIn = 0;

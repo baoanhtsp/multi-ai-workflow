@@ -14,7 +14,7 @@ import {
   handleMcpRestore,
 } from './actions.ts';
 import { generateUnifiedDiff } from './diff.ts';
-import { renderPlatformFile, setMcpPathOverrides } from './manager.ts';
+import { readPlatformServers, renderPlatformFile, setMcpPathOverrides } from './manager.ts';
 import {
   isMaskedValue,
   maskAllEnvsInToml,
@@ -785,6 +785,84 @@ test('MCP Round 3 Item 8: copy_from across platforms in preview and apply', () =
     assert.equal(geminiParsed.mcpServers.tool_srv.command, 'python');
     assert.deepEqual(geminiParsed.mcpServers.tool_srv.args, ['tool.py']);
     assert.equal(geminiParsed.mcpServers.tool_srv.env.API_KEY, 'my_unmasked_secret_123', 'Real secret must be written');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Item 3: secret containers mask all string leaves in diff and toml masking', () => {
+  const toml = `[mcp_servers.remote]
+url = "https://example.com/mcp"
+http_headers = { Authorization = "Bearer secret12345", "X-Api-Key" = "key9999" }
+`;
+  const masked = maskAllEnvsInToml(toml);
+  assert.ok(!masked.includes('secret12345'), 'Bearer secret must be masked');
+  assert.ok(!masked.includes('key9999'), 'X-Api-Key must be masked');
+  assert.ok(masked.includes('••••45'));
+  assert.ok(masked.includes('••••99'));
+});
+
+test('Item 4: Claude JSON with HTTP server (env + headers) is byte-identical when applying unrelated server', () => {
+  const { paths, claudeFile, cleanup } = createTempMcpPaths();
+  try {
+    const origClaude = {
+      mcpServers: {
+        existing_http: {
+          type: 'http',
+          url: 'https://api.example.com/mcp',
+          headers: {
+            Authorization: 'Bearer supersecret123',
+            'X-Custom': 'val999',
+          },
+          env: {
+            HTTP_PROXY: 'http://proxy.local',
+          },
+        },
+      },
+    };
+    fs.writeFileSync(claudeFile, JSON.stringify(origClaude, null, 2) + '\n', 'utf8');
+
+    const ctx = createFeatureContext(paths, loadAgentRegistry(paths));
+
+    // Preview applying unrelated server: existing_http headers and env must never leak in diff
+    const previewRes = handleMcpPreview(ctx, {
+      ...ctx,
+      body: {
+        platform: 'claude',
+        set: [{ name: 'new_srv', transport: 'stdio', command: 'node', args: ['srv.js'] }],
+      },
+    } as any) as any;
+    assert.equal(previewRes.ok, true);
+    assert.ok(previewRes.diff.includes('new_srv'));
+    assert.ok(!previewRes.diff.includes('supersecret123'), 'secret must not leak in diff');
+
+    // Apply unrelated server
+    const applyRes = handleMcpApply(ctx, {
+      ...ctx,
+      body: {
+        confirm: true,
+        platforms: ['claude'],
+        set: [{ name: 'new_srv', transport: 'stdio', command: 'node', args: ['srv.js'] }],
+      },
+    } as any) as any;
+    assert.equal(applyRes.ok, true);
+
+    const updatedRaw = fs.readFileSync(claudeFile, 'utf8');
+    const updatedParsed = JSON.parse(updatedRaw);
+
+    // existing_http must be byte/deep-identical to original
+    assert.deepEqual(updatedParsed.mcpServers.existing_http, origClaude.mcpServers.existing_http);
+    assert.ok(updatedParsed.mcpServers.new_srv, 'new_srv must also exist');
+
+    // readPlatformServers must preserve env and headers for HTTP servers
+    const readBack = readPlatformServers(claudeFile, 'claude');
+    const existingHttp = readBack.servers.find((s) => s.name === 'existing_http');
+    assert.ok(existingHttp, 'existing_http must be parsed');
+    assert.equal(existingHttp.transport, 'http');
+    assert.equal(existingHttp.env?.HTTP_PROXY, 'http://proxy.local');
+    assert.deepEqual(existingHttp.extra?.headers, origClaude.mcpServers.existing_http.headers);
+    assert.deepEqual(updatedParsed.mcpServers.existing_http, origClaude.mcpServers.existing_http);
+    assert.ok(updatedParsed.mcpServers.new_srv, 'new_srv must also exist');
   } finally {
     cleanup();
   }

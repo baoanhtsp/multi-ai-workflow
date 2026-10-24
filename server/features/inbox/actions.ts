@@ -215,6 +215,34 @@ export function handleInboxAdd(
 
 const inFlightActionIds = new Set<string>();
 
+function tryAcquireInboxClaim(paths: ServerPaths, id: string): { release: () => void } {
+  const claimsDir = path.win32.join(paths.featureDataDir('inbox'), 'claims');
+  if (!fs.existsSync(claimsDir)) {
+    fs.mkdirSync(claimsDir, { recursive: true });
+  }
+  const claimFile = path.win32.join(claimsDir, `${id}.lock`);
+  let fd: number;
+  try {
+    fd = fs.openSync(claimFile, 'wx');
+  } catch (err: any) {
+    if (err?.code === 'EEXIST') {
+      throw new ApiValidationError(`Inbox item '${id}' is already being processed.`, 409);
+    }
+    throw err;
+  }
+  fs.closeSync(fd);
+
+  return {
+    release: () => {
+      try {
+        fs.unlinkSync(claimFile);
+      } catch {
+        // Ignore unlink error
+      }
+    },
+  };
+}
+
 export async function performInboxAction(
   ctx: MawFeatureContext,
   id: string,
@@ -315,32 +343,38 @@ export async function performInboxAction(
     }
 
     inFlightActionIds.add(id);
-    let jobResult: Record<string, unknown>;
+    let claim: { release: () => void } | null = null;
     try {
-      jobResult = await ctx.startJob(item.retry as unknown as Record<string, unknown>);
+      claim = tryAcquireInboxClaim(ctx.paths, id);
+      const jobResult = await ctx.startJob(item.retry as unknown as Record<string, unknown>);
+      const newJobId = (jobResult.job_id as string) ?? '';
+
+      const resolution = {
+        action: 'retry',
+        by: resolvedBy,
+        at: now,
+        job_id: newJobId,
+      };
+
+      const updated = updateInboxItemStatus(ctx.paths, id, 'done', resolution);
+      claim.release();
+      claim = null;
+
+      if (updated) {
+        await fireInboxResolved(updated);
+      }
+
+      return {
+        ok: true,
+        item: updated,
+        job_id: newJobId,
+      };
+    } catch (err) {
+      claim?.release();
+      throw err;
     } finally {
       inFlightActionIds.delete(id);
     }
-
-    const newJobId = (jobResult.job_id as string) ?? '';
-
-    const resolution = {
-      action: 'retry',
-      by: resolvedBy,
-      at: now,
-      job_id: newJobId,
-    };
-
-    const updated = updateInboxItemStatus(ctx.paths, id, 'done', resolution);
-    if (updated) {
-      await fireInboxResolved(updated);
-    }
-
-    return {
-      ok: true,
-      item: updated,
-      job_id: newJobId,
-    };
   }
 
   if (normAction === 'reply') {
@@ -350,7 +384,12 @@ export async function performInboxAction(
     }
 
     inFlightActionIds.add(id);
+    let replyClaim: { release: () => void } | null = null;
     try {
+      if (item.retry) {
+        replyClaim = tryAcquireInboxClaim(ctx.paths, id);
+      }
+
       const resolution = {
         action: 'reply',
         text: rawText,
@@ -390,18 +429,24 @@ export async function performInboxAction(
           }
         }
 
+        replyClaim?.release();
+        replyClaim = null;
+
         return {
           ok: true,
           item: updated,
           job_id: followUpJobId,
         };
       } catch (err) {
+        replyClaim?.release();
+        replyClaim = null;
         // Roll back to 'open' and clear resolution if follow-up job start fails (Round 3 Item 6)
         updateInboxItemStatus(ctx.paths, id, 'open', null);
         unmarkInboxResolved(id);
         throw err;
       }
     } finally {
+      replyClaim?.release();
       inFlightActionIds.delete(id);
     }
   }

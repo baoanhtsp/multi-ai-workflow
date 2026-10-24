@@ -94,7 +94,7 @@ export async function handleTelegramConfig(
     }
   }
 
-  if (inbound) {
+  if (inbound || pushInbox || digest.enabled) {
     await poller.start();
   } else {
     poller.stop();
