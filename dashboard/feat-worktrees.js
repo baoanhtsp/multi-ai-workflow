@@ -106,7 +106,7 @@
     if (!g) return '';
     const v = Array.isArray(g.violations) ? g.violations : [];
     const rows = v.map(x => `<li><span class="s1-mono">${esc(typeof x === 'string' ? x : (x.path || x.file || JSON.stringify(x)))}</span>${x && typeof x === 'object' && (x.reason || x.message) ? ` — ${esc(x.reason || x.message)}` : ''}</li>`).join('');
-    return (rows ? `<ul class="s1-filelist">${rows}</ul>` : '') + (g.output ? `<pre class="s1-out">${esc(String(g.output).slice(-4000))}</pre>` : '');
+    return (g.error ? `<pre class="s1-out">${esc(String(g.error).slice(-4000))}</pre>` : '') + (rows ? `<ul class="s1-filelist">${rows}</ul>` : '') + (g.output ? `<pre class="s1-out">${esc(String(g.output).slice(-4000))}</pre>` : '');
   }
 
   // ---------- state ----------
@@ -238,7 +238,7 @@
       ].filter(Boolean).map(x => `<span>${x}</span>`).join('');
       return `<article class="s1-wt${on ? '' : ' is-off'}">
         <div class="s1-wt-h"><span class="dot ${L.job_status === 'RUNNING' ? 'live ok' : on ? 'ok' : ''}"></span><b class="s1-mono">${esc(w.branch)}</b>
-          ${badge(w.origin || 'manual')}${on ? '' : badge(w.status, w.status === 'merged' ? 'b-ok' : 'b-warn')}${L.exists === false ? badge(t('wtMissing'), 'b-err') : ''}${statusBadge(L.job_status)}</div>
+          ${badge(w.origin || 'manual')}${on ? '' : badge(w.status, w.status === 'merged' ? 'b-ok' : w.status === 'creating' ? 'b-info' : 'b-warn')}${L.exists === false ? badge(t('wtMissing'), 'b-err') : ''}${statusBadge(L.job_status)}</div>
         <div class="s1-wt-s">${facts}</div>
         ${w.job_id ? `<div class="s1-wt-s"><span>${esc(t('boJob'))}: <span class="s1-mono">${esc(w.job_id)}</span></span>${w.owner ? `<span>${esc(label(w.owner))}</span>` : ''}</div>` : ''}
         <div class="s1-wt-p s1-mono">${esc(w.worktree_path || '')}</div>
@@ -456,7 +456,7 @@
   // Shared by worktree_merge and bestof_pick: merged → close; SPEC Guard block → offer "merge anyway"; conflicts → offer a fixer.
   function mergeOutcome(r, body, dlg, ctx) {
     const box = body.querySelector('[data-mg="res"]');
-    if (r.merged) {
+    if (r.merged || r.picked) {
       toast(ctx.okMsg(r), 'ok');
       W.at = 0; W.bo.at = 0; refresh(true);
       return true;
