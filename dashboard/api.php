@@ -496,7 +496,7 @@ if ($action === 'status') {
                     'gemini-3.5-flash-lite',
                 ],
                 'cli_models' => ['pro', 'flash', 'flash_lite'],
-                'command' => '/claude-leader',
+                'command' => '/multi-ai (alias: /claude-leader)',
                 'role_summary' => 'Backend/Core Dev, Multi-Subagent Branch Coordinator & Context Filter',
             ],
             'claude' => [
@@ -527,7 +527,7 @@ if ($action === 'status') {
                     'claude-haiku-4-5',
                 ],
                 'efforts' => ['low', 'medium', 'high', 'xhigh', 'max'],
-                'command' => '/antigravity',
+                'command' => '/multi-ai (alias: /antigravity)',
                 'role_summary' => 'Tech Lead, 100% Frontend UI Specialist & Code Grader',
             ],
             'codex' => [
@@ -537,7 +537,7 @@ if ($action === 'status') {
                 'models' => $codexModels,
                 'cli_models' => $codexModels,
                 'efforts' => ['low', 'medium', 'high', 'xhigh'],
-                'command' => '$multi-ai-leader',
+                'command' => '$multi-ai (alias: $multi-ai-leader)',
                 'role_summary' => 'Security/Logic Critic, Native Diff Reviewer & Algorithm Coder',
             ],
         ],
@@ -645,7 +645,7 @@ if ($action === 'dispatch') {
         'claude' => ['architect', 'frontend', 'reviewer', 'ui-tweak'],
         'codex' => ['review-diff', 'critic', 'coder'],
         'antigravity' => ['send-latest', 'new', 'status', 'wait'],
-        'council' => ['reviewer', ''],
+        'council' => ['parallel-review', 'reviewer', ''],
     ];
 
     if ($mode === 'claude' && !in_array($role, $allowedRolesByMode['claude'], true)) {
@@ -669,10 +669,10 @@ if ($action === 'dispatch') {
     }
     if ($mode === 'council') {
         if ($role === '') {
-            $role = 'reviewer';
+            $role = 'parallel-review';
         }
         if (!in_array($role, $allowedRolesByMode['council'], true)) {
-            respondJson(['ok' => false, 'error' => 'Invalid role for council. Allowed: reviewer.'], 400);
+            respondJson(['ok' => false, 'error' => 'Invalid role for council. Allowed: parallel-review, reviewer.'], 400);
         }
     }
 

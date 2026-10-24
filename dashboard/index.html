@@ -129,7 +129,7 @@ tailwind.config = {
           </g>
           <!-- Claude (Top) -->
           <g class="node vertex-node" data-mode="claude" tabindex="0" role="button" aria-label="Chọn mode Claude" onclick="pickMode('claude')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();pickMode('claude')}">
-            <text x="340" y="18" text-anchor="middle" fill="#cbd5e1" font-size="11" font-weight="600" font-family="JetBrains Mono">/antigravity</text>
+            <text x="340" y="18" text-anchor="middle" fill="#cbd5e1" font-size="11" font-weight="600" font-family="JetBrains Mono">/multi-ai · Arch &amp; UI</text>
             <rect x="200" y="25" width="280" height="18" rx="9" fill="#1a1210" fill-opacity="0.9" stroke="#D97757" stroke-opacity="0.35"/>
             <text id="triClModels" x="340" y="37" text-anchor="middle" fill="#F59E0B" font-size="9.5" font-family="JetBrains Mono"></text>
             <circle cx="340" cy="112" r="52" fill="#1a1210" stroke="#D97757" stroke-width="2.5"/>
@@ -143,7 +143,7 @@ tailwind.config = {
             <circle cx="135" cy="308" r="62" fill="none" stroke="#06B6D4" opacity=".25"/>
             <text x="135" y="304" text-anchor="middle" fill="#06B6D4" font-size="13" font-weight="800" font-family="Inter">ANTIGRAVITY</text>
             <text id="triAgVer" x="135" y="321" text-anchor="middle" fill="#3B82F6" font-size="10" font-family="JetBrains Mono">—</text>
-            <text x="135" y="390" text-anchor="middle" fill="#cbd5e1" font-size="11" font-weight="600" font-family="JetBrains Mono">/claude-leader</text>
+            <text x="135" y="390" text-anchor="middle" fill="#cbd5e1" font-size="11" font-weight="600" font-family="JetBrains Mono">/multi-ai · Backend &amp; Core</text>
             <rect x="30" y="398" width="210" height="18" rx="9" fill="#0a1620" fill-opacity="0.9" stroke="#06B6D4" stroke-opacity="0.35"/>
             <text id="triAgModels" x="135" y="410" text-anchor="middle" fill="#38bdf8" font-size="9.5" font-family="JetBrains Mono"></text>
           </g>
@@ -153,7 +153,7 @@ tailwind.config = {
             <circle cx="545" cy="308" r="62" fill="none" stroke="#10B981" opacity=".25"/>
             <text x="545" y="304" text-anchor="middle" fill="#10B981" font-size="15" font-weight="800" font-family="Inter">CODEX</text>
             <text id="triCxVer" x="545" y="321" text-anchor="middle" fill="#34d399" font-size="11" font-family="JetBrains Mono">v—</text>
-            <text x="545" y="390" text-anchor="middle" fill="#cbd5e1" font-size="11" font-weight="600" font-family="JetBrains Mono">$multi-ai-leader</text>
+            <text x="545" y="390" text-anchor="middle" fill="#cbd5e1" font-size="11" font-weight="600" font-family="JetBrains Mono">$multi-ai · Security &amp; Test</text>
             <rect x="420" y="398" width="250" height="18" rx="9" fill="#0a1713" fill-opacity="0.9" stroke="#10B981" stroke-opacity="0.35"/>
             <text id="triCxModels" x="545" y="410" text-anchor="middle" fill="#34d399" font-size="9.5" font-family="JetBrains Mono"></text>
           </g>
@@ -377,7 +377,7 @@ const I18N = {
       'codex:review-diff': 'OpenAI Codex: Kiểm tra độc lập git diff, bắt lỗi bảo mật, race-condition và logic.',
       'codex:critic': 'OpenAI Codex: Phản biện thiết kế kiến trúc và tìm lỗ hổng tiềm ẩn.',
       'codex:coder': 'OpenAI Codex: Viết thuật toán phức tạp hoặc Unit/Integration Test trên nhánh riêng.',
-      'council:reviewer': 'Hội đồng AI Song Song: Chạy đồng thời cả Claude Sonnet + OpenAI Codex để chấm điểm git diff nhanh gấp đôi.'
+      'council:parallel-review': 'Hội đồng AI Song Song: Chạy đồng thời cả Claude Sonnet + OpenAI Codex để chấm điểm git diff nhanh gấp đôi.'
     }
   },
   en: {
@@ -470,7 +470,7 @@ const I18N = {
       'codex:review-diff': 'OpenAI Codex: Independently audit git diff for security bugs, race conditions, and logic.',
       'codex:critic': 'OpenAI Codex: Critique system architecture and uncover edge-case vulnerabilities.',
       'codex:coder': 'OpenAI Codex: Write complex algorithms or Unit/Integration tests in an isolated worktree.',
-      'council:reviewer': 'Parallel AI Council: Run both Claude Sonnet + OpenAI Codex simultaneously to review git diff 2x faster.'
+      'council:parallel-review': 'Parallel AI Council: Run both Claude Sonnet + OpenAI Codex simultaneously to review git diff 2x faster.'
     }
   }
 };
@@ -503,7 +503,7 @@ function setLang(lang) {
   $('langVi').className = 'btn px-2.5 py-1 rounded-md ' + (LANG === 'vi' ? on : off);
   $('langEn').className = 'btn px-2.5 py-1 rounded-md ' + (LANG === 'en' ? on : off);
   updateChars();
-  updateHint();
+  renderModes();
   populateOverrides();
   if (!state.lastCmd) $('cmdOut').textContent = t('cmdPlaceholder');
   if (state.data) render();
@@ -513,14 +513,37 @@ const ROLES = {
   antigravity: ['send-latest', 'new', 'status', 'wait'],
   claude: ['architect', 'frontend', 'reviewer', 'ui-tweak'],
   codex: ['review-diff', 'critic', 'coder'],
-  council: ['reviewer']
+  council: ['parallel-review']
 };
 const MODES = {
-  antigravity: { label: 'Antigravity', icon: 'rocket', c: 'text-ag border-ag/50 bg-ag/10' },
-  claude: { label: 'Claude', icon: 'brain-circuit', c: 'text-cl border-cl/50 bg-cl/10' },
-  codex: { label: 'Codex', icon: 'code-2', c: 'text-cx border-cx/50 bg-cx/10' },
-  council: { label: 'Council', icon: 'users', c: 'text-violet-300 border-violet-400/50 bg-violet-400/10' }
+  antigravity: { label: 'Antigravity', sub: { vi: 'Backend & Core', en: 'Backend & Core' }, icon: 'rocket', c: 'text-ag border-ag/50 bg-ag/10' },
+  claude: { label: 'Claude', sub: { vi: 'Kiến trúc & UI', en: 'Arch & UI' }, icon: 'brain-circuit', c: 'text-cl border-cl/50 bg-cl/10' },
+  codex: { label: 'Codex', sub: { vi: 'Bảo mật & Test', en: 'Security & Test' }, icon: 'code-2', c: 'text-cx border-cx/50 bg-cx/10' },
+  council: { label: 'AI Council', sub: { vi: 'Chấm chéo 2 AI', en: 'Dual Review' }, icon: 'users', c: 'text-violet-300 border-violet-400/50 bg-violet-400/10' }
 };
+const ROLE_LABELS = {
+  antigravity: {
+    'send-latest': { vi: 'Gửi vào IDE đang mở (send-latest)', en: 'Send to Active IDE (send-latest)' },
+    'new': { vi: 'Tạo phiên hội thoại mới (new)', en: 'Start New Session (new)' },
+    'status': { vi: 'Kiểm tra kết nối Bridge (status)', en: 'Check Bridge Status (status)' },
+    'wait': { vi: 'Chờ hoàn tất & lấy kết quả (wait)', en: 'Wait & Fetch Output (wait)' }
+  },
+  claude: {
+    'architect': { vi: 'Thiết kế Kiến trúc & SPEC (architect · Opus)', en: 'Architecture & SPEC (architect · Opus)' },
+    'frontend': { vi: 'Code 100% Giao diện UI (frontend · Sonnet)', en: 'Write 100% Frontend UI (frontend · Sonnet)' },
+    'reviewer': { vi: 'Chấm điểm Code X/10 (reviewer · Sonnet)', en: 'Grade Code Diff X/10 (reviewer · Sonnet)' },
+    'ui-tweak': { vi: 'Sửa nhanh CSS / Giao diện (ui-tweak · Haiku)', en: 'Quick CSS / UI Tweak (ui-tweak · Haiku)' }
+  },
+  codex: {
+    'review-diff': { vi: 'Kiểm toán Bảo mật & Diff (review-diff)', en: 'Security & Diff Audit (review-diff)' },
+    'critic': { vi: 'Phản biện Kiến trúc & Logic (critic)', en: 'Architecture & Logic Critic (critic)' },
+    'coder': { vi: 'Viết Thuật toán & Unit Test (coder)', en: 'Write Algorithm & Tests (coder)' }
+  },
+  council: {
+    'parallel-review': { vi: 'Hội đồng Chấm chéo Song song (parallel-review)', en: 'Parallel Dual-AI Review (parallel-review)' }
+  }
+};
+function roleLabel(mode, r) { return ROLE_LABELS[mode]?.[r]?.[LANG] || r; }
 
 let state = { data: null, mode: 'antigravity', timer: null, demo: false, lastCmd: '' };
 
@@ -532,18 +555,18 @@ function demoData() {
     bridge: { online: true, ls_address: 'localhost:59570', csrf_masked: '80b15d0a...abf6', ls_version: 'hub-2.26.0', updated_at: iso(now) },
     tools: {
       antigravity: {
-        installed: true, model: 'Gemini 4 Argon (High)', command: '/claude-leader',
+        installed: true, model: 'Gemini 4 Argon (High)', command: '/multi-ai (alias: /claude-leader)',
         models: ['gemini-4-argon-high', 'gemini-4-argon-medium', 'gemini-4-argon-low', 'gemini-3.8-flash-high', 'gemini-3.8-flash-medium', 'gemini-3.7-flash-high', 'gemini-3.5-flash-lite'],
         cli_models: ['pro', 'flash', 'flash_lite']
       },
       claude: {
-        installed: true, version: '2.1.308', command: '/antigravity',
+        installed: true, version: '2.1.308', command: '/multi-ai (alias: /antigravity)',
         models: ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
         cli_models: ['opus', 'sonnet', 'haiku', 'fable', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-opus-4-8', 'claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
         efforts: ['low', 'medium', 'high', 'xhigh', 'max']
       },
       codex: {
-        installed: true, version: '0.163.0', model: 'gpt-6.1-sol / gpt-6-astra', command: '$multi-ai-leader',
+        installed: true, version: '0.163.0', model: 'gpt-6.1-sol / gpt-6-astra', command: '$multi-ai (alias: $multi-ai-leader)',
         models: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-reserve', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'codex-auto-review'],
         cli_models: ['gpt-6.1-sol', 'gpt-6-astra', 'gpt-6-sol', 'gpt-reserve', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'codex-auto-review'],
         efforts: ['low', 'medium', 'high', 'xhigh']
@@ -777,9 +800,11 @@ function projMeta() {
 function renderModes() {
   $('modeBtns').innerHTML = Object.entries(MODES).map(([k, m]) => `
     <button data-m="${k}" class="btn flex flex-col items-center gap-1 py-2.5 rounded-lg border text-[11px] font-bold ${state.mode === k ? m.c + ' ring-1 ring-current' : 'border-slate-700 text-slate-400 hover:border-slate-500'}">
-      <i data-lucide="${m.icon}" class="w-4 h-4"></i>${m.label}</button>`).join('');
+      <i data-lucide="${m.icon}" class="w-4 h-4"></i><span class="font-bold text-xs">${m.label}</span><span class="text-[10px] font-normal opacity-80">${m.sub[LANG]}</span></button>`).join('');
   document.querySelectorAll('#modeBtns button').forEach(b => b.onclick = () => pickMode(b.dataset.m));
-  $('roleSel').innerHTML = ROLES[state.mode].map(r => `<option>${r}</option>`).join('');
+  const prev = $('roleSel').value;
+  $('roleSel').innerHTML = ROLES[state.mode].map(r => `<option value="${r}">${roleLabel(state.mode, r)}</option>`).join('');
+  if (ROLES[state.mode].includes(prev)) $('roleSel').value = prev;
   updateHint();
   lucide.createIcons();
 }
