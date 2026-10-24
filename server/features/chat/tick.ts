@@ -140,7 +140,8 @@ export async function finalizeHandoff(
     note?: string;
     error?: string;
   },
-  inMemoryConvsData?: { version: number; conversations: Conversation[] }
+  inMemoryConvsData?: { version: number; conversations: Conversation[] },
+  inMemoryHandoffsData?: { version: number; handoffs: Handoff[] }
 ): Promise<void> {
   const handoffsDir = ctx.paths.featureDataDir('handoffs');
   const handoffsFile = path.win32.join(handoffsDir, 'handoffs.json');
@@ -149,10 +150,12 @@ export async function finalizeHandoff(
   const agentsDir = ctx.paths.featureDataDir('agents-ws');
   const agentsFile = path.win32.join(agentsDir, 'agents.json');
 
-  const handoffsData = await readJsonStore<{ version: number; handoffs: Handoff[] }>(handoffsFile, {
-    version: 1,
-    handoffs: [],
-  });
+  const handoffsData =
+    inMemoryHandoffsData ??
+    (await readJsonStore<{ version: number; handoffs: Handoff[] }>(handoffsFile, {
+      version: 1,
+      handoffs: [],
+    }));
   const convsData =
     inMemoryConvsData ??
     (await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
@@ -207,6 +210,43 @@ export async function finalizeHandoff(
           });
         } catch {}
       }
+    }
+  }
+
+  // Item 4: Append assistant response in member conversation if present
+  if (target.member_conversation_id) {
+    const memberConv = convsData.conversations.find((c) => c.id === target.member_conversation_id);
+    if (memberConv) {
+      memberConv.seq++;
+      const replyText =
+        options?.parsed_reply ||
+        options?.summary ||
+        target.result?.summary ||
+        target.parse_error ||
+        options?.error ||
+        '';
+      const assistantMsg: Message = {
+        seq: memberConv.seq,
+        id: generateMessageId(),
+        role: 'assistant',
+        text: replyText,
+        ts: new Date().toISOString(),
+        platform: target.platform,
+        model: '',
+        effort: '',
+        actual_model: target.actual_model,
+        job_id: target.job_id,
+        status: target.status === 'completed' ? 'done' : 'failed',
+        cost_usd: target.result?.cost ?? options?.parsed_cost ?? null,
+        tokens_in: options?.tokens_in ?? null,
+        tokens_out: options?.tokens_out ?? null,
+        duration_sec: target.duration_sec,
+        attachments: [],
+        handoff_id: target.id,
+        steered: false,
+      };
+      appendConversationMessage(chatDir, memberConv.id, assistantMsg);
+      memberConv.updated_at = new Date().toISOString();
     }
   }
 
@@ -558,12 +598,23 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
                     (r) => r.key === item.to || r.name.toLowerCase() === item.to.toLowerCase() || r.agent_id === item.to
                   );
                   let targetAgent = targetRole?.agent_id
-                    ? agentsData.agents.find((a) => a.id === targetRole!.agent_id)
+                    ? agentsData.agents.find((a) => a.id === targetRole!.agent_id && a.deleted_at === null)
                     : agentsData.agents.find(
                         (a) =>
+                          a.deleted_at === null &&
                           a.team_id === team.id &&
                           (a.team_role === item.to || a.name.toLowerCase() === item.to.toLowerCase() || a.id === item.to)
                       );
+
+                  // Item 2: Fallback to live agent with same workdir as Lead and same team_role
+                  if (!targetAgent && agent.workdir) {
+                    targetAgent = agentsData.agents.find(
+                      (a) =>
+                        a.deleted_at === null &&
+                        a.workdir.toLowerCase() === agent.workdir.toLowerCase() &&
+                        (a.team_role === (targetRole?.key ?? item.to) || a.name.toLowerCase() === item.to.toLowerCase())
+                    );
+                  }
 
                   const hRecord: Handoff = {
                     id: generateHandoffId(),
@@ -672,7 +723,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
     // Item 11: Missing job meta for running handoff
     if (!isFileSafe(metaFile)) {
       if (h.started_at && Date.now() - new Date(h.started_at).getTime() > 10 * 60 * 1000) {
-        await finalizeHandoff(ctx, h, 'failed', { error: 'Job record missing' }, convsData);
+        await finalizeHandoff(ctx, h, 'failed', { error: 'Job record missing' }, convsData, handoffsData);
         handoffsDirty = true;
       }
       continue;
@@ -715,7 +766,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         parsed_cost: parsed.cost_usd,
         tokens_in: parsed.tokens_in,
         tokens_out: parsed.tokens_out,
-      }, convsData);
+      }, convsData, handoffsData);
     } else if (statusUpper === 'FAILED' && !logText.includes('```json')) {
       await finalizeHandoff(ctx, h, 'failed', {
         actual_model: parsed.actual_model,
@@ -724,7 +775,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         tokens_in: parsed.tokens_in,
         tokens_out: parsed.tokens_out,
         error: 'Job failed without json block',
-      }, convsData);
+      }, convsData, handoffsData);
     } else {
       const parsedRes = parseStructuredHandoffResult(parsed.reply, parsed.cost_usd);
       if (!parsedRes.ok) {
@@ -736,7 +787,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
           tokens_in: parsed.tokens_in,
           tokens_out: parsed.tokens_out,
           error: parsedRes.error,
-        }, convsData);
+        }, convsData, handoffsData);
       } else {
         h.result = parsedRes.result;
 
@@ -797,7 +848,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
           parsed_cost: parsed.cost_usd,
           tokens_in: parsed.tokens_in,
           tokens_out: parsed.tokens_out,
-        }, convsData);
+        }, convsData, handoffsData);
       }
     }
 
@@ -838,10 +889,32 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         break;
       }
 
-      const memberAgent = agentsData.agents.find((a) => a.id === h.to);
-      // Item 8: start failures finalize handoff immediately
+      let memberAgent = agentsData.agents.find((a) => a.id === h.to && a.deleted_at === null);
       if (!memberAgent) {
-        await finalizeHandoff(ctx, h, 'failed', { error: `Member agent '${h.to}' not found.` });
+        memberAgent = agentsData.agents.find(
+          (a) => a.deleted_at === null && a.team_id === h.team_id && (a.team_role === h.to_role || a.name.toLowerCase() === h.to_role.toLowerCase())
+        );
+      }
+      if (!memberAgent && leadAgent?.workdir) {
+        memberAgent = agentsData.agents.find(
+          (a) =>
+            a.deleted_at === null &&
+            a.workdir.toLowerCase() === leadAgent.workdir.toLowerCase() &&
+            (a.team_role === h.to_role || a.name.toLowerCase() === h.to_role.toLowerCase() || a.id === h.to)
+        );
+      }
+
+      if (memberAgent) {
+        h.to = memberAgent.id;
+      } else {
+        await finalizeHandoff(
+          ctx,
+          h,
+          'failed',
+          { error: `Member agent '${h.to}' not found.` },
+          convsData,
+          handoffsData
+        );
         handoffsDirty = true;
         continue;
       }
@@ -883,6 +956,32 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       }
 
       h.member_conversation_id = memberConv.id;
+
+      // Item 4: Record handoff task as user message with system_generated: true in member conversation
+      memberConv.seq++;
+      const memberTaskMsg: Message = {
+        seq: memberConv.seq,
+        id: generateMessageId(),
+        role: 'user',
+        text: h.task + (h.acceptance ? `\n\nTiêu chí chấp nhận: ${h.acceptance}` : ''),
+        ts: new Date().toISOString(),
+        platform: memberAgent.platform,
+        model: memberAgent.model,
+        effort: memberAgent.effort,
+        actual_model: '',
+        job_id: '',
+        status: 'done',
+        cost_usd: null,
+        tokens_in: null,
+        tokens_out: null,
+        duration_sec: null,
+        attachments: [],
+        handoff_id: h.id,
+        steered: false,
+        system_generated: true,
+      };
+      appendConversationMessage(chatDir, memberConv.id, memberTaskMsg);
+      memberConv.updated_at = new Date().toISOString();
 
       // Item 9: Member brief includes role profile sections and memory context
       let roleSections: any = undefined;
@@ -956,11 +1055,19 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         h.started_at = new Date().toISOString();
         runningCount++;
         handoffsDirty = true;
+
+        // Associate job_id with task message in member conversation
+        const memberMsgs = readConversationMessages(chatDir, memberConv.id);
+        const lastM = memberMsgs[memberMsgs.length - 1];
+        if (lastM && lastM.id === memberTaskMsg.id) {
+          lastM.job_id = h.job_id;
+          updateConversationMessages(chatDir, memberConv.id, memberMsgs);
+        }
       } catch (err: unknown) {
         // Item 8: start error routes through finalizeHandoff
         await finalizeHandoff(ctx, h, 'failed', {
           error: 'Failed to start job: ' + (err instanceof Error ? err.message : String(err)),
-        }, convsData);
+        }, convsData, handoffsData);
         handoffsDirty = true;
       }
     }

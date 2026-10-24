@@ -147,9 +147,10 @@ export const feature: MawFeature = {
             );
           }
 
-          const teamId = leadAgent.team_id;
+          let teamId = leadAgent.team_id;
           let memberAgent = agentsData.agents.find(
             (a) =>
+              a.deleted_at === null &&
               a.team_id === teamId &&
               (a.team_role === to || a.name.toLowerCase() === to.toLowerCase() || a.id === to)
           );
@@ -162,18 +163,31 @@ export const feature: MawFeature = {
             if (fs.existsSync(teamFile)) {
               try {
                 const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
+                if (team.id) {
+                  teamId = team.id;
+                }
                 const r = team.roles.find(
                   (role) => role.key === to || role.name.toLowerCase() === to.toLowerCase() || role.agent_id === to
                 );
                 if (r) {
                   toRole = r.key;
                   if (!memberAgent && r.agent_id) {
-                    memberAgent = agentsData.agents.find((a) => a.id === r.agent_id);
+                    memberAgent = agentsData.agents.find((a) => a.id === r.agent_id && a.deleted_at === null);
                   }
                 }
                 memberPlatform = memberAgent?.platform || team.shared.platform || 'codex';
               } catch {}
             }
+          }
+
+          // Fallback: match by lead workdir + team_role if team ID changed (e.g. after import)
+          if (!memberAgent && leadAgent.workdir) {
+            memberAgent = agentsData.agents.find(
+              (a) =>
+                a.deleted_at === null &&
+                a.workdir.toLowerCase() === leadAgent.workdir.toLowerCase() &&
+                (a.team_role === toRole || a.team_role === to || a.name.toLowerCase() === to.toLowerCase() || a.id === to)
+            );
           }
 
           const handoffsDir = ctx.paths.featureDataDir('handoffs');

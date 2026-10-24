@@ -230,3 +230,56 @@ test('teams: [team validation] rejects bad shared.platform, override.platform, a
     (err: any) => err instanceof ApiValidationError && err.statusCode === 400
   );
 });
+
+test('teams: [Item 3] save -> apply -> import(overwrite) -> apply preserves agents and avoids duplication', async () => {
+  const { makeReq, testProj, paths } = setupTestContext();
+
+  // 1. Save team with built-in full template
+  const saveReq = makeReq({
+    project_path: testProj,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await feature.routes['team_save']!.handler(saveReq, saveReq);
+
+  // 2. Apply team -> creates 6 agents
+  const applyReq1 = makeReq({ project_path: testProj });
+  const applyRes1 = (await feature.routes['team_apply']!.handler(applyReq1, applyReq1)) as any;
+  assert.equal(applyRes1.ok, true);
+  assert.equal(applyRes1.agents.length, 6);
+
+  const agentsFile = path.win32.join(paths.featureDataDir('agents-ws'), 'agents.json');
+  const agentsData1 = JSON.parse(fs.readFileSync(agentsFile, 'utf8'));
+  const liveCount1 = agentsData1.agents.filter((a: any) => a.deleted_at === null).length;
+  assert.equal(liveCount1, 6);
+
+  // 3. Export team
+  const expReq = makeReq({}, { project_path: testProj });
+  const expRes = (await feature.routes['team_export']!.handler(expReq, expReq)) as any;
+  assert.equal(expRes.ok, true);
+
+  // 4. Import team with overwrite: true (this writes team with empty/imported role.agent_id)
+  const impReq = makeReq({ project_path: testProj, bundle: expRes.bundle, overwrite: true });
+  const impRes = (await feature.routes['team_import']!.handler(impReq, impReq)) as any;
+  assert.equal(impRes.ok, true);
+
+  // 5. Apply team again -> must reuse existing live agents by workdir + team_role, NOT create duplicates!
+  const applyReq2 = makeReq({ project_path: testProj });
+  const applyRes2 = (await feature.routes['team_apply']!.handler(applyReq2, applyReq2)) as any;
+  assert.equal(applyRes2.ok, true);
+  assert.equal(applyRes2.agents.length, 6);
+
+  const agentsData2 = JSON.parse(fs.readFileSync(agentsFile, 'utf8'));
+  const liveCount2 = agentsData2.agents.filter((a: any) => a.deleted_at === null).length;
+  assert.equal(liveCount2, 6, 'Exactly 6 live agents preserved without duplication');
+
+  // Verify all role.agent_id are non-empty and re-linked
+  for (const role of applyRes2.team.roles) {
+    if (role.enabled) {
+      assert.ok(role.agent_id, `Role ${role.key} must have re-linked agent_id`);
+      const linkedAgent = agentsData2.agents.find((a: any) => a.id === role.agent_id && a.deleted_at === null);
+      assert.ok(linkedAgent, `Linked agent for ${role.key} must exist in live agents`);
+      assert.equal(linkedAgent.team_role, role.key);
+    }
+  }
+});

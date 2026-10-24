@@ -405,7 +405,26 @@ export const feature: MawFeature = {
             const effort = role.override?.effort || team.shared.effort || '';
             const workdir = role.override?.workdir || team.shared.workdir || validPath;
 
-            let agent = agentsData.agents.find((a) => a.id === role.agent_id && a.deleted_at === null);
+            let agent: Agent | undefined;
+
+            // 1. Try finding by role.agent_id
+            if (role.agent_id) {
+              agent = agentsData.agents.find((a) => a.id === role.agent_id && a.deleted_at === null);
+            }
+
+            // 2. If not found (fresh save, import), reuse a live agent with same workdir + team_role (prefer same team_id)
+            if (!agent) {
+              const matching = agentsData.agents.filter(
+                (a) =>
+                  a.deleted_at === null &&
+                  a.workdir.toLowerCase() === workdir.toLowerCase() &&
+                  a.team_role === role.key
+              );
+              if (matching.length > 0) {
+                agent = matching.find((a) => a.team_id === team.id) ?? matching[0];
+              }
+            }
+
             const nowIso = new Date().toISOString();
 
             if (agent) {
@@ -421,6 +440,7 @@ export const feature: MawFeature = {
               agent.group_id = group.id;
               agent.order = i;
               agent.updated_at = nowIso;
+              role.agent_id = agent.id;
             } else {
               let candidateName = role.name;
               let counter = 1;
@@ -430,7 +450,7 @@ export const feature: MawFeature = {
                 )
               ) {
                 counter++;
-                candidateName = `${role.name} ${counter}`;
+                candidateName = `${role.name} (${counter})`;
               }
 
               agent = {

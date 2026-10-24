@@ -395,7 +395,10 @@ export const feature: MawFeature = {
           if (isBusy) {
             // Item 17: Steer check - only when active_kind === 'turn'
             const activePlatform = (conv.platform || agent.platform).toLowerCase();
-            let antigravityCid = conv.resume?.token || '';
+            let antigravityCid = '';
+            if (conv.resume?.platform === 'antigravity') {
+              antigravityCid = conv.resume.token || '';
+            }
 
             if (!antigravityCid && activePlatform === 'antigravity') {
               const logFile = path.win32.join(ctx.paths.jobsDir, `${conv.active_job_id}.log`);

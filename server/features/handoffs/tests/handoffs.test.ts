@@ -196,6 +196,21 @@ Finished database migration.
     );
   assert.ok(hasAutoContinue, 'Lead received auto-continue prompt');
 
+  // Item 4: Verify Member conversation recorded user task message and assistant reply message
+  assert.ok(handoffRecord.member_conversation_id);
+  const getMemberReq = makeReq({}, { conversation_id: handoffRecord.member_conversation_id });
+  const getMemberRes = (await chatFeature.routes['chat_get']!.handler(getMemberReq, getMemberReq)) as any;
+  assert.equal(getMemberRes.ok, true);
+  assert.equal(getMemberRes.messages.length, 2);
+  const memberTaskMsg = getMemberRes.messages[0];
+  assert.equal(memberTaskMsg.role, 'user');
+  assert.equal(memberTaskMsg.system_generated, true);
+  assert.ok(memberTaskMsg.text.includes('Implement database migrations'));
+  const memberReplyMsg = getMemberRes.messages[1];
+  assert.equal(memberReplyMsg.role, 'assistant');
+  assert.equal(memberReplyMsg.status, 'done');
+  assert.ok(memberReplyMsg.text.includes('Applied migration 001_s6_tables.sql'));
+
   // 7. Verify decision was added to project memory (.maw/memory/decisions.md)
   const memFile = path.win32.join(testProj, '.maw', 'memory', 'decisions.md');
   assert.ok(fs.existsSync(memFile));
@@ -343,4 +358,137 @@ test('handoffs: [antigravity sessions] member jobs pass new_session: true for an
 
   // Dispatch happened via tick in handoff_dispatch
   assert.equal(capturedNewSession, true, 'Antigravity platform member job passed new_session: true');
+});
+
+test('handoffs: [Item 1] batch with all start failures gets distinct seq numbers and auto-continue survives tick', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  // Lead turn delegates to two roles that do not exist in the team (start failures)
+  setNextReply(`
+Dispatching batch with roles that do not exist:
+\`\`\`handoff
+{
+  "handoffs": [
+    { "to": "ghost_role_1", "task": "Ghost task 1" },
+    { "to": "ghost_role_2", "task": "Ghost task 2" }
+  ]
+}
+\`\`\`
+`);
+
+  await chatFeature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: leadConvId, text: 'Dispatch ghost batch' }),
+    makeReq()
+  );
+
+  // Configure response for the subsequent auto-continue turn so it does not re-dispatch
+  setNextReply('Acknowledged all member start failures.');
+
+  // Tick 1: Lead turn completes, parses block -> creates 2 handoffs with status 'started'
+  // and in step 3 tries to dispatch both -> neither member agent exists -> both finalize as 'failed'
+  // because inMemoryConvsData and inMemoryHandoffsData are passed, both get distinct seq numbers
+  // and allBatchTerminal triggers auto_continue queue item which survives the tick write!
+  await tick(baseCtx);
+
+  const getLeadReq = makeReq({}, { conversation_id: leadConvId });
+  const getLeadRes = (await chatFeature.routes['chat_get']!.handler(getLeadReq, getLeadReq)) as any;
+
+  const handoffMsgs = getLeadRes.messages.filter((m: any) => m.role === 'handoff');
+  assert.equal(handoffMsgs.length, 2, 'Two [Handoff] messages recorded in Lead conversation');
+  assert.equal(handoffMsgs[0].status, 'failed');
+  assert.equal(handoffMsgs[1].status, 'failed');
+  assert.notEqual(handoffMsgs[0].seq, handoffMsgs[1].seq, 'Seq numbers must be distinct');
+  assert.equal(handoffMsgs[1].seq, handoffMsgs[0].seq + 1, 'Seq numbers must be consecutive');
+
+  // Verify auto-continue queue item survived the tick
+  const hasAutoContinue =
+    getLeadRes.messages.some(
+      (m: any) => m.text.includes('Member Handoff Results') && m.text.includes('Continue the plan')
+    ) ||
+    getLeadRes.conversation.queue.some(
+      (q: any) => q.text.includes('Member Handoff Results') && q.text.includes('Continue the plan')
+    );
+  assert.ok(hasAutoContinue, 'Auto-continue queue item survived tick without being overwritten');
+});
+
+test('handoffs: [Item 2] member resolution falls back to live agent with same workdir and team_role when team IDs changed', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+  const workerAgent = applyRes.agents.find((a: any) => a.team_role === 'worker');
+  assert.ok(leadAgent);
+  assert.ok(workerAgent);
+
+  // Simulate an import that changed team.id and cleared role.agent_id on disk
+  const teamFile = path.win32.join(testProj, '.maw', 'team.json');
+  const teamOnDisk = JSON.parse(fs.readFileSync(teamFile, 'utf8'));
+  teamOnDisk.id = 'tm_imported_different_id';
+  for (const r of teamOnDisk.roles) {
+    r.agent_id = '';
+  }
+  fs.writeFileSync(teamFile, JSON.stringify(teamOnDisk, null, 2), 'utf8');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  setNextReply(`
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Worker resolved by workdir + team_role successfully",
+  "files_changed": [],
+  "evidence": "OK",
+  "blockers": [],
+  "cost": 0.001,
+  "decisions": []
+}
+\`\`\`
+`);
+
+  // Dispatch handoff to 'worker'
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Do task with imported team',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  assert.equal(dispRes.ok, true);
+  const handoffId = dispRes.handoff.id;
+
+  // Tick processes member job
+  await tick(baseCtx);
+
+  const listReq = makeReq({}, { team_id: teamOnDisk.id });
+  const listRes = (await feature.routes['handoff_list']!.handler(listReq, listReq)) as any;
+  const targetHandoff = listRes.handoffs.find((h: any) => h.id === handoffId);
+  assert.ok(targetHandoff);
+  // Member resolution successfully linked to workerAgent.id via workdir + team_role fallback
+  assert.equal(targetHandoff.to, workerAgent.id);
+  assert.equal(targetHandoff.status, 'completed');
+  assert.ok(targetHandoff.result.summary.includes('Worker resolved by workdir'));
 });
