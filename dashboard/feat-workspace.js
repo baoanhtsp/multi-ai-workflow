@@ -387,8 +387,11 @@
 
   async function loadConvs() {
     if (!S.selAgent) { S.convs = []; return; }
-    S.convsFor = S.selAgent;
-    const d = await get('chat_list', { agent_id: S.selAgent });
+    const id = S.selAgent;
+    S.convsFor = id;
+    const d = await get('chat_list', { agent_id: id });
+    // a newer selection may have happened while this request was in flight
+    if (S.selAgent !== id) return;
     S.convs = d.conversations || [];
   }
   async function refreshConv() {
@@ -453,6 +456,7 @@
     if (S.mtab === 'agents') { S.mtab = 'chat'; S.el.dataset.mtab = 'chat'; paintStatic(); }
   }
   async function openConversation(id) {
+    if (S.selConv !== id) S.attachments = [];
     S.selConv = id; S.conv = S.convs.find(c => c.id === id) || null; S.messages = []; S.lastSeq = 0; S.logOpen = false;
     ls.set('ws_conv_' + S.selAgent, id);
     renderAll();
@@ -467,6 +471,7 @@
       if (!aid) return;
       if (!agentById(aid)) await refreshState(true);
       M.showView('workspace');
+      if (S.selAgent !== aid) S.attachments = [];
       S.selAgent = aid; ls.set('ws_agent', aid);
       await loadConvs();
       if (!S.convs.some(c => c.id === id)) S.convs.unshift(d.conversation);
