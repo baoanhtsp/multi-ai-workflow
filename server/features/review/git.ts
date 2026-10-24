@@ -14,6 +14,28 @@ import {
   type ParsedDiffResult,
 } from './diff.ts';
 
+export async function checkRepoHead(
+  workingDir: string,
+  runner: typeof runCommand = runCommand
+): Promise<{ hasHead: boolean; headSha?: string }> {
+  const headRes = await runner('git', ['-C', workingDir, 'rev-parse', '--verify', '-q', 'HEAD']);
+  if (headRes.code === 0 && headRes.stdout.trim()) {
+    return { hasHead: true, headSha: headRes.stdout.trim() };
+  }
+
+  // "no HEAD yet" = git rev-parse --verify -q HEAD exits 1 with empty stdout AND git rev-parse --git-dir succeeds (exit 0).
+  if (headRes.code === 1 && !headRes.stdout.trim()) {
+    const gitDirRes = await runner('git', ['-C', workingDir, 'rev-parse', '--git-dir']);
+    if (gitDirRes.code === 0) {
+      return { hasHead: false };
+    }
+  }
+
+  // Any other failure ⇒ throw 409 "Safety snapshot failed: <stderr first line>"
+  const firstErr = (headRes.stderr || 'HEAD verification failed').trim().split(/\r?\n/)[0]!.trim();
+  throw new ApiValidationError(`Safety snapshot failed: ${firstErr}`, 409);
+}
+
 export function validateSafeRelativePath(projectPath: string, relPath: string): string {
   if (typeof relPath !== 'string' || relPath.includes('\0') || relPath.includes(':')) {
     throw new ApiValidationError('Invalid path.', 400);
@@ -621,8 +643,8 @@ export async function runReviewDiff(
 
   if (source === 'worktree') {
     target_path = effectiveProjectPath;
-    const hasHeadRes = await runCommand('git', ['-C', effectiveProjectPath, 'rev-parse', '--verify', 'HEAD']);
-    const headTarget = hasHeadRes.code === 0 ? 'HEAD' : '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+    const { hasHead } = await checkRepoHead(effectiveProjectPath);
+    const headTarget = hasHead ? 'HEAD' : '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
     const diffArgs = [
       '-C',
@@ -994,8 +1016,7 @@ export async function createSafetySnapshot(
   };
 
   try {
-    const hasHeadRes = await runner('git', ['-C', targetPath, 'rev-parse', '--verify', 'HEAD']);
-    const hasHead = hasHeadRes.code === 0;
+    const { hasHead } = await checkRepoHead(targetPath, runner);
 
     if (hasHead) {
       const readTreeRes = await runner('git', ['-C', targetPath, 'read-tree', 'HEAD'], { env: envWithIndex });
@@ -1072,6 +1093,34 @@ export async function executeRejectHunk(options: {
 
   if (file.too_large || file.omitted) {
     throw new ApiValidationError('Load the full file before rejecting it.', 409);
+  }
+
+  const isAddedEmpty =
+    (file.untracked || file.change === 'A' || file.status === 'A') &&
+    file.hunks.length === 0 &&
+    !file.too_large &&
+    !file.omitted &&
+    !file.binary;
+
+  if (isAddedEmpty) {
+    if (hunkId !== null) {
+      throw new ApiValidationError('Empty files can only be rejected as a whole file.', 400);
+    }
+    const fullFilePath = path.win32.join(targetPath, file.path.replace(/\//g, '\\'));
+    if (!fs.existsSync(fullFilePath)) {
+      throw new ApiValidationError('File changed since the diff; reload.', 409);
+    }
+    try {
+      const st = fs.statSync(fullFilePath);
+      if (st.size !== 0) {
+        throw new ApiValidationError('File changed since the diff; reload.', 409);
+      }
+    } catch (err: unknown) {
+      if (err instanceof ApiValidationError) throw err;
+      throw new ApiValidationError('File changed since the diff; reload.', 409);
+    }
+    fs.unlinkSync(fullFilePath);
+    return;
   }
 
   if (file.binary) {
