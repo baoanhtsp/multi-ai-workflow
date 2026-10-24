@@ -8,8 +8,11 @@ import { resolveServerPaths } from '../../../lib/paths.ts';
 import { ApiValidationError } from '../../../lib/validate.ts';
 import { feature } from '../index.ts';
 
+// The real temp dir, captured before any test points TEMP at its own folder.
+const ORIG_TMP = os.tmpdir();
+
 function setupTestContext() {
-  const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), 'maw space memory test '));
+  const tempBase = fs.mkdtempSync(path.join(ORIG_TMP, 'maw space memory test '));
   const tempMawHome = path.join(tempBase, '.maw');
   const tempProjectsRoot = path.join(tempBase, 'my projects');
   fs.mkdirSync(tempMawHome, { recursive: true });
@@ -17,7 +20,13 @@ function setupTestContext() {
   const testProj = path.join(tempProjectsRoot, 'my-app');
   fs.mkdirSync(testProj, { recursive: true });
 
+  // Isolate from the real machine: user profile (~/.codex) and TEMP (maw_jobs).
+  const tempUserProfile = path.join(tempBase, 'profile');
+  fs.mkdirSync(tempUserProfile, { recursive: true });
+  process.env.TEMP = tempBase;
+  process.env.TMP = tempBase;
   const paths = resolveServerPaths({
+    userProfile: tempUserProfile,
     repoRoot: process.cwd(),
     projectsRoot: tempProjectsRoot,
     mawHome: tempMawHome,

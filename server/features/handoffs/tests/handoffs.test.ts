@@ -16,8 +16,11 @@ import { BUILTIN_FULL_TEMPLATE } from '../../teams/defaults.ts';
 import { feature as teamsFeature } from '../../teams/index.ts';
 import { feature } from '../index.ts';
 
+// The real temp dir, captured before any test points TEMP at its own folder.
+const ORIG_TMP = os.tmpdir();
+
 function setupHandoffTestContext() {
-  const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), 'maw space handoffs test '));
+  const tempBase = fs.mkdtempSync(path.join(ORIG_TMP, 'maw space handoffs test '));
   const tempMawHome = path.join(tempBase, '.maw');
   const tempProjectsRoot = path.join(tempBase, 'my projects');
   fs.mkdirSync(tempMawHome, { recursive: true });
@@ -25,7 +28,13 @@ function setupHandoffTestContext() {
   const testProj = path.join(tempProjectsRoot, 'handoff-app');
   fs.mkdirSync(testProj, { recursive: true });
 
+  // Isolate from the real machine: user profile (~/.codex) and TEMP (maw_jobs).
+  const tempUserProfile = path.join(tempBase, 'profile');
+  fs.mkdirSync(tempUserProfile, { recursive: true });
+  process.env.TEMP = tempBase;
+  process.env.TMP = tempBase;
   const paths = resolveServerPaths({
+    userProfile: tempUserProfile,
     repoRoot: process.cwd(),
     projectsRoot: tempProjectsRoot,
     mawHome: tempMawHome,
@@ -506,7 +515,7 @@ test('handoffs: [Item 2] member resolution falls back to live agent with same wo
 });
 
 test('handoffs: [Item 2] write-scope changed files reports two commits and untracked file in temp git repo', async () => {
-  const tempRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'maw git test repo '));
+  const tempRepo = fs.mkdtempSync(path.join(ORIG_TMP, 'maw git test repo '));
   try {
     // 1. Initialize git repo and make base commit
     await runCommand('git.exe', ['-C', tempRepo, 'init'], { timeoutMs: 5000 });
@@ -1094,7 +1103,7 @@ test('handoffs: [Item 2] write-scope checks fail closed: git baseline failure ma
 });
 
 test('handoffs: [Item 2] non-isolated write-scope checks count files dirty at baseline that became clean as changed', async () => {
-  const tempRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'maw-dirty-clean-'));
+  const tempRepo = fs.mkdtempSync(path.join(ORIG_TMP, 'maw-dirty-clean-'));
   await runCommand('git.exe', ['-C', tempRepo, 'init']);
   await runCommand('git.exe', ['-C', tempRepo, 'config', 'user.name', 'Tester']);
   await runCommand('git.exe', ['-C', tempRepo, 'config', 'user.email', 'test@example.com']);

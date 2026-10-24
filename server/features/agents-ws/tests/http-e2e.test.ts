@@ -6,6 +6,9 @@ import path from 'node:path';
 import test from 'node:test';
 import { createMawHttpServer } from '../../../http.ts';
 
+// The real temp dir, captured before any test points TEMP at its own folder.
+const ORIG_TMP = os.tmpdir();
+
 function rawHttpRequest(options: {
   port: number;
   method?: string;
@@ -50,7 +53,7 @@ function rawHttpRequest(options: {
 }
 
 test('HTTP e2e: S6 feature routes loading, 200 shapes, error codes and security guards', async () => {
-  const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), 'maw space e2e test '));
+  const tempBase = fs.mkdtempSync(path.join(ORIG_TMP, 'maw space e2e test '));
   const tempMawHome = path.join(tempBase, '.maw');
   const tempProjectsRoot = path.join(tempBase, 'my projects');
   fs.mkdirSync(tempMawHome, { recursive: true });
@@ -58,6 +61,9 @@ test('HTTP e2e: S6 feature routes loading, 200 shapes, error codes and security 
   const testProj = path.join(tempProjectsRoot, 'mission-app');
   fs.mkdirSync(testProj, { recursive: true });
 
+  // Isolate from the real machine: TEMP (maw_jobs).
+  process.env.TEMP = tempBase;
+  process.env.TMP = tempBase;
   const { server } = createMawHttpServer({
     repoRoot: process.cwd(),
     projectsRoot: tempProjectsRoot,

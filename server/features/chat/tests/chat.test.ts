@@ -13,8 +13,11 @@ import { buildPrompt } from '../../agents-ws/lib/prompt.ts';
 import { feature } from '../index.ts';
 import { ensureTickStarted, readConversationMessages, resetTickTimerForTest, tick } from '../tick.ts';
 
+// The real temp dir, captured before any test points TEMP at its own folder.
+const ORIG_TMP = os.tmpdir();
+
 function setupChatTestContext() {
-  const tempBase = fs.mkdtempSync(path.join(os.tmpdir(), 'maw space chat test '));
+  const tempBase = fs.mkdtempSync(path.join(ORIG_TMP, 'maw space chat test '));
   const tempMawHome = path.join(tempBase, '.maw');
   const tempProjectsRoot = path.join(tempBase, 'my projects');
   fs.mkdirSync(tempMawHome, { recursive: true });
@@ -22,7 +25,13 @@ function setupChatTestContext() {
   const testProj = path.join(tempProjectsRoot, 'chat-proj');
   fs.mkdirSync(testProj, { recursive: true });
 
+  // Isolate from the real machine: user profile (~/.codex) and TEMP (maw_jobs).
+  const tempUserProfile = path.join(tempBase, 'profile');
+  fs.mkdirSync(tempUserProfile, { recursive: true });
+  process.env.TEMP = tempBase;
+  process.env.TMP = tempBase;
   const paths = resolveServerPaths({
+    userProfile: tempUserProfile,
     repoRoot: process.cwd(),
     projectsRoot: tempProjectsRoot,
     mawHome: tempMawHome,
