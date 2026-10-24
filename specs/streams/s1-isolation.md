@@ -20,7 +20,12 @@ Owns: `server/features/{checkpoints,worktrees}/**`, `scripts/hooks/*/10-checkpoi
 4. **N2 / #2 — Best-of-N**
    - Action `bestof_start { project_path, prompt, role, candidates: [{agent, model?}] (2–4), judge: "council"|"tests"|"both" }`.
    - Runs every candidate isolated, then the judge (S4 test gate commands and/or Council over each branch diff). Shows a comparison card (score, tests, cost, time, diff size) and lets the user merge the winner.
-5. **V8 git actions** for the S6 agent context menu (HTTP only, no UI here beyond a small panel): `git_log`, `git_diff`, `git_pull`, `git_push` (confirm), `git_branch_switch`, `git_branch_create`. Argument arrays only.
+5. **C1 — Cleanup of dashboard-made branches / worktrees / checkpoints** (added 2026-10-25 at the user's request):
+   - auto-cleanup after merge, with `keep_after_merge_days`;
+   - a "Dọn dẹp" button with a dry-run preview (`cleanup_preview` / `cleanup_apply`);
+   - safety rules: only `maw/*` branches, `../.maw-wt/**` worktrees and `refs/maw/checkpoints/**`; never protected or current branches or dirty worktrees without a per-item confirm; a backup ref `refs/maw/trash/*` (30 days) before deleting unmerged work; an audit line for every deletion;
+   - a periodic `cleanup_scan` for S2 schedules / the S3 inbox.
+6. **V8 git actions** for the S6 agent context menu (HTTP only, no UI here beyond a small panel): `git_log`, `git_diff`, `git_pull`, `git_push` (confirm), `git_branch_switch`, `git_branch_create`. Argument arrays only.
 
 ## Notes
 - Worktrees live **outside** the project folder, so tools in the main checkout never see them.
