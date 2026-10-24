@@ -59,7 +59,10 @@ Common helpers (in `server/features/tasks/lib.ts`, imported by the other three):
   "created_at": "2026-10-25T09:30:00.000Z",
   "updated_at": "…",
   "started_at": null, "finished_at": null,
-  "order": 1000                                 // position inside its column (drag & drop)
+  "order": 1000,                                // position inside its column (drag & drop)
+  "pending_run": null,                          // one-shot { kind: retry|resume|auto-retry, prompt, new_session? } set by task_retry / auto-retry, consumed by the next start
+  "starting": null,                             // { at, prompt_sha } written just before ctx.startJob; a stale one is reconciled after a restart (§1.3)
+  "pr": null                                    // { number, url } once github_pr_create finished
 }
 ```
 Validation on create / update (400 with a clear message):
@@ -92,7 +95,9 @@ review ──approve (move to done)──▶ done          review ──reject�
      - concurrency (§1.4) has room for every agent the card uses;
      - build the run body (§1.5) and `await ctx.startJob(body)`. Success ⇒ `running`, `job_id`, new attempt. A thrown `ApiValidationError` / error ⇒ `failed` with the message (no auto-retry for validation errors: `status_reason` starts with `"invalid: "`).
   4. Run the registered **tickers** (`registerTicker(name, fn)`: playbooks, schedules, github), each in try/catch.
-- Idempotent after a restart: `running` cards are reconciled from job metas (a job started by a previous server keeps running and is still mapped), `queued` cards simply start again. A card is saved as `running` with its `job_id` **in the same locked write** right after `startJob` returns.
+- Idempotent after a restart: `running` cards are reconciled from job metas (a job started by a previous server keeps running and is still mapped), `queued` cards simply start again. Before `startJob` the card records `starting: { at, prompt_sha }`; right after, one locked write (`patchCard`) sets `running` + `job_id` and clears it. A `starting` older than 30 s (server died in between) is reconciled by matching job metas (project + prompt-file hash); with no match the card fails with "start interrupted" — a second job is never started automatically.
+- All scheduler / ticker writes go through `patchCard(ctx, id, fn)` on the fresh copy under the mutex (no lost user edits, never re-inserts a deleted card). An in-process guard plus the fresh-status check prevent a double start between `task_start` and the scheduler.
+- Leader lock (as built): exclusive create (`wx`) with a random token; a lock whose pid is dead or whose heartbeat is older than 60 s is renamed aside and re-claimed; the heartbeat is refreshed during the tick.
 
 ### 1.4 Concurrency limits
 `data/tasks/config.json`:
