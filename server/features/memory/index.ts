@@ -9,11 +9,65 @@ import {
   renderDecisionsMarkdown,
   type MemoryEntry,
 } from '../agents-ws/lib/markdown-memory.ts';
+import { withS6State } from '../agents-ws/lib/mutex.ts';
 import { appendAuditLog } from '../agents-ws/lib/store.ts';
 import type { MemoryContextResult } from './types.ts';
 
 function getDecisionsFilePath(projectPath: string): string {
   return path.win32.join(projectPath, '.maw', 'memory', 'decisions.md');
+}
+
+export async function addMemoryEntry(
+  projectPath: string,
+  entry: {
+    title: string;
+    body: string;
+    tags?: string[];
+    pinned?: boolean;
+    source?: string;
+    agent?: string;
+  }
+): Promise<MemoryEntry> {
+  return withS6State(async () => {
+    const filePath = getDecisionsFilePath(projectPath);
+    let preamble = '# Project decisions\n';
+    let entries: MemoryEntry[] = [];
+
+    if (isFileSafe(filePath)) {
+      try {
+        const raw = fs.readFileSync(filePath, 'utf8');
+        const parsed = parseDecisionsMarkdown(raw);
+        preamble = parsed.preamble;
+        entries = parsed.entries;
+      } catch {
+        preamble = '# Project decisions\n';
+        entries = [];
+      }
+    }
+
+    const nextId = getNextAdrId(entries);
+    const newEntry: MemoryEntry = {
+      id: nextId,
+      title: entry.title.trim().slice(0, 120),
+      body: entry.body.trim().slice(0, 4000),
+      date: new Date().toISOString().slice(0, 10),
+      source: entry.source ? entry.source.trim() : '',
+      agent: entry.agent ? entry.agent.trim() : '',
+      pinned: Boolean(entry.pinned),
+      tags: Array.isArray(entry.tags) ? entry.tags.slice(0, 10) : [],
+    };
+
+    entries.push(newEntry);
+    const rendered = renderDecisionsMarkdown(preamble, entries);
+
+    const dir = path.dirname(filePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(filePath, rendered, 'utf8');
+
+    return newEntry;
+  });
 }
 
 export async function getMemoryContext(
@@ -57,9 +111,11 @@ export async function getMemoryContext(
     return score;
   };
 
-  unpinnedEntries.sort((a, b) => scoreEntry(b) - scoreEntry(a));
+  // Item 21: exclude unpinned entries with score 0 (pinned + keyword matches only)
+  const matchingUnpinned = unpinnedEntries.filter((e) => scoreEntry(e) > 0);
+  matchingUnpinned.sort((a, b) => scoreEntry(b) - scoreEntry(a));
 
-  const ordered = [...pinnedEntries, ...unpinnedEntries];
+  const ordered = [...pinnedEntries, ...matchingUnpinned];
   const selectedIds: string[] = [];
   const lines: string[] = [];
   let currentLen = 0;
@@ -118,7 +174,6 @@ export const feature: MawFeature = {
           });
         }
 
-        // Newest first (by ADR number descending)
         filtered.sort((a, b) => b.id.localeCompare(a.id));
 
         return {
@@ -167,37 +222,14 @@ export const feature: MawFeature = {
           }
         }
 
-        const filePath = getDecisionsFilePath(validPath);
-        let preamble = '# Project decisions\n';
-        let entries: MemoryEntry[] = [];
-
-        if (isFileSafe(filePath)) {
-          const raw = fs.readFileSync(filePath, 'utf8');
-          const parsed = parseDecisionsMarkdown(raw);
-          preamble = parsed.preamble;
-          entries = parsed.entries;
-        }
-
-        const nextId = getNextAdrId(entries);
-        const newEntry: MemoryEntry = {
-          id: nextId,
+        const newEntry = await addMemoryEntry(validPath, {
           title,
           body: entryBody,
-          date: new Date().toISOString().slice(0, 10),
+          tags,
+          pinned: Boolean(body.pinned),
           source: typeof body.source === 'string' ? body.source.trim() : '',
           agent: typeof body.agent === 'string' ? body.agent.trim() : '',
-          pinned: Boolean(body.pinned),
-          tags,
-        };
-
-        entries.push(newEntry);
-        const rendered = renderDecisionsMarkdown(preamble, entries);
-
-        const dir = path.dirname(filePath);
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir, { recursive: true });
-        }
-        fs.writeFileSync(filePath, rendered, 'utf8');
+        });
 
         return {
           ok: true,
@@ -209,126 +241,129 @@ export const feature: MawFeature = {
     memory_update: {
       method: 'POST',
       handler: async (ctx) => {
-        const body = ctx.body ?? {};
-        const rawProj = String(body.project_path ?? '').trim();
-        const validPath = resolveProjectPath(rawProj, ctx.paths.projectsRoot);
-        if (!validPath) {
-          throw new ApiValidationError('Invalid or missing project_path.', 400);
-        }
-
-        const id = String(body.id ?? '').trim().toUpperCase();
-        if (!id || !/^ADR-\d{4}$/.test(id)) {
-          throw new ApiValidationError('Invalid or missing id (expected ADR-xxxx).', 400);
-        }
-
-        const filePath = getDecisionsFilePath(validPath);
-        if (!isFileSafe(filePath)) {
-          throw new ApiValidationError(`Memory entry '${id}' not found.`, 404);
-        }
-
-        const raw = fs.readFileSync(filePath, 'utf8');
-        const { preamble, entries } = parseDecisionsMarkdown(raw);
-
-        const target = entries.find((e) => e.id === id);
-        if (!target) {
-          throw new ApiValidationError(`Memory entry '${id}' not found.`, 404);
-        }
-
-        if (body.title !== undefined) {
-          const title = String(body.title).trim();
-          if (!title || title.length > 120) {
-            throw new ApiValidationError('Title must be between 1 and 120 characters.', 400);
+        return withS6State(async () => {
+          const body = ctx.body ?? {};
+          const rawProj = String(body.project_path ?? '').trim();
+          const validPath = resolveProjectPath(rawProj, ctx.paths.projectsRoot);
+          if (!validPath) {
+            throw new ApiValidationError('Invalid or missing project_path.', 400);
           }
-          target.title = title;
-        }
 
-        if (body.body !== undefined) {
-          const entryBody = String(body.body).trim();
-          if (!entryBody || entryBody.length > 4000) {
-            throw new ApiValidationError('Body must be between 1 and 4000 characters.', 400);
+          const id = String(body.id ?? '').trim().toUpperCase();
+          if (!id || !/^ADR-\d{4}$/.test(id)) {
+            throw new ApiValidationError('Invalid or missing id (expected ADR-xxxx).', 400);
           }
-          target.body = entryBody;
-        }
 
-        if (body.pinned !== undefined) {
-          target.pinned = Boolean(body.pinned);
-        }
+          const filePath = getDecisionsFilePath(validPath);
+          if (!isFileSafe(filePath)) {
+            throw new ApiValidationError(`Memory entry '${id}' not found.`, 404);
+          }
 
-        if (body.tags !== undefined) {
-          if (!Array.isArray(body.tags)) {
-            throw new ApiValidationError('Tags must be an array.', 400);
+          const raw = fs.readFileSync(filePath, 'utf8');
+          const { preamble, entries } = parseDecisionsMarkdown(raw);
+
+          const target = entries.find((e) => e.id === id);
+          if (!target) {
+            throw new ApiValidationError(`Memory entry '${id}' not found.`, 404);
           }
-          if (body.tags.length > 10) {
-            throw new ApiValidationError('Maximum 10 tags allowed.', 400);
-          }
-          const tagRegex = /^[\p{L}\p{N}_-]+$/u;
-          const tags: string[] = [];
-          for (const t of body.tags) {
-            const tagStr = String(t ?? '').trim();
-            if (!tagStr || tagStr.length > 24 || !tagRegex.test(tagStr)) {
-              throw new ApiValidationError(
-                `Invalid tag '${tagStr}'. Must match ^[\\p{L}\\p{N}_-]+$ and be <= 24 chars.`,
-                400
-              );
+
+          if (body.title !== undefined) {
+            const title = String(body.title).trim();
+            if (!title || title.length > 120) {
+              throw new ApiValidationError('Title must be between 1 and 120 characters.', 400);
             }
-            tags.push(tagStr);
+            target.title = title;
           }
-          target.tags = tags;
-        }
 
-        const rendered = renderDecisionsMarkdown(preamble, entries);
-        fs.writeFileSync(filePath, rendered, 'utf8');
+          if (body.body !== undefined) {
+            const entryBody = String(body.body).trim();
+            if (!entryBody || entryBody.length > 4000) {
+              throw new ApiValidationError('Body must be between 1 and 4000 characters.', 400);
+            }
+            target.body = entryBody;
+          }
 
-        return {
-          ok: true,
-          entry: target,
-        };
+          if (body.pinned !== undefined) {
+            target.pinned = Boolean(body.pinned);
+          }
+
+          if (body.tags !== undefined) {
+            if (!Array.isArray(body.tags)) {
+              throw new ApiValidationError('Tags must be an array.', 400);
+            }
+            if (body.tags.length > 10) {
+              throw new ApiValidationError('Maximum 10 tags allowed.', 400);
+            }
+            const tagRegex = /^[\p{L}\p{N}_-]+$/u;
+            const tags: string[] = [];
+            for (const t of body.tags) {
+              const tagStr = String(t ?? '').trim();
+              if (!tagStr || tagStr.length > 24 || !tagRegex.test(tagStr)) {
+                throw new ApiValidationError(
+                  `Invalid tag '${tagStr}'. Must match ^[\\p{L}\\p{N}_-]+$ and be <= 24 chars.`,
+                  400
+                );
+              }
+              tags.push(tagStr);
+            }
+            target.tags = tags;
+          }
+
+          const rendered = renderDecisionsMarkdown(preamble, entries);
+          fs.writeFileSync(filePath, rendered, 'utf8');
+
+          return {
+            ok: true,
+            entry: target,
+          };
+        });
       },
     },
 
     memory_delete: {
       method: 'POST',
       handler: async (ctx) => {
-        const body = ctx.body ?? {};
-        const rawProj = String(body.project_path ?? '').trim();
-        const validPath = resolveProjectPath(rawProj, ctx.paths.projectsRoot);
-        if (!validPath) {
-          throw new ApiValidationError('Invalid or missing project_path.', 400);
-        }
+        return withS6State(async () => {
+          const body = ctx.body ?? {};
+          const rawProj = String(body.project_path ?? '').trim();
+          const validPath = resolveProjectPath(rawProj, ctx.paths.projectsRoot);
+          if (!validPath) {
+            throw new ApiValidationError('Invalid or missing project_path.', 400);
+          }
 
-        const id = String(body.id ?? '').trim().toUpperCase();
-        if (!id || !/^ADR-\d{4}$/.test(id)) {
-          throw new ApiValidationError('Invalid or missing id (expected ADR-xxxx).', 400);
-        }
+          const id = String(body.id ?? '').trim().toUpperCase();
+          if (!id || !/^ADR-\d{4}$/.test(id)) {
+            throw new ApiValidationError('Invalid or missing id (expected ADR-xxxx).', 400);
+          }
 
-        const filePath = getDecisionsFilePath(validPath);
-        if (!isFileSafe(filePath)) {
-          throw new ApiValidationError(`Memory entry '${id}' not found.`, 404);
-        }
+          const filePath = getDecisionsFilePath(validPath);
+          if (!isFileSafe(filePath)) {
+            throw new ApiValidationError(`Memory entry '${id}' not found.`, 404);
+          }
 
-        const raw = fs.readFileSync(filePath, 'utf8');
-        const { preamble, entries } = parseDecisionsMarkdown(raw);
+          const raw = fs.readFileSync(filePath, 'utf8');
+          const { preamble, entries } = parseDecisionsMarkdown(raw);
 
-        const index = entries.findIndex((e) => e.id === id);
-        if (index === -1) {
-          throw new ApiValidationError(`Memory entry '${id}' not found.`, 404);
-        }
+          const index = entries.findIndex((e) => e.id === id);
+          if (index === -1) {
+            throw new ApiValidationError(`Memory entry '${id}' not found.`, 404);
+          }
 
-        entries.splice(index, 1);
-        const rendered = renderDecisionsMarkdown(preamble, entries);
-        fs.writeFileSync(filePath, rendered, 'utf8');
+          entries.splice(index, 1);
+          const rendered = renderDecisionsMarkdown(preamble, entries);
+          fs.writeFileSync(filePath, rendered, 'utf8');
 
-        // Audit log in data/memory/audit.jsonl
-        const featDir = ctx.paths.featureDataDir('memory');
-        await appendAuditLog(featDir, {
-          action: 'memory_delete',
-          target: id,
-          detail: { project_path: validPath },
+          const featDir = ctx.paths.featureDataDir('memory');
+          await appendAuditLog(featDir, {
+            action: 'memory_delete',
+            target: id,
+            detail: { project_path: validPath },
+          });
+
+          return {
+            ok: true,
+          };
         });
-
-        return {
-          ok: true,
-        };
       },
     },
 

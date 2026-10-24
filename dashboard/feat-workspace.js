@@ -31,7 +31,7 @@
       'ws.summaryTable': 'Bảng tổng kết của Lead (từ bản ghi handoff)',
       'ws.h.role': 'Vai trò', 'ws.h.agent': 'Agent', 'ws.h.status': 'Trạng thái', 'ws.h.time': 'Thời gian', 'ws.h.files': 'Tệp', 'ws.h.cost': 'Chi phí',
       'ws.h.accept': 'Chấp nhận', 'ws.h.retry': 'Chạy lại', 'ws.h.cancel': 'Huỷ', 'ws.h.open': 'Mở chat thành viên', 'ws.h.merge': 'Gộp nhánh',
-      'ws.h.evidence': 'Bằng chứng', 'ws.h.blockers': 'Vướng mắc', 'ws.h.scope': 'Ngoài phạm vi ghi', 'ws.h.parse': 'Không đọc được kết quả JSON',
+      'ws.h.evidence': 'Bằng chứng', 'ws.h.error': 'Lỗi', 'ws.h.blockers': 'Vướng mắc', 'ws.h.scope': 'Ngoài phạm vi ghi', 'ws.h.parse': 'Không đọc được kết quả JSON',
       'ws.h.shared': 'chạy chung thư mục (S1 chưa có)', 'ws.h.isolated': 'worktree riêng', 'ws.h.dispatch': 'Giao việc',
       'ws.h.doneToast': 'Handoff {id} · {agent} {status} ({t}): {sum}', 'ws.h.manual': 'Giao việc thủ công',
       'ws.h.to': 'Cho vai trò', 'ws.h.task': 'Nhiệm vụ', 'ws.h.noTeam': 'Agent này không thuộc đội nào.',
@@ -85,7 +85,7 @@
       'ws.summaryTable': 'Lead summary (rendered from the handoff records)',
       'ws.h.role': 'Role', 'ws.h.agent': 'Agent', 'ws.h.status': 'Status', 'ws.h.time': 'Time', 'ws.h.files': 'Files', 'ws.h.cost': 'Cost',
       'ws.h.accept': 'Accept', 'ws.h.retry': 'Retry', 'ws.h.cancel': 'Cancel', 'ws.h.open': 'Open member chat', 'ws.h.merge': 'Merge branch',
-      'ws.h.evidence': 'Evidence', 'ws.h.blockers': 'Blockers', 'ws.h.scope': 'Outside the write scope', 'ws.h.parse': 'Could not read the JSON result',
+      'ws.h.evidence': 'Evidence', 'ws.h.error': 'Error', 'ws.h.blockers': 'Blockers', 'ws.h.scope': 'Outside the write scope', 'ws.h.parse': 'Could not read the JSON result',
       'ws.h.shared': 'shared folder (S1 not available)', 'ws.h.isolated': 'own worktree', 'ws.h.dispatch': 'Dispatch',
       'ws.h.doneToast': 'Handoff {id} · {agent} {status} ({t}): {sum}', 'ws.h.manual': 'Manual dispatch',
       'ws.h.to': 'To role', 'ws.h.task': 'Task', 'ws.h.noTeam': 'This agent is not in a team.',
@@ -1265,7 +1265,7 @@
         <span class="ws-grow"></span><span class="faint">${dur(x.duration_sec)} · ${esc(money(r.cost))}</span></div>
       <div class="faint mono ws-hid">${esc(x.id)} · ${esc(x.isolated ? `${t('ws.h.isolated')} ${x.branch || ''}` : t('ws.h.shared'))}</div>
       ${r.summary ? `<p class="ws-hsum">${esc(r.summary)}</p>` : ''}
-      ${x.parse_error ? `<p class="t-warn">${esc(t('ws.h.parse'))}: ${esc(x.parse_error)}</p>` : ''}
+      ${x.parse_error ? `<p class="t-warn">${esc(t(x.status === 'needs_review' ? 'ws.h.parse' : 'ws.h.error'))}: ${esc(x.parse_error)}</p>` : ''}
       ${(x.scope_violations || []).length ? `<div class="t-err"><strong>${esc(t('ws.h.scope'))}:</strong> <span class="mono">${x.scope_violations.map(esc).join(', ')}</span></div>` : ''}
       ${files.length ? `<details><summary>${esc(t('ws.h.files'))} (${files.length})</summary><div class="ws-files mono">${files.slice(0, 100).map(f => `<span>${esc(f)}</span>`).join('')}</div></details>` : ''}
       ${r.evidence ? `<details><summary>${esc(t('ws.h.evidence'))}</summary><pre class="ws-pre">${esc(r.evidence)}</pre></details>` : ''}

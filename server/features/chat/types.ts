@@ -6,6 +6,7 @@ export interface QueueItem {
   effort?: string;
   ts: string;
   attachments?: Array<{ name: string; path?: string; data_url?: string }>;
+  system_generated?: boolean;
 }
 
 export interface ConversationResume {
@@ -46,6 +47,9 @@ export interface Conversation {
   context: ConversationContext;
   last_status: string;
   last_error: string;
+  compact_error?: string;
+  compact_failed_at?: string;
+  retry_attempts?: number;
 }
 
 export interface MessageAttachment {

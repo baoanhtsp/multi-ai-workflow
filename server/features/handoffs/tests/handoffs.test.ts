@@ -255,3 +255,92 @@ test('handoffs: Invalid json block results in needs_review, retry and accept', a
   assert.equal(retryRes.handoff.attempts, 1);
   assert.equal(retryRes.handoff.status, 'started');
 });
+
+test('handoffs: [finalize] cancel and accept append Lead message', async () => {
+  const { makeReq, testProj, baseCtx } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  // Dispatch handoff
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Task to be cancelled',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  assert.equal(dispRes.ok, true);
+  const handoffId = dispRes.handoff.id;
+
+  // Cancel handoff
+  const cancelReq = makeReq({ id: handoffId });
+  const cancelRes = (await feature.routes['handoff_cancel']!.handler(cancelReq, cancelReq)) as any;
+  assert.equal(cancelRes.ok, true);
+
+  // Verify Lead conversation received [Handoff ...] cancelled message
+  const getLeadReq = makeReq({}, { conversation_id: leadConvId });
+  const getLeadRes = (await chatFeature.routes['chat_get']!.handler(getLeadReq, getLeadReq)) as any;
+  const cancelHandoffMsg = getLeadRes.messages.find(
+    (m: any) => m.role === 'handoff' && m.handoff_id === handoffId && m.text.includes('cancelled')
+  );
+  assert.ok(cancelHandoffMsg, 'Lead conversation contains cancelled handoff message');
+});
+
+test('handoffs: [antigravity sessions] member jobs pass new_session: true for antigravity platform', async () => {
+  const { makeReq, testProj, baseCtx } = setupHandoffTestContext();
+
+  // Create team with member whose platform is antigravity
+  const teamWithAg = {
+    ...BUILTIN_FULL_TEMPLATE.team,
+    roles: BUILTIN_FULL_TEMPLATE.team.roles.map((r) =>
+      r.key === 'worker' ? { ...r, override: { platform: 'antigravity' } } : r
+    ),
+  };
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: teamWithAg,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  let capturedNewSession: boolean | undefined = undefined;
+  const originalStartJob = baseCtx.startJob;
+  baseCtx.startJob = async (body: Record<string, unknown>) => {
+    if (body.agent === 'antigravity') {
+      capturedNewSession = Boolean(body.new_session);
+    }
+    return originalStartJob(body);
+  };
+
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Task on antigravity',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  assert.equal(dispRes.ok, true);
+
+  // Dispatch happened via tick in handoff_dispatch
+  assert.equal(capturedNewSession, true, 'Antigravity platform member job passed new_session: true');
+});

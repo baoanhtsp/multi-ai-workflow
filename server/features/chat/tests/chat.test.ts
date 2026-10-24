@@ -247,3 +247,194 @@ test('chat: Forced compaction through chat_compact', async () => {
   assert.equal(getRes.conversation.summary, 'This conversation discussed project architecture.');
   assert.ok(getRes.messages.some((m: any) => m.role === 'system' && m.text.includes('Đã nén ngữ cảnh')));
 });
+
+test('chat: [user status] user message status becomes done once turn starts', async () => {
+  const { makeReq, testProj } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: { name: 'StatusBot', platform: 'claude', workdir: testProj },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const convReq = makeReq({ agent_id: agRes.agent.id });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  const sendReq = makeReq({ conversation_id: convId, text: 'Check my status' });
+  const sendRes = (await feature.routes['chat_send']!.handler(sendReq, sendReq)) as any;
+  assert.equal(sendRes.ok, true);
+  assert.equal(sendRes.message.role, 'user');
+  assert.equal(sendRes.message.status, 'done');
+});
+
+test('chat: [retry] FAILED turn with retry_policy re-runs after backoff', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply, setNextJobStatus } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: {
+      name: 'RetryBot',
+      platform: 'claude',
+      workdir: testProj,
+      retry_policy: { max_attempts: 1, backoff_sec: 0 },
+    },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const convReq = makeReq({ agent_id: agRes.agent.id });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  let jobAttempt = 0;
+  const origStartJob = baseCtx.startJob;
+  baseCtx.startJob = async (body: Record<string, unknown>) => {
+    jobAttempt++;
+    if (jobAttempt === 1) {
+      setNextJobStatus('FAILED');
+      setNextReply('Transient API error');
+    } else {
+      setNextJobStatus('DONE');
+      setNextReply('Task succeeded on retry!');
+    }
+    return origStartJob(body);
+  };
+
+  const sendReq = makeReq({ conversation_id: convId, text: 'Do difficult task' });
+  await feature.routes['chat_send']!.handler(sendReq, sendReq);
+
+  // Tick 1: turn 1 finishes FAILED -> retry_policy appends "Thử lại lần 1" -> starts retry turn (jobAttempt 2)
+  await tick(baseCtx);
+  // Tick 2: retry turn finishes DONE -> appends assistant response
+  await tick(baseCtx);
+
+  const get2 = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.ok(get2.messages.some((m: any) => m.role === 'system' && m.text.includes('Thử lại lần 1')));
+  assert.ok(get2.messages.some((m: any) => m.role === 'assistant' && m.text.includes('Task succeeded on retry!')));
+});
+
+test('chat: [compaction] startJob failure records error and backs off, and replay overflow triggers', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply, setNextJobStatus } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: { name: 'Compactor', platform: 'claude', workdir: testProj },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const convReq = makeReq({ agent_id: agRes.agent.id });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  setNextJobStatus('DONE');
+  setNextReply('Normal reply');
+  await feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'Initial message' }),
+    makeReq()
+  );
+  await tick(baseCtx);
+
+  // Force compaction but make compaction job fail
+  setNextJobStatus('FAILED');
+  setNextReply('API rate limit exceeded during compaction');
+  await feature.routes['chat_compact']!.handler(
+    makeReq({ conversation_id: convId }),
+    makeReq()
+  );
+  await tick(baseCtx);
+
+  // Verify compact error and compact_failed_at were recorded
+  const get1 = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.ok(get1.conversation.compact_failed_at);
+  assert.ok(get1.conversation.compact_error.includes('API rate limit'));
+
+  // During 10 min backoff, automatic compaction does not re-trigger
+  await tick(baseCtx);
+  const get2 = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.equal(get2.conversation.active_job_id, '');
+});
+
+test('chat: [queue error] failing startJob for queued item appends system error message and drops item', async () => {
+  const { makeReq, testProj, baseCtx } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: { name: 'FailBot', platform: 'claude', workdir: testProj },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const convReq = makeReq({ agent_id: agRes.agent.id });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // Start turn 1
+  await feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'Turn 1' }),
+    makeReq()
+  );
+
+  // Queue turn 2 while busy
+  await feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'Turn 2 (will fail to start)' }),
+    makeReq()
+  );
+
+  // Make startJob throw an error when starting turn 2
+  const originalStartJob = baseCtx.startJob;
+  let jobCount = 0;
+  baseCtx.startJob = async (body: Record<string, unknown>) => {
+    jobCount++;
+    if (jobCount === 1) {
+      throw new Error('Process spawn failed: binary missing');
+    }
+    return originalStartJob(body);
+  };
+
+  // Tick 1: completes turn 1, tries to start turn 2 -> startJob throws -> appends system error message and drops item
+  await tick(baseCtx);
+
+  const getRes = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.equal(getRes.conversation.queue.length, 0);
+  assert.ok(
+    getRes.messages.some(
+      (m: any) => m.role === 'system' && m.text.includes('Process spawn failed')
+    )
+  );
+});
+
+test('chat: [concurrency] withS6State serializes concurrent operations', async () => {
+  const { makeReq, testProj, baseCtx } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: { name: 'ConcurrentBot', platform: 'claude', workdir: testProj },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const convReq = makeReq({ agent_id: agRes.agent.id });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  // Fire tick and chat_send concurrently
+  const p1 = tick(baseCtx);
+  const p2 = feature.routes['chat_send']!.handler(
+    makeReq({ conversation_id: convId, text: 'Concurrent message 1' }),
+    makeReq()
+  );
+  const p3 = agentsFeature.routes['ws_agent_save']!.handler(
+    makeReq({ agent: { id: agRes.agent.id, name: 'ConcurrentBot Renamed' } }),
+    makeReq()
+  );
+
+  const results = await Promise.all([p1, p2, p3]);
+  assert.ok(results[1]);
+  assert.ok(results[2]);
+
+  const getRes = (await feature.routes['chat_get']!.handler(
+    makeReq({}, { conversation_id: convId }),
+    makeReq()
+  )) as any;
+  assert.ok(getRes.ok);
+});

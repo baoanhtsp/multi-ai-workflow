@@ -134,3 +134,36 @@ test('memory: Validation errors for missing project_path, invalid tags or title'
     (err: any) => err instanceof ApiValidationError && err.statusCode === 400
   );
 });
+
+test('memory: [memory] getMemoryContext excludes unpinned entries with score 0', async () => {
+  const { makeReq, testProj } = setupTestContext();
+
+  // 1. Add unpinned entry about databases
+  const addUnpinned = makeReq({
+    project_path: testProj,
+    title: 'Database connection pooling',
+    body: 'Use pg-pool with max 10 connections for PostgreSQL.',
+    tags: ['database', 'postgres'],
+    pinned: false,
+  });
+  await feature.routes['memory_add']!.handler(addUnpinned, addUnpinned);
+
+  // 2. Add pinned entry about style
+  const addPinned = makeReq({
+    project_path: testProj,
+    title: 'Code style guidelines',
+    body: 'Always use strict TypeScript with forward slashes.',
+    tags: ['guidelines'],
+    pinned: true,
+  });
+  await feature.routes['memory_add']!.handler(addPinned, addPinned);
+
+  // 3. Search with unrelated prompt: "quantum mechanics astronomy"
+  // Unpinned database entry will score 0 and must be excluded.
+  // Pinned guidelines entry must be included regardless of score.
+  const searchReq = makeReq({}, { project_path: testProj, prompt: 'quantum mechanics astronomy' });
+  const searchRes = (await feature.routes['memory_context']!.handler(searchReq, searchReq)) as any;
+  assert.equal(searchRes.ok, true);
+  assert.ok(searchRes.text.includes('Code style guidelines'));
+  assert.ok(!searchRes.text.includes('Database connection pooling'));
+});

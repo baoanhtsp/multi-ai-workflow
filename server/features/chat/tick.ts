@@ -16,14 +16,15 @@ import {
   generateMessageId,
 } from '../agents-ws/lib/ids.ts';
 import { parseJobLog } from '../agents-ws/lib/logparse.ts';
-import { getNextAdrId, parseDecisionsMarkdown, renderDecisionsMarkdown, type MemoryEntry } from '../agents-ws/lib/markdown-memory.ts';
+import { parseRoleMarkdown } from '../agents-ws/lib/markdown-roles.ts';
+import { withS6State } from '../agents-ws/lib/mutex.ts';
 import { buildPrompt, type PromptMemberInfo } from '../agents-ws/lib/prompt.ts';
 import { readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent } from '../agents-ws/types.ts';
-import { getMemoryContext } from '../memory/index.ts';
+import type { Handoff, HandoffStatus } from '../handoffs/types.ts';
+import { addMemoryEntry, getMemoryContext } from '../memory/index.ts';
 import type { Team } from '../teams/types.ts';
 import type { Conversation, Message, QueueItem } from './types.ts';
-import type { Handoff } from '../handoffs/types.ts';
 
 export const PLATFORM_WINDOW_TOKENS: Record<string, number> = {
   claude: 200000,
@@ -36,6 +37,11 @@ export const PLATFORM_WINDOW_TOKENS: Record<string, number> = {
 
 export function getWindowTokens(platform: string): number {
   return PLATFORM_WINDOW_TOKENS[platform.toLowerCase()] ?? 128000;
+}
+
+export function newSessionFor(ctx: MawFeatureContext, platform: string): boolean {
+  const regAgent = ctx.registry?.agents?.find((a) => a.id.toLowerCase() === platform.toLowerCase());
+  return Boolean(regAgent?.capabilities?.new_session);
 }
 
 export function formatDuration(sec: number): string {
@@ -119,6 +125,178 @@ export function computeContextMeter(
   return { used_tokens, window_tokens, pct };
 }
 
+// Item 8: Centralized finalizeHandoff for all terminal transitions
+export async function finalizeHandoff(
+  ctx: MawFeatureContext,
+  h: Handoff,
+  status: HandoffStatus,
+  options?: {
+    summary?: string;
+    actual_model?: string;
+    parsed_reply?: string;
+    parsed_cost?: number | null;
+    tokens_in?: number | null;
+    tokens_out?: number | null;
+    note?: string;
+    error?: string;
+  },
+  inMemoryConvsData?: { version: number; conversations: Conversation[] }
+): Promise<void> {
+  const handoffsDir = ctx.paths.featureDataDir('handoffs');
+  const handoffsFile = path.win32.join(handoffsDir, 'handoffs.json');
+  const chatDir = ctx.paths.featureDataDir('chat');
+  const convsFile = path.win32.join(chatDir, 'conversations.json');
+  const agentsDir = ctx.paths.featureDataDir('agents-ws');
+  const agentsFile = path.win32.join(agentsDir, 'agents.json');
+
+  const handoffsData = await readJsonStore<{ version: number; handoffs: Handoff[] }>(handoffsFile, {
+    version: 1,
+    handoffs: [],
+  });
+  const convsData =
+    inMemoryConvsData ??
+    (await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
+      version: 1,
+      conversations: [],
+    }));
+  const agentsData = await readJsonStore<{ version: number; agents: Agent[] }>(agentsFile, {
+    version: 1,
+    agents: [],
+  });
+
+  const target = handoffsData.handoffs.find((item) => item.id === h.id) ?? h;
+
+  target.status = status;
+  target.finished_at = new Date().toISOString();
+  if (target.started_at) {
+    target.duration_sec = Math.max(1, Math.round((Date.now() - new Date(target.started_at).getTime()) / 1000));
+  } else {
+    target.duration_sec = 1;
+  }
+
+  if (options?.actual_model) {
+    target.actual_model = options.actual_model;
+  }
+  if (options?.error) {
+    target.parse_error = options.error;
+  }
+  if (h.result) {
+    target.result = h.result;
+  }
+
+  // Mutate passed object h as well so caller in-memory references stay updated
+  h.status = target.status;
+  h.finished_at = target.finished_at;
+  h.duration_sec = target.duration_sec;
+  h.actual_model = target.actual_model;
+  h.parse_error = target.parse_error;
+  h.result = target.result;
+
+  // Add decisions to project memory if completed (Item 10)
+  if (status === 'completed' && target.result?.decisions && target.result.decisions.length > 0) {
+    const leadAgent = agentsData.agents.find((a) => a.id === target.lead_agent_id);
+    if (leadAgent?.workdir) {
+      for (const dec of target.result.decisions) {
+        try {
+          await addMemoryEntry(leadAgent.workdir, {
+            title: dec.slice(0, 100),
+            body: dec,
+            tags: ['handoff', target.to_role],
+            source: `handoff:${target.id}`,
+            agent: target.platform,
+          });
+        } catch {}
+      }
+    }
+  }
+
+  // Append [Handoff ...] message to Lead conversation
+  const leadConv = convsData.conversations.find((c) => c.id === target.lead_conversation_id);
+  if (leadConv) {
+    leadConv.seq++;
+    const memberAgent = agentsData.agents.find((a) => a.id === target.to);
+    const memberName = memberAgent ? memberAgent.name : target.to_role;
+    const durStr = formatDuration(target.duration_sec ?? 1);
+    const summaryText = (
+      options?.summary ||
+      target.result?.summary ||
+      options?.parsed_reply ||
+      target.parse_error ||
+      ''
+    ).slice(0, 600);
+    const filesCount = target.result?.files_changed?.length ?? 0;
+    const blockersCount = target.result?.blockers?.length ?? 0;
+
+    const handoffMsgText = `[Handoff ${target.id}] ${target.to_role} · ${memberName} (${target.platform}) ${target.status} in ${durStr} — ${summaryText} · files: ${filesCount} · blockers: ${blockersCount}`;
+
+    const handoffMsg: Message = {
+      seq: leadConv.seq,
+      id: generateMessageId(),
+      role: 'handoff',
+      text: handoffMsgText,
+      ts: new Date().toISOString(),
+      platform: target.platform,
+      model: '',
+      effort: '',
+      actual_model: target.actual_model,
+      job_id: target.job_id,
+      status: target.status === 'completed' ? 'done' : 'failed',
+      cost_usd: target.result?.cost ?? options?.parsed_cost ?? null,
+      tokens_in: options?.tokens_in ?? null,
+      tokens_out: options?.tokens_out ?? null,
+      duration_sec: target.duration_sec,
+      attachments: [],
+      handoff_id: target.id,
+      steered: false,
+    };
+
+    appendConversationMessage(chatDir, leadConv.id, handoffMsg);
+    leadConv.updated_at = new Date().toISOString();
+
+    // Check batch completion
+    const batchHandoffs = handoffsData.handoffs.filter((item) => item.batch === target.batch);
+    const allBatchTerminal = batchHandoffs.every(
+      (item) => item.status !== 'started' && item.status !== 'running'
+    );
+
+    if (allBatchTerminal) {
+      const leadAgent = agentsData.agents.find((a) => a.id === target.lead_agent_id);
+      if (leadAgent?.workdir) {
+        const teamFile = path.win32.join(leadAgent.workdir, '.maw', 'team.json');
+        if (isFileSafe(teamFile)) {
+          try {
+            const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
+            if (team.shared?.auto_continue) {
+              const tableRows = batchHandoffs.map(
+                (b) =>
+                  `| ${b.id} | ${b.to_role} | ${b.status} | ${(b.result?.summary || b.parse_error || '').slice(0, 200)} | ${b.result?.files_changed?.length ?? 0} files | ${b.result?.blockers?.length ?? 0} blockers |`
+              );
+              const tableText =
+                '### Member Handoff Results\n' +
+                '| ID | Role | Status | Summary | Files | Blockers |\n|---|---|---|---|---|---|\n' +
+                tableRows.join('\n') +
+                '\n\nContinue the plan, dispatch fixes, or write the final summary.';
+
+              // Item 23: queue with system_generated: true
+              leadConv.queue.push({
+                id: 'q_' + generateMessageId().slice(2, 8),
+                text: tableText,
+                ts: new Date().toISOString(),
+                system_generated: true,
+              });
+              leadConv.updated_at = new Date().toISOString();
+            }
+          } catch {}
+        }
+      }
+    }
+
+    await writeJsonStore(convsFile, convsData);
+  }
+
+  await writeJsonStore(handoffsFile, handoffsData);
+}
+
 let isTicking = false;
 let tickTimer: NodeJS.Timeout | null = null;
 let lastKnownCtx: MawFeatureContext | null = null;
@@ -142,7 +320,10 @@ export async function tick(ctx: MawFeatureContext): Promise<void> {
   }
   isTicking = true;
   try {
-    await runTickCycle(ctx);
+    // Item 1: run entire tick inside withS6State lock
+    await withS6State(async () => {
+      await runTickCycle(ctx);
+    });
   } finally {
     isTicking = false;
   }
@@ -189,7 +370,39 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
     const metaFile = path.win32.join(ctx.paths.jobsDir, `${conv.active_job_id}.json`);
     const logFile = path.win32.join(ctx.paths.jobsDir, `${conv.active_job_id}.log`);
 
+    // Item 11: Missing job meta check (> 10 min)
     if (!isFileSafe(metaFile)) {
+      if (conv.active_started_at && Date.now() - new Date(conv.active_started_at).getTime() > 10 * 60 * 1000) {
+        conv.seq++;
+        const failMsg: Message = {
+          seq: conv.seq,
+          id: generateMessageId(),
+          role: 'assistant',
+          text: 'Job record missing (expired or removed).',
+          ts: new Date().toISOString(),
+          platform: conv.platform,
+          model: conv.model,
+          effort: conv.effort,
+          actual_model: '',
+          job_id: conv.active_job_id,
+          status: 'failed',
+          cost_usd: null,
+          tokens_in: null,
+          tokens_out: null,
+          duration_sec: null,
+          attachments: [],
+          handoff_id: '',
+          steered: false,
+        };
+        appendConversationMessage(chatDir, conv.id, failMsg);
+        conv.last_status = 'failed';
+        conv.last_error = 'job record missing';
+        conv.active_job_id = '';
+        conv.active_kind = '';
+        conv.active_started_at = '';
+        conv.updated_at = new Date().toISOString();
+        convsDirty = true;
+      }
       continue;
     }
 
@@ -215,6 +428,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       }
     }
 
+    // Item 12: Auth error detection only for FAILED jobs
     const parsed = parseJobLog(logText, { isFailed: statusUpper === 'FAILED' });
     const elapsedSec = conv.active_started_at
       ? Math.max(1, Math.round((Date.now() - new Date(conv.active_started_at).getTime()) / 1000))
@@ -275,8 +489,60 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       conv.updated_at = new Date().toISOString();
       convsDirty = true;
 
-      // Check if lead reply contains handoffs
       const agent = agentsData.agents.find((a) => a.id === conv.agent_id);
+
+      // Item 7: Retry policy implementation
+      if (statusUpper === 'FAILED' && agent && agent.retry_policy?.max_attempts) {
+        const attempts = conv.retry_attempts ?? 0;
+        if (attempts < agent.retry_policy.max_attempts) {
+          conv.retry_attempts = attempts + 1;
+          const backoffSec = agent.retry_policy.backoff_sec || 0;
+
+          conv.seq++;
+          const retrySysMsg: Message = {
+            seq: conv.seq,
+            id: generateMessageId(),
+            role: 'system',
+            text: `Thử lại lần ${conv.retry_attempts}`,
+            ts: new Date().toISOString(),
+            platform: conv.platform,
+            model: conv.model,
+            effort: conv.effort,
+            actual_model: '',
+            job_id: '',
+            status: 'done',
+            cost_usd: null,
+            tokens_in: null,
+            tokens_out: null,
+            duration_sec: null,
+            attachments: [],
+            handoff_id: '',
+            steered: false,
+          };
+          appendConversationMessage(chatDir, conv.id, retrySysMsg);
+
+          // Find the failed user message text to re-run
+          let lastUserText = '';
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            if (msgs[i]!.role === 'user') {
+              lastUserText = msgs[i]!.text;
+              break;
+            }
+          }
+
+          if (lastUserText) {
+            conv.queue.push({
+              id: 'q_' + generateMessageId().slice(2, 8),
+              text: lastUserText,
+              ts: new Date(Date.now() + backoffSec * 1000).toISOString(),
+            });
+          }
+        }
+      } else if (statusUpper === 'DONE') {
+        conv.retry_attempts = 0;
+      }
+
+      // Check if lead reply contains handoffs
       if (agent && agent.team_id && statusUpper === 'DONE') {
         const teamFile = path.win32.join(agent.workdir, '.maw', 'team.json');
         if (isFileSafe(teamFile)) {
@@ -288,7 +554,6 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
               if (dispatchRes.ok && dispatchRes.handoffs.length > 0) {
                 const batchId = 'b_' + generateHandoffId().slice(2, 8);
                 for (const item of dispatchRes.handoffs) {
-                  // Find target member agent in team
                   let targetRole = team.roles.find(
                     (r) => r.key === item.to || r.name.toLowerCase() === item.to.toLowerCase() || r.agent_id === item.to
                   );
@@ -338,9 +603,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
                 }
               }
             }
-          } catch {
-            // Ignore team parsing error
-          }
+          } catch {}
         }
       }
     } else if (conv.active_kind === 'compact') {
@@ -349,6 +612,8 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         conv.summary_seq = conv.seq;
         conv.session++;
         conv.resume = null;
+        conv.compact_error = undefined;
+        conv.compact_failed_at = undefined;
 
         conv.seq++;
         const sysMsg: Message = {
@@ -372,6 +637,10 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
           steered: false,
         };
         appendConversationMessage(chatDir, conv.id, sysMsg);
+      } else {
+        // Item 5: record compact failure and back off
+        conv.compact_error = parsed.reply || 'Compaction failed';
+        conv.compact_failed_at = new Date().toISOString();
       }
 
       conv.active_job_id = '';
@@ -399,7 +668,13 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
 
     const metaFile = path.win32.join(ctx.paths.jobsDir, `${h.job_id}.json`);
     const logFile = path.win32.join(ctx.paths.jobsDir, `${h.job_id}.log`);
+
+    // Item 11: Missing job meta for running handoff
     if (!isFileSafe(metaFile)) {
+      if (h.started_at && Date.now() - new Date(h.started_at).getTime() > 10 * 60 * 1000) {
+        await finalizeHandoff(ctx, h, 'failed', { error: 'Job record missing' }, convsData);
+        handoffsDirty = true;
+      }
       continue;
     }
 
@@ -426,13 +701,6 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
     }
 
     const parsed = parseJobLog(logText, { isFailed: statusUpper === 'FAILED' });
-    h.finished_at = new Date().toISOString();
-    h.duration_sec = h.started_at
-      ? Math.max(1, Math.round((Date.now() - new Date(h.started_at).getTime()) / 1000))
-      : 1;
-    h.actual_model = parsed.actual_model;
-
-    // Check if runner isolated worktree/branch
     const metaAny = meta as unknown as Record<string, unknown>;
     if (typeof metaAny.worktree === 'string' && metaAny.worktree) {
       h.isolated = true;
@@ -441,24 +709,43 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
     }
 
     if (statusUpper === 'CANCELLED') {
-      h.status = 'cancelled';
+      await finalizeHandoff(ctx, h, 'cancelled', {
+        actual_model: parsed.actual_model,
+        parsed_reply: parsed.reply,
+        parsed_cost: parsed.cost_usd,
+        tokens_in: parsed.tokens_in,
+        tokens_out: parsed.tokens_out,
+      }, convsData);
     } else if (statusUpper === 'FAILED' && !logText.includes('```json')) {
-      h.status = 'failed';
+      await finalizeHandoff(ctx, h, 'failed', {
+        actual_model: parsed.actual_model,
+        parsed_reply: parsed.reply,
+        parsed_cost: parsed.cost_usd,
+        tokens_in: parsed.tokens_in,
+        tokens_out: parsed.tokens_out,
+        error: 'Job failed without json block',
+      }, convsData);
     } else {
       const parsedRes = parseStructuredHandoffResult(parsed.reply, parsed.cost_usd);
       if (!parsedRes.ok) {
-        h.status = 'needs_review';
-        h.parse_error = parsedRes.error;
         h.result = parsedRes.fallbackResult;
+        await finalizeHandoff(ctx, h, 'needs_review', {
+          actual_model: parsed.actual_model,
+          parsed_reply: parsed.reply,
+          parsed_cost: parsed.cost_usd,
+          tokens_in: parsed.tokens_in,
+          tokens_out: parsed.tokens_out,
+          error: parsedRes.error,
+        }, convsData);
       } else {
         h.result = parsedRes.result;
 
         // Write scope check when isolated
+        let finalStatus: HandoffStatus = h.result.status;
         if (h.isolated && h.worktree) {
           const changedFiles = await getWorktreeChangedFiles(h.worktree);
           const unionFiles = new Set([...changedFiles, ...h.result.files_changed]);
 
-          // Look up write_scope from team.json
           const targetAgent = agentsData.agents.find((a) => a.id === h.to);
           let writeScope: string[] = ['**'];
           if (targetAgent?.workdir) {
@@ -479,7 +766,6 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
             }
           }
 
-          // Spec guard check
           try {
             const guardRes = await handleSpecGuard(
               { project_path: h.worktree, owner: h.platform },
@@ -497,134 +783,25 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
                 }
               }
             }
-          } catch {
-            // Spec guard best-effort
-          }
+          } catch {}
 
           if (violations.length > 0) {
             h.scope_violations = violations;
-            h.status = 'needs_review';
-          } else {
-            h.status = h.result.status;
+            finalStatus = 'needs_review';
           }
-        } else {
-          h.status = h.result.status;
         }
 
-        // Add decisions to project memory if completed
-        if (h.status === 'completed' && h.result.decisions && h.result.decisions.length > 0) {
-          const leadAgent = agentsData.agents.find((a) => a.id === h.lead_agent_id);
-          if (leadAgent?.workdir) {
-            const memDir = path.win32.join(leadAgent.workdir, '.maw', 'memory');
-            const memFile = path.win32.join(memDir, 'decisions.md');
-            try {
-              let parsedMem = { preamble: '# Project decisions\n', entries: [] as MemoryEntry[] };
-              if (isFileSafe(memFile)) {
-                const rawMem = fs.readFileSync(memFile, 'utf8');
-                parsedMem = parseDecisionsMarkdown(rawMem);
-              }
-              for (const dec of h.result.decisions) {
-                const nextId = getNextAdrId(parsedMem.entries);
-                parsedMem.entries.push({
-                  id: nextId,
-                  title: dec.slice(0, 100),
-                  body: dec,
-                  date: new Date().toISOString().slice(0, 10),
-                  source: `handoff:${h.id}`,
-                  agent: h.platform,
-                  pinned: false,
-                  tags: ['handoff', h.to_role],
-                });
-              }
-              const rendered = renderDecisionsMarkdown(parsedMem.preamble, parsedMem.entries);
-              if (!fs.existsSync(memDir)) {
-                fs.mkdirSync(memDir, { recursive: true });
-              }
-              fs.writeFileSync(memFile, rendered, 'utf8');
-            } catch {}
-          }
-        }
+        await finalizeHandoff(ctx, h, finalStatus, {
+          actual_model: parsed.actual_model,
+          parsed_reply: parsed.reply,
+          parsed_cost: parsed.cost_usd,
+          tokens_in: parsed.tokens_in,
+          tokens_out: parsed.tokens_out,
+        }, convsData);
       }
     }
 
     handoffsDirty = true;
-
-    // Terminal status: append handoff message to Lead conversation
-    const leadConv = convsData.conversations.find((c) => c.id === h.lead_conversation_id);
-    if (leadConv) {
-      leadConv.seq++;
-      const memberAgent = agentsData.agents.find((a) => a.id === h.to);
-      const memberName = memberAgent ? memberAgent.name : h.to_role;
-      const durStr = formatDuration(h.duration_sec ?? 1);
-      const summaryText = (h.result?.summary || parsed.reply).slice(0, 600);
-      const filesCount = h.result?.files_changed?.length ?? 0;
-      const blockersCount = h.result?.blockers?.length ?? 0;
-
-      const handoffMsgText = `[Handoff ${h.id}] ${h.to_role} · ${memberName} (${h.platform}) ${h.status} in ${durStr} — ${summaryText} · files: ${filesCount} · blockers: ${blockersCount}`;
-
-      const handoffMsg: Message = {
-        seq: leadConv.seq,
-        id: generateMessageId(),
-        role: 'handoff',
-        text: handoffMsgText,
-        ts: new Date().toISOString(),
-        platform: h.platform,
-        model: '',
-        effort: '',
-        actual_model: h.actual_model,
-        job_id: h.job_id,
-        status: h.status === 'completed' ? 'done' : 'failed',
-        cost_usd: h.result?.cost ?? null,
-        tokens_in: parsed.tokens_in,
-        tokens_out: parsed.tokens_out,
-        duration_sec: h.duration_sec,
-        attachments: [],
-        handoff_id: h.id,
-        steered: false,
-      };
-
-      appendConversationMessage(chatDir, leadConv.id, handoffMsg);
-      leadConv.updated_at = new Date().toISOString();
-      convsDirty = true;
-
-      // Check if all handoffs of batch are terminal
-      const batchHandoffs = handoffsData.handoffs.filter((item) => item.batch === h.batch);
-      const allBatchTerminal = batchHandoffs.every(
-        (item) => item.status !== 'started' && item.status !== 'running'
-      );
-
-      if (allBatchTerminal) {
-        const leadAgent = agentsData.agents.find((a) => a.id === h.lead_agent_id);
-        if (leadAgent?.workdir) {
-          const teamFile = path.win32.join(leadAgent.workdir, '.maw', 'team.json');
-          if (isFileSafe(teamFile)) {
-            try {
-              const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
-              if (team.shared?.auto_continue) {
-                // Build compact table for batch summary
-                const tableRows = batchHandoffs.map(
-                  (b) =>
-                    `| ${b.id} | ${b.to_role} | ${b.status} | ${(b.result?.summary || '').slice(0, 200)} | ${b.result?.files_changed?.length ?? 0} files | ${b.result?.blockers?.length ?? 0} blockers |`
-                );
-                const tableText =
-                  '### Member Handoff Results\n' +
-                  '| ID | Role | Status | Summary | Files | Blockers |\n|---|---|---|---|---|---|\n' +
-                  tableRows.join('\n') +
-                  '\n\nContinue the plan, dispatch fixes, or write the final summary.';
-
-                leadConv.queue.push({
-                  id: 'q_' + generateMessageId().slice(2, 8),
-                  text: tableText,
-                  ts: new Date().toISOString(),
-                });
-                leadConv.updated_at = new Date().toISOString();
-                convsDirty = true;
-              }
-            } catch {}
-          }
-        }
-      }
-    }
   }
 
   // 3. Dispatch waiting handoffs (started -> running) within max_parallel
@@ -641,13 +818,14 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
     const leadAgent = agentsData.agents.find((a) => a.team_id === teamId);
     let maxParallel = 3;
     let isolate = true;
+    let teamObj: Team | null = null;
     if (leadAgent?.workdir) {
       const teamFile = path.win32.join(leadAgent.workdir, '.maw', 'team.json');
       if (isFileSafe(teamFile)) {
         try {
-          const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
-          maxParallel = team.shared?.max_parallel || 3;
-          isolate = team.shared?.isolate !== false;
+          teamObj = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
+          maxParallel = teamObj.shared?.max_parallel || 3;
+          isolate = teamObj.shared?.isolate !== false;
         } catch {}
       }
     }
@@ -661,14 +839,13 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       }
 
       const memberAgent = agentsData.agents.find((a) => a.id === h.to);
+      // Item 8: start failures finalize handoff immediately
       if (!memberAgent) {
-        h.status = 'failed';
-        h.parse_error = `Member agent '${h.to}' not found.`;
+        await finalizeHandoff(ctx, h, 'failed', { error: `Member agent '${h.to}' not found.` });
         handoffsDirty = true;
         continue;
       }
 
-      // Member conversation setup
       let memberConv: Conversation | undefined;
       if (h.member_conversation_id) {
         memberConv = convsData.conversations.find((c) => c.id === h.member_conversation_id);
@@ -707,7 +884,23 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
 
       h.member_conversation_id = memberConv.id;
 
-      // Build member task prompt
+      // Item 9: Member brief includes role profile sections and memory context
+      let roleSections: any = undefined;
+      if (memberAgent.workdir) {
+        const roleFile = path.win32.join(memberAgent.workdir, '.maw', 'roles', `${h.to_role}.md`);
+        if (isFileSafe(roleFile)) {
+          try {
+            roleSections = parseRoleMarkdown(fs.readFileSync(roleFile, 'utf8')).sections;
+          } catch {}
+        }
+      }
+
+      let memContext = '';
+      try {
+        const memRes = await getMemoryContext(memberAgent.workdir, h.task, 2500);
+        memContext = memRes.text;
+      } catch {}
+
       const promptLines: string[] = [
         `# Task for ${h.to_role}`,
         `Task: ${h.task}`,
@@ -735,11 +928,16 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
           name: memberAgent.name,
           persona: memberAgent.persona,
           team_role: memberAgent.team_role,
+          role_sections: roleSections,
         },
+        memoryContext: memContext,
         newMessageText: promptLines.join('\n'),
       });
 
       const execRole = memberAgent.role || 'backend';
+      // Item 4: new_session true for new_session-capable platform (antigravity)
+      const newSession = newSessionFor(ctx, memberAgent.platform);
+
       try {
         const jobRes = await ctx.startJob({
           mode: 'task',
@@ -747,7 +945,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
           role: execRole,
           model: memberAgent.model || undefined,
           effort: memberAgent.effort || undefined,
-          new_session: false,
+          new_session: newSession,
           project_path: memberAgent.workdir,
           prompt: memberPrompt,
           isolate,
@@ -759,8 +957,10 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         runningCount++;
         handoffsDirty = true;
       } catch (err: unknown) {
-        h.status = 'failed';
-        h.parse_error = 'Failed to start job: ' + (err instanceof Error ? err.message : String(err));
+        // Item 8: start error routes through finalizeHandoff
+        await finalizeHandoff(ctx, h, 'failed', {
+          error: 'Failed to start job: ' + (err instanceof Error ? err.message : String(err)),
+        }, convsData);
         handoffsDirty = true;
       }
     }
@@ -772,7 +972,13 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       continue;
     }
 
-    const nextItem = conv.queue.shift()!;
+    // Check backoff if item has delayed ts
+    const nextItem = conv.queue[0]!;
+    if (nextItem.ts && new Date(nextItem.ts).getTime() > Date.now()) {
+      continue;
+    }
+
+    conv.queue.shift();
     convsDirty = true;
 
     const agent = agentsData.agents.find((a) => a.id === conv.agent_id);
@@ -780,7 +986,39 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       continue;
     }
 
-    await startTurnJob(ctx, conv, nextItem, agent, chatDir);
+    // Item 6: Wrap queue start per conversation: drop item on error and record system message
+    try {
+      await startTurnJob(ctx, conv, nextItem, agent, chatDir);
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      conv.seq++;
+      const sysMsg: Message = {
+        seq: conv.seq,
+        id: generateMessageId(),
+        role: 'system',
+        text: `Lỗi khởi chạy tác vụ: ${errMsg}`,
+        ts: new Date().toISOString(),
+        platform: conv.platform || agent.platform,
+        model: conv.model,
+        effort: conv.effort,
+        actual_model: '',
+        job_id: '',
+        status: 'failed',
+        cost_usd: null,
+        tokens_in: null,
+        tokens_out: null,
+        duration_sec: null,
+        attachments: [],
+        handoff_id: '',
+        steered: false,
+      };
+      appendConversationMessage(chatDir, conv.id, sysMsg);
+      conv.last_status = 'failed';
+      conv.last_error = errMsg;
+      conv.active_job_id = '';
+      conv.active_kind = '';
+      conv.updated_at = new Date().toISOString();
+    }
   }
 
   // 5. Check compaction trigger for idle conversations
@@ -789,7 +1027,24 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       continue;
     }
 
-    if (conv.context.pct >= compactThreshold) {
+    // Item 5: Backoff 10 minutes on compaction failure
+    if (conv.compact_failed_at) {
+      const failedTime = new Date(conv.compact_failed_at).getTime();
+      if (Date.now() - failedTime < 10 * 60 * 1000) {
+        continue;
+      }
+    }
+
+    const msgs = readConversationMessages(chatDir, conv.id);
+    const msgsAfterSummary = msgs.filter((m) => m.seq > conv.summary_seq);
+    const replayChars = msgsAfterSummary.reduce((sum, m) => sum + (m.text || '').length, 0) + (conv.summary || '').length;
+
+    // Trigger A: pct >= compactThreshold
+    // Trigger B: messages after summary_seq no longer fit replay budget (> 13 000 chars)
+    const pctTrigger = conv.context.pct >= compactThreshold;
+    const replayOverflowTrigger = replayChars > 13000;
+
+    if (pctTrigger || replayOverflowTrigger) {
       await startCompactionJob(ctx, conv, chatDir, agentsData.agents);
       convsDirty = true;
     }
@@ -810,34 +1065,58 @@ export async function startTurnJob(
   agent: Agent,
   chatDir: string
 ): Promise<void> {
-  const platform = item.platform || conv.platform || agent.platform;
-  const model = item.model || conv.model || agent.model;
-  const effort = item.effort || conv.effort || agent.effort;
+  const targetPlatform = item.platform || conv.platform || agent.platform;
+  const targetModel = item.model || conv.model || agent.model;
+  const targetEffort = item.effort || conv.effort || agent.effort;
 
   const msgs = readConversationMessages(chatDir, conv.id);
 
-  conv.seq++;
-  const userMsg: Message = {
-    seq: conv.seq,
-    id: generateMessageId(),
-    role: 'user',
-    text: item.text,
-    ts: new Date().toISOString(),
-    platform,
-    model,
-    effort,
-    actual_model: '',
-    job_id: '',
-    status: 'running',
-    cost_usd: null,
-    tokens_in: null,
-    tokens_out: null,
-    duration_sec: null,
-    attachments: (item.attachments ?? []).map((a) => ({ name: a.name, path: a.path ?? '' })),
-    handoff_id: '',
-    steered: false,
-  };
-  appendConversationMessage(chatDir, conv.id, userMsg);
+  // Item 16: Platform switch applies when turn starts
+  if (conv.platform && conv.platform.toLowerCase() !== targetPlatform.toLowerCase()) {
+    const oldPlatform = conv.platform;
+    conv.session++;
+    conv.platform = targetPlatform;
+    conv.resume = null;
+
+    if (!conv.summary && msgs.length > 0) {
+      const last8 = msgs.slice(-8).map((m) => `${m.role}: ${m.text.slice(0, 300)}`);
+      conv.summary = last8.join('\n');
+      conv.summary_seq = conv.seq;
+    }
+
+    conv.seq++;
+    const sysMsg: Message = {
+      seq: conv.seq,
+      id: generateMessageId(),
+      role: 'system',
+      text: `Đổi nền tảng ${oldPlatform} → ${targetPlatform} (phiên mới, kèm tóm tắt)`,
+      ts: new Date().toISOString(),
+      platform: targetPlatform,
+      model: targetModel,
+      effort: targetEffort,
+      actual_model: '',
+      job_id: '',
+      status: 'done',
+      cost_usd: null,
+      tokens_in: null,
+      tokens_out: null,
+      duration_sec: null,
+      attachments: [],
+      handoff_id: '',
+      steered: false,
+    };
+    appendConversationMessage(chatDir, conv.id, sysMsg);
+  }
+
+  // Item 3: history = every message after summary_seq
+  const relevantHistory = msgs
+    .filter((m) => m.seq > conv.summary_seq)
+    .map((m) => ({
+      seq: m.seq,
+      role: m.role,
+      text: m.text,
+      handoff_id: m.handoff_id,
+    }));
 
   // Read memory context
   let memContext = '';
@@ -846,12 +1125,40 @@ export async function startTurnJob(
     memContext = memRes.text;
   } catch {}
 
-  const recentHistory = msgs.slice(-10).map((m) => ({
-    seq: m.seq,
-    role: m.role,
-    text: m.text,
-    handoff_id: m.handoff_id,
-  }));
+  // Item 9: may_delegate from team role + teamMembers list
+  let mayDelegate = false;
+  let teamMembers: PromptMemberInfo[] = [];
+
+  if (agent.team_id && agent.workdir) {
+    const teamFile = path.win32.join(agent.workdir, '.maw', 'team.json');
+    if (isFileSafe(teamFile)) {
+      try {
+        const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
+        const myRole = team.roles.find((r) => r.key === agent.team_role || r.agent_id === agent.id);
+        mayDelegate = Boolean(myRole?.may_delegate);
+
+        if (mayDelegate) {
+          for (const r of team.roles) {
+            if (r.key === myRole?.key || !r.enabled) continue;
+            let respOneLiner = '';
+            const rFile = path.win32.join(agent.workdir, '.maw', 'roles', `${r.key}.md`);
+            if (isFileSafe(rFile)) {
+              try {
+                const parsedR = parseRoleMarkdown(fs.readFileSync(rFile, 'utf8'));
+                respOneLiner = parsedR.sections.responsibility.slice(0, 150).replace(/\r?\n/g, ' ');
+              } catch {}
+            }
+            teamMembers.push({
+              key: r.key,
+              name: r.name,
+              platform: r.override?.platform || team.shared.platform || 'codex',
+              responsibility: respOneLiner,
+            });
+          }
+        }
+      } catch {}
+    }
+  }
 
   const promptText = buildPrompt({
     agent: {
@@ -859,47 +1166,95 @@ export async function startTurnJob(
       persona: agent.persona,
       team_role: agent.team_role,
       hooks: agent.hooks,
-      may_delegate: Boolean(agent.team_id),
+      may_delegate: mayDelegate,
     },
     newMessageText: item.text,
     summary: conv.summary,
     session: conv.session,
     memoryContext: memContext,
-    recentMessages: recentHistory,
+    recentMessages: relevantHistory,
+    teamMembers,
     attachmentLines: (item.attachments ?? []).map((a) => `Attached image: ${a.path || a.name}`),
   });
 
-  const registryAgent = ctx.registry?.agents?.find((a) => a.id === platform);
-  const newSession = Boolean(registryAgent?.capabilities?.new_session);
+  // Item 4: new_session helper
+  const newSession = newSessionFor(ctx, targetPlatform);
 
-  const jobRes = await ctx.startJob({
-    mode: 'task',
-    agent: platform,
-    role: agent.role || 'backend',
-    model: model || undefined,
-    effort: effort || undefined,
-    new_session: newSession,
-    project_path: agent.workdir,
-    prompt: promptText,
-    isolate: false,
-  });
+  let jobRes: Record<string, unknown>;
+  try {
+    jobRes = await ctx.startJob({
+      mode: 'task',
+      agent: targetPlatform,
+      role: agent.role || 'backend',
+      model: targetModel || undefined,
+      effort: targetEffort || undefined,
+      new_session: newSession,
+      project_path: agent.workdir,
+      prompt: promptText,
+      isolate: false,
+    });
+  } catch (err: unknown) {
+    // If startJob fails, message status becomes failed
+    conv.seq++;
+    const failedUserMsg: Message = {
+      seq: conv.seq,
+      id: generateMessageId(),
+      role: 'user',
+      text: item.text,
+      ts: new Date().toISOString(),
+      platform: targetPlatform,
+      model: targetModel,
+      effort: targetEffort,
+      actual_model: '',
+      job_id: '',
+      status: 'failed',
+      cost_usd: null,
+      tokens_in: null,
+      tokens_out: null,
+      duration_sec: null,
+      attachments: (item.attachments ?? []).map((a) => ({ name: a.name, path: a.path ?? '' })),
+      handoff_id: '',
+      steered: false,
+      system_generated: Boolean(item.system_generated),
+    };
+    appendConversationMessage(chatDir, conv.id, failedUserMsg);
+    throw err;
+  }
 
   const jobId = String(jobRes.job_id ?? '');
-  userMsg.job_id = jobId;
+
+  // Item 2: User message becomes 'done' once job has started
+  conv.seq++;
+  const userMsg: Message = {
+    seq: conv.seq,
+    id: generateMessageId(),
+    role: 'user',
+    text: item.text,
+    ts: new Date().toISOString(),
+    platform: targetPlatform,
+    model: targetModel,
+    effort: targetEffort,
+    actual_model: '',
+    job_id: jobId,
+    status: 'done',
+    cost_usd: null,
+    tokens_in: null,
+    tokens_out: null,
+    duration_sec: null,
+    attachments: (item.attachments ?? []).map((a) => ({ name: a.name, path: a.path ?? '' })),
+    handoff_id: '',
+    steered: false,
+    system_generated: Boolean(item.system_generated),
+  };
+  appendConversationMessage(chatDir, conv.id, userMsg);
+
   conv.active_job_id = jobId;
   conv.active_kind = 'turn';
   conv.active_started_at = new Date().toISOString();
-  conv.platform = platform;
-  conv.model = model;
-  conv.effort = effort;
+  conv.platform = targetPlatform;
+  conv.model = targetModel;
+  conv.effort = targetEffort;
   conv.updated_at = new Date().toISOString();
-
-  // Rewrite last message with job_id
-  const updatedMsgs = readConversationMessages(chatDir, conv.id);
-  if (updatedMsgs.length > 0 && updatedMsgs[updatedMsgs.length - 1]!.id === userMsg.id) {
-    updatedMsgs[updatedMsgs.length - 1]!.job_id = jobId;
-    updateConversationMessages(chatDir, conv.id, updatedMsgs);
-  }
 }
 
 export async function startCompactionJob(
@@ -923,18 +1278,35 @@ export async function startCompactionJob(
     historyLines.push(`${m.role.toUpperCase()}: ${m.text}`);
   }
 
-  const prompt =
-    'Summarize this conversation for your own continuation: goals, decisions, current state, open items, file paths. ≤ 1200 words.\n\n' +
-    historyLines.join('\n');
+  const header =
+    'Summarize this conversation for your own continuation: goals, decisions, current state, open items, file paths. ≤ 1200 words.\n\n';
+  let historyText = historyLines.join('\n');
+
+  // Item 5: cap compaction prompt to 17000 chars (keeping newest)
+  if (header.length + historyText.length > 17000) {
+    while (relevantMsgs.length > 1 && header.length + historyText.length > 17000) {
+      relevantMsgs.shift(); // drop oldest
+      const trimmedLines = [
+        conv.summary ? `Previous summary:\n${conv.summary}\n` : '',
+        'Conversation history:',
+        ...relevantMsgs.map((m) => `${m.role.toUpperCase()}: ${m.text}`),
+      ];
+      historyText = trimmedLines.join('\n');
+    }
+  }
+
+  const prompt = header + historyText;
+  const platform = conv.platform || agent.platform;
+  const newSession = newSessionFor(ctx, platform);
 
   try {
     const jobRes = await ctx.startJob({
       mode: 'task',
-      agent: conv.platform || agent.platform,
+      agent: platform,
       role: agent.role || 'backend',
       model: conv.model || undefined,
       effort: conv.effort || undefined,
-      new_session: false,
+      new_session: newSession,
       project_path: agent.workdir,
       prompt,
       isolate: false,
@@ -944,7 +1316,15 @@ export async function startCompactionJob(
     conv.active_kind = 'compact';
     conv.active_started_at = new Date().toISOString();
     conv.updated_at = new Date().toISOString();
-  } catch {
-    // Ignore compaction start error
+    conv.compact_error = undefined;
+    conv.compact_failed_at = undefined;
+  } catch (err: unknown) {
+    // Item 5: record compact_error and back off
+    conv.compact_error = err instanceof Error ? err.message : String(err);
+    conv.compact_failed_at = new Date().toISOString();
+    conv.active_job_id = '';
+    conv.active_kind = '';
+    conv.active_started_at = '';
+    conv.updated_at = new Date().toISOString();
   }
 }

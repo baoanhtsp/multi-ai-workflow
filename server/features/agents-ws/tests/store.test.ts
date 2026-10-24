@@ -165,3 +165,62 @@ test('store: Validation errors for bad platform, invalid workdir and denied env'
     (err: any) => err instanceof ApiValidationError && err.statusCode === 400
   );
 });
+
+test('store: [partial update] partial agent and group updates preserve existing fields', async () => {
+  const { makeReq, testProj } = setupTestContext();
+
+  // Create an initial group
+  const grpReq = makeReq({
+    group: {
+      name: 'Designers',
+      order: 10,
+      collapsed: false,
+    },
+  });
+  const grpRes = (await feature.routes['ws_group_save']!.handler(grpReq, grpReq)) as any;
+  const groupId = grpRes.group.id;
+  assert.equal(grpRes.group.collapsed, false);
+  assert.equal(grpRes.group.name, 'Designers');
+
+  // Partial update on group: only pass id and collapsed: true
+  const partGrpReq = makeReq({
+    group: {
+      id: groupId,
+      collapsed: true,
+    },
+  });
+  const partGrpRes = (await feature.routes['ws_group_save']!.handler(partGrpReq, partGrpReq)) as any;
+  assert.equal(partGrpRes.group.collapsed, true);
+  assert.equal(partGrpRes.group.name, 'Designers'); // Preserved!
+  assert.equal(partGrpRes.group.order, 10); // Preserved!
+
+  // Create an initial agent
+  const agReq = makeReq({
+    agent: {
+      name: 'Full Agent',
+      platform: 'codex',
+      model: 'gpt-6-sol',
+      effort: 'medium',
+      workdir: testProj,
+      bookmark: false,
+    },
+  });
+  const agRes = (await feature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const agentId = agRes.agent.id;
+  assert.equal(agRes.agent.bookmark, false);
+  assert.equal(agRes.agent.name, 'Full Agent');
+  assert.equal(agRes.agent.platform, 'codex');
+
+  // Partial update on agent: only pass id and bookmark: true
+  const partAgReq = makeReq({
+    agent: {
+      id: agentId,
+      bookmark: true,
+    },
+  });
+  const partAgRes = (await feature.routes['ws_agent_save']!.handler(partAgReq, partAgReq)) as any;
+  assert.equal(partAgRes.agent.bookmark, true);
+  assert.equal(partAgRes.agent.name, 'Full Agent'); // Preserved!
+  assert.equal(partAgRes.agent.platform, 'codex'); // Preserved!
+  assert.equal(partAgRes.agent.workdir, testProj); // Preserved!
+});

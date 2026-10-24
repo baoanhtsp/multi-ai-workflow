@@ -52,6 +52,7 @@ export interface LiveAgent extends Agent {
   active_conversation_id: string;
   queue_len: number;
   last_activity: string;
+  last_actual_model: string;
   git: AgentGitStatus;
 }
 

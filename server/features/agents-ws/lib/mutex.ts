@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 class AsyncMutex {
   private queue: Array<() => void> = [];
   private locked = false;
@@ -24,6 +26,8 @@ class AsyncMutex {
 }
 
 const mutexMap = new Map<string, AsyncMutex>();
+const s6StateMutex = new AsyncMutex();
+const s6StateStorage = new AsyncLocalStorage<boolean>();
 
 export function getFileMutex(key: string): AsyncMutex {
   const norm = key.replace(/\//g, '\\').toLowerCase();
@@ -40,6 +44,18 @@ export async function withFileLock<T>(filePath: string, fn: () => Promise<T>): P
   const release = await mutex.acquire();
   try {
     return await fn();
+  } finally {
+    release();
+  }
+}
+
+export async function withS6State<T>(fn: () => Promise<T>): Promise<T> {
+  if (s6StateStorage.getStore()) {
+    return await fn();
+  }
+  const release = await s6StateMutex.acquire();
+  try {
+    return await s6StateStorage.run(true, fn);
   } finally {
     release();
   }

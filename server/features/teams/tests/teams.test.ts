@@ -180,3 +180,53 @@ test('teams: Role profiles library CRUD', async () => {
   const delRes = (await feature.routes['team_profile_delete']!.handler(delReq, delReq)) as any;
   assert.equal(delRes.ok, true);
 });
+
+test('teams: [team validation] rejects bad shared.platform, override.platform, and override.workdir with 400', async () => {
+  const { makeReq, testProj } = setupTestContext();
+
+  // 1. Invalid shared.platform
+  await assert.rejects(
+    async () => {
+      const badTeam = {
+        ...BUILTIN_FULL_TEMPLATE.team,
+        shared: {
+          ...BUILTIN_FULL_TEMPLATE.team.shared,
+          platform: 'unknown-platform-xyz',
+        },
+      };
+      const req = makeReq({ project_path: testProj, team: badTeam, roles_md: {} });
+      await feature.routes['team_save']!.handler(req, req);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+
+  // 2. Invalid override.platform on a role
+  await assert.rejects(
+    async () => {
+      const badTeam = {
+        ...BUILTIN_FULL_TEMPLATE.team,
+        roles: BUILTIN_FULL_TEMPLATE.team.roles.map((r) =>
+          r.key === 'worker' ? { ...r, override: { platform: 'fake-platform' } } : r
+        ),
+      };
+      const req = makeReq({ project_path: testProj, team: badTeam, roles_md: {} });
+      await feature.routes['team_save']!.handler(req, req);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+
+  // 3. Invalid override.workdir outside project root
+  await assert.rejects(
+    async () => {
+      const badTeam = {
+        ...BUILTIN_FULL_TEMPLATE.team,
+        roles: BUILTIN_FULL_TEMPLATE.team.roles.map((r) =>
+          r.key === 'worker' ? { ...r, override: { workdir: 'C:\\Windows\\System32' } } : r
+        ),
+      };
+      const req = makeReq({ project_path: testProj, team: badTeam, roles_md: {} });
+      await feature.routes['team_save']!.handler(req, req);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+});

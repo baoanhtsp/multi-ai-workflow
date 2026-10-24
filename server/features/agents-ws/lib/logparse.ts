@@ -20,8 +20,9 @@ export function parseJobLog(
   logText: string,
   options?: { isFailed?: boolean }
 ): ParsedJobLog {
-  const isFailed = Boolean(options?.isFailed);
   const raw = String(logText ?? '').replace(/^\uFEFF/, '');
+  const hasFailureMarker = /exit_code=[1-9]\d*|\[JOB_FAILED\]/i.test(raw);
+  const isFailed = options?.isFailed ?? hasFailureMarker;
   const allLines = raw.split(/\r?\n/);
 
   let actual_model = '';
@@ -31,11 +32,13 @@ export function parseJobLog(
   let tokens_out: number | null = null;
   let auth_error = false;
 
-  // Check auth error across full raw log
-  for (const pattern of AUTH_ERROR_PATTERNS) {
-    if (pattern.test(raw)) {
-      auth_error = true;
-      break;
+  // Check auth error only for failed jobs (Item 12)
+  if (isFailed) {
+    for (const pattern of AUTH_ERROR_PATTERNS) {
+      if (pattern.test(raw)) {
+        auth_error = true;
+        break;
+      }
     }
   }
 
