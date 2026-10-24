@@ -106,7 +106,7 @@
     if (!g) return '';
     const v = Array.isArray(g.violations) ? g.violations : [];
     const rows = v.map(x => `<li><span class="s1-mono">${esc(typeof x === 'string' ? x : (x.path || x.file || JSON.stringify(x)))}</span>${x && typeof x === 'object' && (x.reason || x.message) ? ` — ${esc(x.reason || x.message)}` : ''}</li>`).join('');
-    return (g.error ? `<pre class="s1-out">${esc(String(g.error).slice(-4000))}</pre>` : '') + (rows ? `<ul class="s1-filelist">${rows}</ul>` : '') + (g.output ? `<pre class="s1-out">${esc(String(g.output).slice(-4000))}</pre>` : '');
+    return (g.reason ? `<div class="s1-warn">${esc(String(g.reason))}</div>` : '') + (g.error ? `<pre class="s1-out">${esc(String(g.error).slice(-4000))}</pre>` : '') + (rows ? `<ul class="s1-filelist">${rows}</ul>` : '') + (g.output ? `<pre class="s1-out">${esc(String(g.output).slice(-4000))}</pre>` : '');
   }
 
   // ---------- state ----------
