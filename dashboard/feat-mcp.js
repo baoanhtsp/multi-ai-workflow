@@ -219,7 +219,8 @@ args = ${esc(JSON.stringify(d.args || []))}${url ? `\nenv = { MAW_URL = ${esc(JS
         else if (b.hasAttribute('data-new')) openForm('new');
         else if (b.hasAttribute('data-register')) { const d = cfg?.dashboard_server; if (d) openForm('new', { name: 'maw', transport: 'stdio', command: d.command, args: d.args || [], env: d.env || {} }); }
         else if (b.dataset.edit) { const s = findServer(pl, name); if (s) openForm('edit', s, [pl]); }
-        else if (b.dataset.all) { const s = findServer(pl, name); if (s) previewAndApply({ set: [s] }, writable()); }
+        // The server copies the source entry unmasked (copy_from); the UI only ever holds masked env values.
+        else if (b.dataset.all) { const targets = writable().filter(p => p !== pl); if (findServer(pl, name) && targets.length) previewAndApply({ copy_from: { platform: pl, name } }, targets); }
         else if (b.dataset.rm) previewAndApply({ remove: [name] }, [pl], name);
         else if (b.dataset.restore) {
           if (!confirm(t('s3mRestoreAsk', { platform: PLAT_LABEL[pl] || pl, backup: name }))) return;
