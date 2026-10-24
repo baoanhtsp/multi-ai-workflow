@@ -81,12 +81,34 @@
 
   /* top bar */
   .topbar { position: sticky; top: 0; z-index: 20; background: var(--surface); border-bottom: 1px solid var(--border); }
-  .topbar .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; min-height: 56px; padding-top: 8px; padding-bottom: 8px; }
-  .brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
-  .brand h1 { font-size: 15px; }
-  .brand span { font-size: 12px; color: var(--muted); }
-  .prefs { display: flex; gap: 6px; }
-  @media (max-width: 1500px) { .brand span { display: none; } }
+  /* Header: brand | project | (space) | tools. Narrow screens move the project picker to its own row. */
+  .topbar .wrap {
+    display: grid; grid-template-columns: auto minmax(0, 340px) minmax(0, 1fr) auto; grid-template-areas: "brand proj . tools";
+    align-items: center; gap: 10px 18px; min-height: 56px; padding-top: 10px; padding-bottom: 10px;
+  }
+  .brand { grid-area: brand; min-width: 0; }
+  .brand h1 { font-size: 15px; white-space: nowrap; }
+  .proj-pick { grid-area: proj; }
+  .tools { grid-area: tools; display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+  .tools .sep { width: 1px; height: 20px; background: var(--border); margin: 0 2px; flex: none; }
+  .tools .pill { max-width: 280px; }
+  .btn-group { display: inline-flex; flex: none; }
+  .btn-group > .btn { border-radius: 0; }
+  .btn-group > .btn:first-child { border-radius: 6px 0 0 6px; }
+  .btn-group > .btn:last-child { border-radius: 0 6px 6px 0; margin-left: -1px; }
+  .btn-toggle { gap: 6px; color: var(--muted); }
+  .btn-toggle:has(input:checked) { color: var(--text); }
+  .btn-toggle input { width: 13px; height: 13px; }
+  .prefs { display: flex; gap: 6px; flex: none; }
+  @media (max-width: 1180px) {
+    .proj-pop { width: 100%; max-width: none; }
+    .topbar .wrap { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "brand tools" "proj proj"; }
+  }
+  @media (max-width: 640px) {
+    .topbar .wrap { grid-template-columns: minmax(0, 1fr); grid-template-areas: "brand" "tools" "proj"; }
+    .tools { justify-content: flex-start; flex-wrap: wrap; }
+    .tools .sep { display: none; }
+  }
   main.wrap { padding-top: 22px; padding-bottom: 40px; }
   main > section + section { margin-top: 20px; }
 
@@ -210,7 +232,32 @@
   .g-work { grid-template-columns: minmax(0, 1.75fr) minmax(320px, 1fr); gap: 20px; align-items: start; }
   .stack-lg > * + * { margin-top: 20px; }
   .proj-pick { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .proj-pick select { width: 260px; max-width: 100%; }
+  .proj-anchor { position: relative; flex: 1; min-width: 0; }
+  .proj-btn { display: inline-flex; align-items: center; gap: 8px; width: 100%; min-width: 0; height: 32px; padding: 0 9px 0 11px; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: 6px; cursor: pointer; text-align: left; }
+  .proj-btn:hover { background: var(--hover); }
+  .proj-btn:focus-visible, .proj-btn[aria-expanded="true"] { outline: none; border-color: var(--accent); box-shadow: var(--focus); }
+  .proj-btn-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+  .proj-btn-name.is-empty { font-weight: 400; color: var(--faint); }
+  .proj-kbd { flex: none; font-size: 10.5px; line-height: 1.5; padding: 0 5px; color: var(--faint); background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; }
+  .proj-btn .chev { flex: none; color: var(--muted); transition: transform .15s; }
+  .proj-btn[aria-expanded="true"] .chev { transform: rotate(180deg); }
+  .proj-pop { position: absolute; z-index: 40; top: calc(100% + 6px); left: 0; width: 460px; max-width: calc(100vw - 32px); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 12px 32px rgba(0, 0, 0, .18); overflow: hidden; }
+  .proj-search { display: flex; align-items: center; gap: 10px; padding: 10px; border-bottom: 1px solid var(--border); }
+  .proj-search .input { flex: 1; }
+  .proj-search .sub { flex: none; font-variant-numeric: tabular-nums; }
+  .proj-list { max-height: min(420px, 60vh); overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
+  .proj-group { padding: 8px 10px 4px; font-size: 11px; font-weight: 600; letter-spacing: .03em; text-transform: uppercase; color: var(--faint); }
+  .proj-opt { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 1px 10px; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
+  .proj-opt.is-active { background: var(--hover); box-shadow: inset 2px 0 0 var(--accent); }
+  .proj-opt[aria-selected="true"] .po-name { color: var(--accent); }
+  .po-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
+  .po-tags { display: flex; gap: 4px; }
+  .po-tag { font-size: 10.5px; font-weight: 600; line-height: 1.6; padding: 0 6px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; }
+  .po-path { grid-column: 1 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--faint); }
+  .proj-opt mark { padding: 0 1px; color: inherit; background: var(--accent-soft); border-radius: 2px; }
+  .proj-empty { padding: 22px 12px; text-align: center; font-size: 13px; color: var(--faint); }
+  .proj-foot { padding: 7px 12px; font-size: 11.5px; color: var(--faint); background: var(--surface-2); border-top: 1px solid var(--border); }
+  @media (hover: none), (max-width: 760px) { .proj-kbd, .proj-foot { display: none; } }
   .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding-top: 4px; }
   .actions .btn-primary { min-width: 180px; padding: 8px 16px; }
   .select-sm { width: auto; padding: 3px 26px 3px 8px; font-size: 12px; }
@@ -248,6 +295,9 @@
   [data-skin="neon"] .ai-chip { background: rgba(14, 18, 44, .7); box-shadow: 0 0 12px rgba(139, 92, 246, .25); }
   [data-skin="neon"] .ai-chip:hover { border-color: var(--neon-1); box-shadow: 0 0 18px rgba(34, 211, 238, .45); }
   [data-skin="neon"] .step-n { background: var(--neon-grad); box-shadow: 0 0 12px rgba(139, 92, 246, .7); }
+  [data-skin="neon"] .proj-btn { background: rgba(4, 7, 22, .62); }
+  [data-skin="neon"] .proj-pop { background: rgba(12, 15, 36, .95); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: 0 0 0 1px rgba(139, 92, 246, .25), 0 18px 48px rgba(0, 0, 0, .55); }
+  [data-skin="neon"] .proj-opt.is-active { background: rgba(34, 211, 238, .08); box-shadow: inset 2px 0 0 #22d3ee; }
   [data-skin="neon"] .ai-menu { background: rgba(12, 15, 36, .95); backdrop-filter: blur(14px); }
   [data-skin="neon"] .slot.off { opacity: .4; }
   [data-skin="neon"] .slot { overflow: visible; }
@@ -264,8 +314,6 @@
   .sess-grid > .item { border-right: 1px solid var(--border); }
   @media (max-width: 1100px) {
     .g-work { grid-template-columns: minmax(0, 1fr); }
-    .proj-pick { order: 3; flex-basis: 100%; }
-    .proj-pick select { flex: 1; width: auto; }
   }
   @media (max-width: 760px) {
     .sess-grid { grid-template-columns: minmax(0, 1fr); } .sess-grid > .item { border-right: 0; }
@@ -488,30 +536,48 @@
 
 <header class="topbar">
   <div class="wrap">
-    <div class="brand">
+    <div class="brand" data-i18n-title="subtitle">
       <h1>Multi-AI Workflow</h1>
-      <span data-i18n="subtitle"></span>
     </div>
-    <div class="proj-pick">
-      <label for="projectSel" class="sub" data-i18n="lblProject"></label>
-      <select id="projectSel"></select>
-    </div>
-    <div class="spacer"></div>
-    <span id="modeBadge" class="pill warn hidden" data-i18n="demoBadge"></span>
-    <button id="fxMotionBtn" type="button" class="pill warn hidden" style="cursor:pointer" data-i18n="fxMotion" data-i18n-title="fxMotionTip"></button>
-    <span id="apiBadge" class="pill err hidden" role="alert"><span class="dot err"></span><span id="apiBadgeText" class="truncate"></span></span>
-    <span id="bridgeBadge" class="pill"><span class="dot" id="bridgeDot"></span><span id="bridgeText" class="truncate" data-i18n="bridgeChecking"></span></span>
-    <label class="check sub" data-i18n-title="autoRefreshTip"><input type="checkbox" id="autoToggle" checked> <span data-i18n="autoRefresh"></span></label>
-    <button id="refreshBtn" type="button" class="btn btn-sm" data-i18n="refreshNow"></button>
-    <div class="prefs">
-      <div class="seg" role="group" aria-label="Language">
-        <button id="langVi" type="button" onclick="setLang('vi')">VI</button>
-        <button id="langEn" type="button" onclick="setLang('en')">EN</button>
+    <div class="proj-pick" id="projPick">
+      <span id="projLbl" class="sub" data-i18n="lblProject"></span>
+      <div class="proj-anchor">
+        <button type="button" id="projBtn" class="proj-btn" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="projLbl projBtnName">
+          <span id="projBtnName" class="proj-btn-name"></span>
+          <kbd class="proj-kbd">Ctrl K</kbd>
+          <svg class="chev" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 4.5 6 8l3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <select id="projectSel" class="hidden" tabindex="-1" aria-hidden="true"></select>
+        <div id="projPop" class="proj-pop hidden">
+          <div class="proj-search">
+            <input id="projSearch" class="input" type="search" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="projList" data-i18n-ph="projSearchPh">
+            <span id="projCount" class="sub faint"></span>
+          </div>
+          <div id="projList" class="proj-list" role="listbox" aria-labelledby="projLbl"></div>
+          <div class="proj-foot" data-i18n="projHint"></div>
+        </div>
       </div>
-      <div class="seg" role="group" aria-label="Theme" id="themeSeg">
-        <button type="button" data-theme-pref="light" data-i18n="themeLight"></button>
-        <button type="button" data-theme-pref="dark" data-i18n="themeDark"></button>
-        <button type="button" data-theme-pref="neon" data-i18n="themeNeon"></button>
+    </div>
+    <div class="tools">
+      <span id="modeBadge" class="pill warn hidden" data-i18n="demoBadge"></span>
+      <button id="fxMotionBtn" type="button" class="pill warn hidden" style="cursor:pointer" data-i18n="fxMotion" data-i18n-title="fxMotionTip"></button>
+      <span id="apiBadge" class="pill err hidden" role="alert"><span class="dot err"></span><span id="apiBadgeText" class="truncate"></span></span>
+      <span id="bridgeBadge" class="pill"><span class="dot" id="bridgeDot"></span><span id="bridgeText" class="truncate" data-i18n="bridgeChecking"></span></span>
+      <div class="btn-group">
+        <button id="refreshBtn" type="button" class="btn btn-sm" data-i18n="refreshNow"></button>
+        <label class="btn btn-sm btn-toggle" data-i18n-title="autoRefreshTip"><input type="checkbox" id="autoToggle" checked><span data-i18n="autoRefresh"></span></label>
+      </div>
+      <span class="sep" aria-hidden="true"></span>
+      <div class="prefs">
+        <div class="seg" role="group" aria-label="Language">
+          <button id="langVi" type="button" onclick="setLang('vi')">VI</button>
+          <button id="langEn" type="button" onclick="setLang('en')">EN</button>
+        </div>
+        <div class="seg" role="group" aria-label="Theme" id="themeSeg">
+          <button type="button" data-theme-pref="light" data-i18n="themeLight"></button>
+          <button type="button" data-theme-pref="dark" data-i18n="themeDark"></button>
+          <button type="button" data-theme-pref="neon" data-i18n="themeNeon"></button>
+        </div>
       </div>
     </div>
   </div>
@@ -744,10 +810,10 @@ const I18N = {
   vi: {
     subtitle: 'Điều phối Claude · Antigravity · Codex',
     demoBadge: 'Dữ liệu demo',
-    bridgeChecking: 'Bridge: đang kiểm tra…',
-    bridgeOnline: 'Antigravity bridge · {addr}',
-    bridgeOffline: 'Antigravity bridge ngoại tuyến',
-    autoRefresh: 'Tự làm mới',
+    bridgeChecking: 'Antigravity…',
+    bridgeOnline: 'Antigravity',
+    bridgeOffline: 'Antigravity ngoại tuyến',
+    autoRefresh: 'Tự động',
     autoRefreshTip: 'Tải lại dữ liệu mỗi 10 giây (tạm dừng khi tab bị ẩn)',
     refreshNow: 'Làm mới',
     themeLight: 'Sáng', themeDark: 'Tối', themeNeon: 'Neon',
@@ -820,6 +886,16 @@ const I18N = {
     g3: '<b>Mô tả việc cần làm</b> (hoặc chọn từ Mẫu yêu cầu). Model / mức suy luận nằm trong Tùy chọn nâng cao — để Tự động là đủ.',
     g4: '<b>Nhập yêu cầu</b> rồi bấm <b>Chạy</b> (Ctrl + Enter) để xem log trực tiếp, hoặc <b>Sao chép lệnh</b> để tự chạy trong Terminal.',
     lblProject: 'Dự án',
+    projPickPh: 'Chọn dự án…',
+    projSearchPh: 'Tìm theo tên hoặc đường dẫn…',
+    projRecent: 'Gần đây',
+    projOthers: 'Tất cả dự án',
+    projTotal: '{n} dự án',
+    projMatches: '{n} / {total}',
+    projNoMatch: 'Không có dự án nào khớp "{q}".',
+    projHint: '↑ ↓ để chọn · Enter để mở · Esc để đóng · Ctrl K để mở nhanh',
+    projHasGit: 'Có Git repository',
+    projHasSpec: 'Đã có SPEC.md',
     initSpec: 'Tạo SPEC.md',
     lblMode: 'AI nhận việc',
     lblRole: 'Vai trò',
@@ -969,10 +1045,10 @@ const I18N = {
   en: {
     subtitle: 'Orchestrating Claude · Antigravity · Codex',
     demoBadge: 'Demo data',
-    bridgeChecking: 'Bridge: checking…',
-    bridgeOnline: 'Antigravity bridge · {addr}',
-    bridgeOffline: 'Antigravity bridge offline',
-    autoRefresh: 'Auto-refresh',
+    bridgeChecking: 'Antigravity…',
+    bridgeOnline: 'Antigravity',
+    bridgeOffline: 'Antigravity offline',
+    autoRefresh: 'Auto',
     autoRefreshTip: 'Reload data every 10 seconds (paused while the tab is hidden)',
     refreshNow: 'Refresh',
     themeLight: 'Light', themeDark: 'Dark', themeNeon: 'Neon',
@@ -1045,6 +1121,16 @@ const I18N = {
     g3: '<b>Describe the work</b> (or start from a template). Model / effort live under Advanced options — Auto is fine.',
     g4: '<b>Write the prompt</b>, then click <b>Run</b> (Ctrl + Enter) to stream the log, or <b>Copy command</b> to run it yourself in a terminal.',
     lblProject: 'Project',
+    projPickPh: 'Choose a project…',
+    projSearchPh: 'Search by name or path…',
+    projRecent: 'Recent',
+    projOthers: 'All projects',
+    projTotal: '{n} projects',
+    projMatches: '{n} / {total}',
+    projNoMatch: 'No project matches "{q}".',
+    projHint: '↑ ↓ to move · Enter to open · Esc to close · Ctrl K to open quickly',
+    projHasGit: 'Git repository',
+    projHasSpec: 'Has SPEC.md',
     initSpec: 'Create SPEC.md',
     lblMode: 'Agent',
     lblRole: 'Role',
@@ -1420,7 +1506,7 @@ function render() {
   const b = d.bridge || {};
   $('bridgeDot').className = 'dot ' + (b.online ? 'ok live' : 'err');
   $('bridgeText').textContent = b.online ? t('bridgeOnline', { addr: b.ls_address }) : t('bridgeOffline');
-  $('bridgeBadge').title = `LS ${b.ls_version || '—'} · CSRF ${b.csrf_masked || '—'} · ${b.updated_at || ''}`;
+  $('bridgeBadge').title = `Antigravity bridge${b.ls_address ? ' · ' + b.ls_address : ''} · LS ${b.ls_version || '—'} · CSRF ${b.csrf_masked || '—'} · ${b.updated_at || ''}`;
 
   // agents
   const tools = d.tools || {};
@@ -1528,12 +1614,15 @@ function renderProjects() {
   const sig = ps.map(p => p.path + ':' + p.name).join('|');
   if (sel.dataset.sig !== sig) {
     sel.innerHTML = ps.map(p => `<option value="${esc(p.path)}" data-name="${esc(p.name)}">${esc(p.name)}</option>`).join('');
-    if (prev && ps.some(p => p.path === prev)) sel.value = prev;
+    const want = prev || store.get('maw_project');
+    if (want && ps.some(p => p.path === want)) sel.value = want;
     sel.dataset.sig = sig;
+    if (proj.open) renderProjPop();
   }
   projMeta();
 }
 function projMeta() {
+  renderProjBtn();
   const p = (state.data?.projects || []).find(x => x.path === $('projectSel').value);
   $('projName').textContent = p?.name || '';
   $('projPath').textContent = p?.path || '';
@@ -1544,6 +1633,180 @@ function projMeta() {
   const f = (ok, l) => badge((ok ? '✓ ' : '✗ ') + l, ok ? 'b-ok' : '');
   $('projMeta').innerHTML = f(p.has_git, 'Git') + f(p.has_spec, 'SPEC.md') + f(p.has_gemini_md, 'GEMINI.md');
 }
+
+// ---------- Project switcher ----------
+// A searchable popover in front of the hidden #projectSel, which stays the single source of truth
+// for the selected path (every other feature reads it and listens to its change event).
+const RECENT_MAX = 5;
+const proj = { open: false, items: [], active: null };
+
+function recentProjects() {
+  try { const a = JSON.parse(store.get('maw_recent_projects') || '[]'); return Array.isArray(a) ? a : []; } catch { return []; }
+}
+function rememberProject(path) {
+  if (!path) return;
+  store.set('maw_project', path);
+  store.set('maw_recent_projects', JSON.stringify([path, ...recentProjects().filter(p => p !== path)].slice(0, RECENT_MAX)));
+}
+// Accent-insensitive, one char in → one char out, so match positions line up with the original text.
+const foldChar = c => c.normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[đĐ]/, 'd').toLowerCase().charAt(0) || c;
+const fold = s => [...String(s)].map(foldChar).join('');
+const byName = (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true });
+
+// Every space-separated term must match the name or the path, in any order.
+// Lower total is better; -1 means no match.
+function projScore(p, terms) {
+  const n = fold(p.name), path = fold(p.path);
+  let total = 0;
+  for (const q of terms) {
+    let s;
+    if (n === q) s = 0;
+    else if (n.startsWith(q)) s = 1;
+    else {
+      const i = n.indexOf(q);
+      s = i > 0 ? (/[-_. ]/.test(n[i - 1]) ? 2 : 3) : path.includes(q) ? 4 : -1;
+    }
+    if (s < 0) return -1;
+    total += s;
+  }
+  return total;
+}
+function highlight(text, terms) {
+  const chars = [...String(text)];
+  const folded = [...fold(text)];
+  const hit = new Array(chars.length).fill(false);
+  for (const q of terms) {
+    const i = folded.join('').indexOf(q);
+    if (i >= 0) for (let k = i; k < i + q.length; k++) hit[k] = true;
+  }
+  let out = '', open = false;
+  chars.forEach((c, k) => {
+    if (hit[k] !== open) { out += hit[k] ? '<mark>' : '</mark>'; open = hit[k]; }
+    out += esc(c);
+  });
+  return out + (open ? '</mark>' : '');
+}
+
+function renderProjBtn() {
+  const p = (state.data?.projects || []).find(x => x.path === $('projectSel').value);
+  const name = $('projBtnName');
+  name.textContent = p ? p.name : t((state.data?.projects || []).length ? 'projPickPh' : 'noProject');
+  name.classList.toggle('is-empty', !p);
+  $('projBtn').title = p ? p.path : '';
+}
+
+function renderProjPop() {
+  const all = state.data?.projects || [];
+  const cur = $('projectSel').value;
+  const terms = fold($('projSearch').value.trim()).split(/\s+/).filter(Boolean);
+  const q = terms.length > 0;
+  const groups = [];
+  if (q) {
+    const hits = all.map(p => [p, projScore(p, terms)]).filter(x => x[1] >= 0)
+      .sort((a, b) => a[1] - b[1] || byName(a[0], b[0])).map(x => x[0]);
+    groups.push([null, hits]);
+    $('projCount').textContent = t('projMatches', { n: hits.length, total: all.length });
+  } else {
+    const recent = recentProjects().map(path => all.find(p => p.path === path)).filter(Boolean);
+    const rest = all.filter(p => !recent.includes(p)).sort(byName);
+    if (recent.length) groups.push([t('projRecent'), recent]);
+    groups.push([recent.length ? t('projOthers') : null, rest]);
+    $('projCount').textContent = t('projTotal', { n: all.length });
+  }
+  proj.items = groups.flatMap(g => g[1]);
+  if (proj.active == null) proj.active = Math.max(0, proj.items.findIndex(p => p.path === cur));
+  proj.active = Math.min(proj.active, Math.max(0, proj.items.length - 1));
+
+  let i = 0;
+  const tag = (label, tip) => `<span class="po-tag" title="${esc(tip)}">${label}</span>`;
+  const opt = p => {
+    const k = i++;
+    return `<div class="proj-opt${k === proj.active ? ' is-active' : ''}" role="option" id="po-${k}" data-i="${k}" aria-selected="${p.path === cur}">
+      <span class="po-name">${highlight(p.name, terms)}</span>
+      <span class="po-tags">${p.has_git ? tag('Git', t('projHasGit')) : ''}${p.has_spec ? tag('SPEC', t('projHasSpec')) : ''}</span>
+      <span class="po-path mono">${highlight(p.path, terms)}</span>
+    </div>`;
+  };
+  const html = groups.filter(g => g[1].length)
+    .map(([label, ps]) => (label ? `<div class="proj-group" role="presentation">${esc(label)}</div>` : '') + ps.map(opt).join(''))
+    .join('');
+  $('projList').innerHTML = html || `<div class="proj-empty">${esc(t(q ? 'projNoMatch' : 'noProject', { q: $('projSearch').value.trim() }))}</div>`;
+  syncProjActive();
+}
+
+function syncProjActive() {
+  const list = $('projList');
+  list.querySelectorAll('.proj-opt.is-active').forEach(el => el.classList.remove('is-active'));
+  const el = proj.items.length ? $('po-' + proj.active) : null;
+  if (el) { el.classList.add('is-active'); el.scrollIntoView({ block: 'nearest' }); }
+  $('projSearch').setAttribute('aria-activedescendant', el ? el.id : '');
+}
+
+function openProjPop() {
+  if (proj.open) return;
+  closeAgentMenu();
+  proj.open = true;
+  proj.active = null;
+  $('projSearch').value = '';
+  $('projPop').classList.remove('hidden');
+  $('projBtn').setAttribute('aria-expanded', 'true');
+  renderProjPop();
+  $('projSearch').focus();
+}
+function closeProjPop(refocus) {
+  if (!proj.open) return;
+  proj.open = false;
+  $('projPop').classList.add('hidden');
+  $('projBtn').setAttribute('aria-expanded', 'false');
+  if (refocus) $('projBtn').focus();
+}
+function chooseProject(i) {
+  const p = proj.items[i];
+  if (!p) return;
+  closeProjPop(true);
+  const sel = $('projectSel');
+  if (sel.value === p.path) return;
+  sel.value = p.path;
+  sel.dispatchEvent(new Event('change'));
+}
+
+$('projBtn').onclick = () => (proj.open ? closeProjPop(true) : openProjPop());
+$('projBtn').addEventListener('keydown', e => {
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); openProjPop(); }
+});
+$('projSearch').oninput = () => { proj.active = 0; renderProjPop(); };
+$('projSearch').addEventListener('keydown', e => {
+  const n = proj.items.length;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    if (n) { proj.active = (proj.active + (e.key === 'ArrowDown' ? 1 : n - 1)) % n; syncProjActive(); }
+  } else if (e.key === 'PageDown' || e.key === 'PageUp') {
+    e.preventDefault();
+    if (n) { proj.active = Math.max(0, Math.min(n - 1, proj.active + (e.key === 'PageDown' ? 8 : -8))); syncProjActive(); }
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    chooseProject(proj.active);
+  } else if (e.key === 'Escape') {
+    e.preventDefault(); e.stopPropagation();
+    closeProjPop(true);
+  } else if (e.key === 'Tab') {
+    closeProjPop(false);
+  }
+});
+// mousedown keeps focus in the search box; click picks.
+$('projList').addEventListener('mousedown', e => { if (e.target.closest('.proj-opt')) e.preventDefault(); });
+$('projList').addEventListener('click', e => { const o = e.target.closest('.proj-opt'); if (o) chooseProject(+o.dataset.i); });
+$('projList').addEventListener('mousemove', e => {
+  const o = e.target.closest('.proj-opt');
+  if (o && +o.dataset.i !== proj.active) { proj.active = +o.dataset.i; syncProjActive(); }
+});
+document.addEventListener('mousedown', e => { if (proj.open && !e.target.closest('#projPick')) closeProjPop(false); });
+document.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    proj.open ? closeProjPop(true) : openProjPop();
+  }
+});
 
 function saveBoard() { store.set('maw_board', JSON.stringify(state.board)); }
 // The agent that actually runs: the selected slot's agent, or the leader in team mode.
@@ -1912,7 +2175,24 @@ $('initSpecBtn').onclick = async () => {
     const p = state.data.projects.find(x => x.path === sel.value); if (p) { p.has_spec = true; projMeta(); }
   }
 };
-$('projectSel').onchange = () => { projMeta(); resetCmd(); ensureGit(true); };
+// Everything shown for the previous project is dropped or retargeted when the project changes.
+$('projectSel').onchange = () => {
+  const sel = $('projectSel');
+  rememberProject(sel.value);
+  retargetPrompt(sel.selectedOptions[0]?.dataset.name);
+  state.guard = null;
+  renderGuard();
+  projMeta(); resetCmd(); ensureGit(true);
+};
+// Templates prefix the prompt with `Dự án "<name>":` — keep that prefix pointing at the selected project.
+function retargetPrompt(name) {
+  const box = $('promptTxt');
+  const prefixes = Object.values(I18N).map(l => l.presetProject.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const re = new RegExp(`^(?:${prefixes.join('|')}) "[^"\\n]*":\\s*`);
+  if (!re.test(box.value)) return;
+  box.value = name ? box.value.replace(re, `${t('presetProject')} "${name}": `) : box.value.replace(re, '');
+  updateChars();
+}
 $('promptTxt').oninput = () => { updateChars(); resetCmd(); };
 $('promptTxt').addEventListener('keydown', e => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runJob(); }
@@ -2150,8 +2430,11 @@ async function runSpecGuard() {
   state.guard = { loading: true };
   renderGuard();
   try {
-    state.guard = await api('spec_guard', { project_path: path, owner: $('guardOwner').value });
+    const r = await api('spec_guard', { project_path: path, owner: $('guardOwner').value });
+    if ($('projectSel').value !== path) return;  // the project changed while the guard was running
+    state.guard = r;
   } catch (e) {
+    if ($('projectSel').value !== path) return;
     if (e.offline) {
       state.guard = {
         demo: true, verdict: 'WARN', has_spec: true, has_git: true, owner: '', frontend_count: 1, backend_count: 2,
@@ -2242,8 +2525,7 @@ function reviewWithCouncil(path) {
   if (path) {
     const opt = [...sel.options].find(o => normPath(o.value) === normPath(path));
     if (!opt) { toast(t('gitOutside'), 'warn'); return; }
-    sel.value = opt.value;
-    projMeta();
+    if (sel.value !== opt.value) { sel.value = opt.value; sel.dispatchEvent(new Event('change')); }
   }
   runJob(flowPayload('council'));
 }
