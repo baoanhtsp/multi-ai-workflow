@@ -152,6 +152,21 @@ test('steer: resume commands construction and summary prompt format/limits', () 
   assert.ok(codexCmd.args.includes('th-456'));
   assert.ok(codexCmd.args.includes('-'));
 
+  // Antigravity resume command
+  const agyCmd = buildResumeCommand({
+    platform: 'antigravity',
+    sessionId: 'session-agy-789',
+    projectPath: 'C:\\proj',
+  });
+  assert.ok(agyCmd);
+  assert.equal(agyCmd.exe, 'powershell.exe');
+  assert.ok(agyCmd.args.includes('-Action'));
+  assert.ok(agyCmd.args.includes('send'));
+  assert.ok(agyCmd.args.includes('-ConversationId'));
+  assert.ok(agyCmd.args.includes('session-agy-789'));
+  assert.ok(agyCmd.args.includes('-PromptFile'));
+  assert.ok(agyCmd.args.includes('{prompt_file}'));
+
   // Summary prompt format
   const rawLog =
     `=== [MISSION CONTROL JOB job_20261025_000000_123456] ===\n` +
@@ -469,6 +484,179 @@ test('steer: strategy selection, steer jobs creation, queue merge and cancel', a
   const steerStatus = (await steerFeature.status!(fakeCtx as any)) as any;
   assert.ok(steerStatus.jobs[runningClaudeJobId]);
   assert.equal(steerStatus.jobs[runningClaudeJobId].queued, 0);
+
+  // Clean up
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('steer: steer_send failure preserves entry with status failed in steerData', async () => {
+  const tmpRoot = path.win32.join(
+    os.tmpdir(),
+    `maw_steer_fail_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const mawHome = path.win32.join(tmpRoot, 'maw_home');
+  const projectDir = path.win32.join(projectsRoot, 'fail-repo');
+
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    mawHome,
+    repoRoot: projectDir,
+  });
+
+  const parentJobId = 'job_20261025_050000_333333';
+  const finishedMeta = {
+    job_id: parentJobId,
+    pid: 999999,
+    mode: 'task',
+    agent: 'claude',
+    role: 'backend',
+    project_path: projectDir,
+    command: 'fake-command',
+    status: 'DONE',
+    exit_code: 0,
+    started_at: new Date().toISOString(),
+    started_ts: Math.floor(Date.now() / 1000),
+  };
+
+  fs.writeFileSync(
+    path.win32.join(paths.jobsDir, `${parentJobId}.json`),
+    JSON.stringify(finishedMeta),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.win32.join(paths.jobsDir, `${parentJobId}.log`),
+    'Log without session\n=== [JOB_FINISHED exit_code=0] ===\n',
+    'utf8'
+  );
+
+  const fakeCtx = {
+    paths,
+    registry: { agents: [] } as any,
+    readJobs: async () => [finishedMeta],
+    startJob: async () => {
+      throw new Error('Disk full or spawn failed');
+    },
+  };
+
+  // steer_send with summary strategy should attempt startJob, fail, save failed entry, and rethrow
+  await assert.rejects(
+    async () => {
+      await steerFeature.routes.steer_send.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=steer_send'),
+          query: new URLSearchParams(),
+          body: {
+            job_id: parentJobId,
+            strategy: 'summary',
+            message: 'Retry please',
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof Error && err.message === 'Disk full or spawn failed'
+  );
+
+  const dataAfterFailure = loadSteerData(parentJobId, paths);
+  assert.equal(dataAfterFailure.entries.length, 1);
+  assert.equal(dataAfterFailure.entries[0]!.status, 'failed');
+  assert.ok(dataAfterFailure.entries[0]!.error?.includes('Disk full or spawn failed'));
+
+  // Clean up
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('steer: queue processor maps legacy roles and modes to valid task roles', async () => {
+  const tmpRoot = path.win32.join(
+    os.tmpdir(),
+    `maw_steer_legacy_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const mawHome = path.win32.join(tmpRoot, 'maw_home');
+  const projectDir = path.win32.join(projectsRoot, 'legacy-repo');
+
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    mawHome,
+    repoRoot: projectDir,
+  });
+
+  const parentJobId = 'job_20261025_060000_444444';
+  const legacyMeta = {
+    job_id: parentJobId,
+    pid: 999999,
+    mode: 'council',
+    agent: 'unknown-agent',
+    role: 'review-diff', // legacy role
+    project_path: projectDir,
+    command: 'fake-command',
+    status: 'DONE',
+    exit_code: 0,
+    started_at: new Date().toISOString(),
+    started_ts: Math.floor(Date.now() / 1000),
+  };
+
+  fs.writeFileSync(
+    path.win32.join(paths.jobsDir, `${parentJobId}.json`),
+    JSON.stringify(legacyMeta),
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.win32.join(paths.jobsDir, `${parentJobId}.log`),
+    'Output\n=== [JOB_FINISHED exit_code=0] ===\n',
+    'utf8'
+  );
+
+  // Enqueue a steer item
+  const steerData = {
+    job_id: parentJobId,
+    root_job_id: parentJobId,
+    entries: [
+      {
+        id: 'entry_test_legacy',
+        ts: new Date().toISOString(),
+        strategy: 'queue' as const,
+        status: 'queued' as const,
+        message: 'Do next',
+      },
+    ],
+  };
+  saveSteerData(steerData, paths);
+
+  let launchedJob: any = null;
+  const fakeCtx = {
+    paths,
+    registry: { agents: [] } as any,
+    readJobs: async () => [legacyMeta],
+    startJob: async (body: any) => {
+      launchedJob = body;
+      return { ok: true, job_id: 'job_child_123' };
+    },
+  };
+
+  await runQueueProcessor(fakeCtx as any);
+
+  assert.ok(launchedJob);
+  // council mode mapped to claude
+  assert.equal(launchedJob.agent, 'claude');
+  // review-diff legacy role mapped to backend
+  assert.equal(launchedJob.role, 'backend');
+  assert.equal(launchedJob.mode, 'task');
 
   // Clean up
   try {

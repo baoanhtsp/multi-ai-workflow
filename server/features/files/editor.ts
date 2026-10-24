@@ -5,6 +5,8 @@ import path from 'node:path';
 import type { ServerPaths } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 
+import { validateSafeRelativePath } from '../review/git.ts';
+
 export const DEFAULT_EDITOR = ['code', '--goto', '{file}:{line}'];
 
 const VSCODE_FAMILY_EXES = [
@@ -189,12 +191,17 @@ export function openFileInEditor(options: {
   spawnFn?: (exe: string, args: string[]) => void;
 }): { ok: true; command: string[] } {
   const { projectPath, relPath, line, paths, spawnFn } = options;
+  const validRelPath = validateSafeRelativePath(projectPath, relPath);
+  const realProject = fs.realpathSync(projectPath);
+  const fullFilePath = path.win32.join(realProject, validRelPath.replace(/\//g, '\\'));
+
+  if (!fs.existsSync(fullFilePath)) {
+    throw new ApiValidationError('File not found.', 404);
+  }
+
   const config = loadEditorConfig(paths);
   const exeCmd = config[0]!;
   const exePath = resolveEditorExe(exeCmd);
-
-  const realProject = fs.realpathSync(projectPath);
-  const fullFilePath = path.win32.join(realProject, relPath.replace(/\//g, '\\'));
   const lineNumber = typeof line === 'number' && line >= 1 ? line : 1;
 
   const resolvedArgs: string[] = [];
@@ -218,6 +225,9 @@ export function openFileInEditor(options: {
         stdio: 'ignore',
         shell: false,
         windowsHide: false,
+      });
+      child.on('error', () => {
+        // async spawn error must never crash the server
       });
       child.unref();
     } catch (err: unknown) {

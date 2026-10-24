@@ -7,10 +7,9 @@ import { ApiValidationError } from '../../lib/validate.ts';
 import {
   createSafetySnapshot,
   executeRejectHunk,
+  getDefaultBase,
   getReviewSources,
-  isValidGitRef,
-  isValidJobId,
-  isValidSha,
+  readJobMetaDirect,
   runReviewDiff,
   validateSafeRelativePath,
 } from './git.ts';
@@ -38,23 +37,27 @@ export const feature: MawFeature = {
           throw new ApiValidationError('Invalid project_path.', 400);
         }
 
-        return await getReviewSources(projectPath, ctx.paths, ctx.readJobs);
+        return await getReviewSources(projectPath, ctx.paths);
       },
     },
 
     review_diff: {
       method: 'GET',
       handler: async (ctx, req) => {
-        const rawProjectPath = String(req.query.get('project_path') ?? '').trim();
-        const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
-        if (!projectPath) {
-          throw new ApiValidationError('Invalid project_path.', 400);
-        }
-
         const source = (String(req.query.get('source') ?? 'worktree').trim() ||
           'worktree') as 'worktree' | 'branch' | 'job' | 'commit';
         const ref = String(req.query.get('ref') ?? '').trim();
-        const base = String(req.query.get('base') ?? '').trim();
+        let base = String(req.query.get('base') ?? '').trim();
+        const rawProjectPath = String(req.query.get('project_path') ?? '').trim();
+
+        let projectPath: string | null = null;
+        if (rawProjectPath) {
+          projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+          if (!projectPath && source !== 'job') {
+            throw new ApiValidationError('Invalid project_path.', 400);
+          }
+        }
+
         const ctxParam = req.query.has('context')
           ? Number.parseInt(req.query.get('context')!, 10)
           : 3;
@@ -64,7 +67,7 @@ export const feature: MawFeature = {
 
         const diffRun = await runReviewDiff(
           {
-            project_path: projectPath,
+            project_path: projectPath ?? undefined,
             source,
             ref,
             base,
@@ -73,34 +76,56 @@ export const feature: MawFeature = {
             path: filterPath,
             full,
           },
-          ctx.paths,
-          ctx.readJobs
+          ctx.paths
         );
 
+        const effectiveProjectPath = diffRun.project_path;
         const effectiveRef = diffRun.ref;
         const effectiveBase = diffRun.base;
-        const reviewKey = computeReviewKey(projectPath, source, effectiveRef, effectiveBase);
+        const reviewKey = computeReviewKey(effectiveProjectPath, source, effectiveRef, effectiveBase);
         const session = loadReviewSession(
           reviewKey,
-          projectPath,
+          effectiveProjectPath,
           source,
           effectiveRef,
           effectiveBase,
           ctx.paths
         );
 
+        // Strip internal rawLines and headerLines to reduce payload size
+        const sanitizedFiles = diffRun.diffResult.files.map((file) => ({
+          path: file.path,
+          old_path: file.old_path,
+          status: file.status,
+          binary: file.binary,
+          untracked: file.untracked,
+          too_large: file.too_large,
+          omitted: file.omitted,
+          additions: file.additions,
+          deletions: file.deletions,
+          hunks: file.hunks.map((hunk) => ({
+            id: hunk.id,
+            header: hunk.header,
+            old_start: hunk.old_start,
+            old_lines: hunk.old_lines,
+            new_start: hunk.new_start,
+            new_lines: hunk.new_lines,
+            lines: hunk.lines,
+          })),
+        }));
+
         return {
           ok: true,
           source,
           ref: effectiveRef,
           base: effectiveBase,
-          project_path: projectPath,
+          project_path: effectiveProjectPath,
           target_path: diffRun.target_path,
           writable: diffRun.target_path !== null,
           review_key: reviewKey,
           truncated: diffRun.diffResult.truncated,
           stats: diffRun.diffResult.stats,
-          files: diffRun.diffResult.files,
+          files: sanitizedFiles,
           session: {
             states: session.states,
             comments: session.comments,
@@ -114,12 +139,6 @@ export const feature: MawFeature = {
     review_hunk: {
       method: 'POST',
       handler: async (ctx, req) => {
-        const rawProjectPath = String(req.body.project_path ?? '').trim();
-        const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
-        if (!projectPath) {
-          throw new ApiValidationError('Invalid project_path.', 400);
-        }
-
         const source = String(req.body.source ?? 'worktree').trim() as
           | 'worktree'
           | 'branch'
@@ -127,6 +146,22 @@ export const feature: MawFeature = {
           | 'commit';
         const ref = String(req.body.ref ?? '').trim();
         const base = String(req.body.base ?? '').trim();
+        const rawProjectPath = String(req.body.project_path ?? '').trim();
+
+        let projectPath: string | null = null;
+        if (rawProjectPath) {
+          projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+        }
+        if (!projectPath && source === 'job') {
+          const jobMeta = readJobMetaDirect(ref, ctx.paths);
+          if (jobMeta?.project_path) {
+            projectPath = resolveProjectPath(jobMeta.project_path, ctx.paths.projectsRoot);
+          }
+        }
+        if (!projectPath) {
+          throw new ApiValidationError('Invalid project_path.', 400);
+        }
+
         const relPath = String(req.body.path ?? '').trim();
         const hunkId =
           req.body.hunk_id !== undefined && req.body.hunk_id !== null && req.body.hunk_id !== ''
@@ -144,7 +179,6 @@ export const feature: MawFeature = {
 
         const validPath = validateSafeRelativePath(projectPath, relPath);
 
-        // Re-run diff for that single path
         const diffRun = await runReviewDiff(
           {
             project_path: projectPath,
@@ -154,8 +188,7 @@ export const feature: MawFeature = {
             path: validPath,
             full: true,
           },
-          ctx.paths,
-          ctx.readJobs
+          ctx.paths
         );
 
         const file = diffRun.diffResult.files.find(
@@ -165,9 +198,10 @@ export const feature: MawFeature = {
           throw new ApiValidationError('The diff changed; reload it.', 409);
         }
 
+        let targetHunk = null;
         if (hunkId !== null) {
-          const hunk = file.hunks.find((h) => h.id === hunkId);
-          if (!hunk) {
+          targetHunk = file.hunks.find((h) => h.id === hunkId);
+          if (!targetHunk) {
             throw new ApiValidationError('The diff changed; reload it.', 409);
           }
         }
@@ -183,8 +217,9 @@ export const feature: MawFeature = {
         );
 
         if (!session.states[validPath]) {
-          session.states[validPath] = { file: null, hunks: {} };
+          session.states[validPath] = { file: null, hunks: {}, headers: {} };
         }
+        session.states[validPath].headers = session.states[validPath].headers || {};
 
         let snapshotRef: string | undefined;
 
@@ -227,6 +262,9 @@ export const feature: MawFeature = {
               session.states[validPath].file = 'rejected';
             } else {
               session.states[validPath].hunks[hunkId] = 'rejected';
+              if (targetHunk) {
+                session.states[validPath].headers![hunkId] = targetHunk.header;
+              }
             }
           } catch (err: unknown) {
             appendReviewAudit(
@@ -251,6 +289,9 @@ export const feature: MawFeature = {
             session.states[validPath].file = 'accepted';
           } else {
             session.states[validPath].hunks[hunkId] = 'accepted';
+            if (targetHunk) {
+              session.states[validPath].headers![hunkId] = targetHunk.header;
+            }
           }
         } else {
           // reset
@@ -258,6 +299,9 @@ export const feature: MawFeature = {
             session.states[validPath].file = null;
           } else {
             delete session.states[validPath].hunks[hunkId];
+            if (session.states[validPath].headers) {
+              delete session.states[validPath].headers![hunkId];
+            }
           }
         }
 
@@ -277,17 +321,30 @@ export const feature: MawFeature = {
     review_comment: {
       method: 'POST',
       handler: async (ctx, req) => {
+        const source = String(req.body.source ?? 'worktree').trim();
+        const ref = String(req.body.ref ?? '').trim();
+        let base = String(req.body.base ?? '').trim();
         const rawProjectPath = String(req.body.project_path ?? '').trim();
-        const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+
+        let projectPath: string | null = null;
+        if (rawProjectPath) {
+          projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+        }
+        if (!projectPath && source === 'job') {
+          const jobMeta = readJobMetaDirect(ref, ctx.paths);
+          if (jobMeta?.project_path) {
+            projectPath = resolveProjectPath(jobMeta.project_path, ctx.paths.projectsRoot);
+          }
+        }
         if (!projectPath) {
           throw new ApiValidationError('Invalid project_path.', 400);
         }
 
-        const source = String(req.body.source ?? 'worktree').trim();
-        const ref = String(req.body.ref ?? '').trim();
-        const base = String(req.body.base ?? '').trim();
-        const op = String(req.body.op ?? '').trim().toLowerCase();
+        if (source === 'branch' && !base) {
+          base = await getDefaultBase(projectPath);
+        }
 
+        const op = String(req.body.op ?? '').trim().toLowerCase();
         const reviewKey = computeReviewKey(projectPath, source, ref, base);
         const session = loadReviewSession(reviewKey, projectPath, source, ref, base, ctx.paths);
 
@@ -344,7 +401,9 @@ export const feature: MawFeature = {
           if (!comment) {
             throw new ApiValidationError(`Comment '${id}' not found.`, 404);
           }
-          comment.resolved = true;
+          // Honour resolved boolean so the UI can reopen comments
+          const resolved = typeof req.body.resolved === 'boolean' ? req.body.resolved : true;
+          comment.resolved = resolved;
           comment.updated_at = new Date().toISOString();
         } else {
           throw new ApiValidationError(
@@ -364,16 +423,30 @@ export const feature: MawFeature = {
     review_send_fix: {
       method: 'POST',
       handler: async (ctx, req) => {
+        const source = (String(req.body.source ?? 'worktree').trim() ||
+          'worktree') as 'worktree' | 'branch' | 'job' | 'commit';
+        const ref = String(req.body.ref ?? '').trim();
+        let base = String(req.body.base ?? '').trim();
         const rawProjectPath = String(req.body.project_path ?? '').trim();
-        const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+
+        let projectPath: string | null = null;
+        if (rawProjectPath) {
+          projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+        }
+        if (!projectPath && source === 'job') {
+          const jobMeta = readJobMetaDirect(ref, ctx.paths);
+          if (jobMeta?.project_path) {
+            projectPath = resolveProjectPath(jobMeta.project_path, ctx.paths.projectsRoot);
+          }
+        }
         if (!projectPath) {
           throw new ApiValidationError('Invalid project_path.', 400);
         }
 
-        const source = (String(req.body.source ?? 'worktree').trim() ||
-          'worktree') as 'worktree' | 'branch' | 'job' | 'commit';
-        const ref = String(req.body.ref ?? '').trim();
-        const base = String(req.body.base ?? '').trim();
+        if (source === 'branch' && !base) {
+          base = await getDefaultBase(projectPath);
+        }
+
         const dryRun = Boolean(req.body.dry_run);
 
         const reviewKey = computeReviewKey(projectPath, source, ref, base);
@@ -388,7 +461,8 @@ export const feature: MawFeature = {
           }
           for (const [hunkId, state] of Object.entries(fileState.hunks)) {
             if (state === 'rejected') {
-              rejectedHunks.push({ path: filePath, header: hunkId });
+              const headerText = fileState.headers?.[hunkId] ?? hunkId;
+              rejectedHunks.push({ path: filePath, header: headerText });
             }
           }
         }
@@ -412,14 +486,13 @@ export const feature: MawFeature = {
           };
         }
 
-        const allJobs = await ctx.readJobs();
         let targetAgent = typeof req.body.agent === 'string' ? req.body.agent.trim() : '';
         let targetRole = typeof req.body.role === 'string' ? req.body.role.trim() : '';
         let targetModel = typeof req.body.model === 'string' ? req.body.model.trim() : undefined;
         let targetEffort = typeof req.body.effort === 'string' ? req.body.effort.trim() : undefined;
 
         if (source === 'job' && ref) {
-          const parentJob = allJobs.find((j) => String(j.job_id) === ref);
+          const parentJob = readJobMetaDirect(ref, ctx.paths);
           if (parentJob) {
             if (!targetAgent && typeof parentJob.agent === 'string') {
               targetAgent = parentJob.agent;
@@ -459,8 +532,7 @@ export const feature: MawFeature = {
             ref,
             base,
           },
-          ctx.paths,
-          ctx.readJobs
+          ctx.paths
         );
 
         const executionPath = diffRun.target_path ?? projectPath;
@@ -496,17 +568,30 @@ export const feature: MawFeature = {
     review_verdict: {
       method: 'POST',
       handler: async (ctx, req) => {
+        const source = String(req.body.source ?? 'worktree').trim();
+        const ref = String(req.body.ref ?? '').trim();
+        let base = String(req.body.base ?? '').trim();
         const rawProjectPath = String(req.body.project_path ?? '').trim();
-        const projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+
+        let projectPath: string | null = null;
+        if (rawProjectPath) {
+          projectPath = resolveProjectPath(rawProjectPath, ctx.paths.projectsRoot);
+        }
+        if (!projectPath && source === 'job') {
+          const jobMeta = readJobMetaDirect(ref, ctx.paths);
+          if (jobMeta?.project_path) {
+            projectPath = resolveProjectPath(jobMeta.project_path, ctx.paths.projectsRoot);
+          }
+        }
         if (!projectPath) {
           throw new ApiValidationError('Invalid project_path.', 400);
         }
 
-        const source = String(req.body.source ?? 'worktree').trim();
-        const ref = String(req.body.ref ?? '').trim();
-        const base = String(req.body.base ?? '').trim();
-        const verdict = String(req.body.verdict ?? '').trim().toUpperCase();
+        if (source === 'branch' && !base) {
+          base = await getDefaultBase(projectPath);
+        }
 
+        const verdict = String(req.body.verdict ?? '').trim().toUpperCase();
         if (verdict !== 'APPROVED' && verdict !== 'CHANGES_REQUESTED') {
           throw new ApiValidationError(
             "verdict must be 'APPROVED' or 'CHANGES_REQUESTED'.",
@@ -533,8 +618,7 @@ export const feature: MawFeature = {
         };
 
         if (source === 'job' && ref) {
-          const allJobs = await ctx.readJobs();
-          const jobMeta = allJobs.find((j) => String(j.job_id) === ref);
+          const jobMeta = readJobMetaDirect(ref, ctx.paths);
           appendReviewVerdict(
             {
               ts: now,

@@ -1,8 +1,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import type { JobMeta } from '../../actions/jobs.ts';
 import type { ServerPaths } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
+import { resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import {
   buildHunkPatch,
@@ -43,7 +45,6 @@ export function validateSafeRelativePath(projectPath: string, relPath: string): 
   const normBase = realProject.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
   const targetCandidate = path.win32.resolve(realProject, normalized);
 
-  // Check if file exists, test its realpath
   try {
     const realTarget = fs.realpathSync(targetCandidate);
     const normTarget = realTarget.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
@@ -51,7 +52,6 @@ export function validateSafeRelativePath(projectPath: string, relPath: string): 
       throw new ApiValidationError('Invalid path.', 400);
     }
   } catch {
-    // If file does not exist (e.g. deleted file), check nearest existing ancestor
     let cur = path.win32.dirname(targetCandidate);
     let ancestorFound = false;
     while (cur.length >= realProject.length) {
@@ -112,10 +112,22 @@ export async function getDefaultBase(projectPath: string): Promise<string> {
   return '';
 }
 
+export function readJobMetaDirect(jobId: string, paths: ServerPaths): (JobMeta & { worktree?: string }) | null {
+  const metaFile = path.win32.join(paths.jobsDir, `${jobId}.json`);
+  if (!fs.existsSync(metaFile)) {
+    return null;
+  }
+  try {
+    const raw = fs.readFileSync(metaFile, 'utf8');
+    return JSON.parse(raw) as JobMeta & { worktree?: string };
+  } catch {
+    return null;
+  }
+}
+
 export async function getReviewSources(
   projectPath: string,
-  paths: ServerPaths,
-  readJobs: () => Promise<Array<Record<string, unknown>>>
+  paths: ServerPaths
 ): Promise<Record<string, unknown>> {
   const isGit = await isGitRepo(projectPath);
   if (!isGit) {
@@ -191,14 +203,8 @@ export async function getReviewSources(
     }
   }
 
-  // 5. Jobs for this project
-  const allJobs = await readJobs();
+  // 5. Jobs for this project directly from paths.jobsDir (newest first, max 30)
   const normProject = projectPath.toLowerCase().replace(/\\/g, '/');
-  const matchingJobs = allJobs.filter((j) => {
-    const p = String(j.project_path ?? '').toLowerCase().replace(/\\/g, '/');
-    return p === normProject;
-  });
-
   const jobs: Array<{
     job_id: string;
     agent?: string;
@@ -208,24 +214,49 @@ export async function getReviewSources(
     has_checkpoint: boolean;
   }> = [];
 
-  for (const j of matchingJobs) {
-    const jobId = String(j.job_id ?? '');
-    if (!jobId) continue;
-    const cpRes = await runCommand('git', [
-      '-C',
-      projectPath,
-      'for-each-ref',
-      `refs/maw/checkpoints/${jobId}`,
-    ]);
-    const hasCheckpoint = cpRes.code === 0 && cpRes.stdout.trim() !== '';
-    jobs.push({
-      job_id: jobId,
-      agent: typeof j.agent === 'string' ? j.agent : undefined,
-      role: String(j.role ?? 'backend'),
-      status: String(j.status ?? 'UNKNOWN'),
-      started_at: String(j.started_at ?? ''),
-      has_checkpoint: hasCheckpoint,
-    });
+  if (fs.existsSync(paths.jobsDir)) {
+    const files = fs.readdirSync(paths.jobsDir).filter((f) => f.startsWith('job_') && f.endsWith('.json'));
+    const metasWithStats: Array<{ meta: JobMeta & { worktree?: string }; mtime: number }> = [];
+
+    for (const f of files) {
+      try {
+        const fullP = path.win32.join(paths.jobsDir, f);
+        const st = fs.statSync(fullP);
+        const raw = fs.readFileSync(fullP, 'utf8');
+        const parsed = JSON.parse(raw) as JobMeta & { worktree?: string };
+        metasWithStats.push({ meta: parsed, mtime: st.mtimeMs });
+      } catch {
+        // Skip corrupt meta
+      }
+    }
+
+    metasWithStats.sort((a, b) => b.mtime - a.mtime);
+
+    for (const item of metasWithStats) {
+      if (jobs.length >= 30) break;
+      const m = item.meta;
+      const p = String(m.project_path ?? '').toLowerCase().replace(/\\/g, '/');
+      const wt = String(m.worktree ?? '').toLowerCase().replace(/\\/g, '/');
+      if (p === normProject || wt === normProject) {
+        const jobId = String(m.job_id ?? '');
+        if (!jobId) continue;
+        const cpRes = await runCommand('git', [
+          '-C',
+          projectPath,
+          'for-each-ref',
+          `refs/maw/checkpoints/${jobId}`,
+        ]);
+        const hasCheckpoint = cpRes.code === 0 && cpRes.stdout.trim() !== '';
+        jobs.push({
+          job_id: jobId,
+          agent: typeof m.agent === 'string' ? m.agent : undefined,
+          role: String(m.role ?? 'backend'),
+          status: String(m.status ?? 'UNKNOWN'),
+          started_at: String(m.started_at ?? ''),
+          has_checkpoint: hasCheckpoint,
+        });
+      }
+    }
   }
 
   // 6. Commits (last 30)
@@ -273,7 +304,7 @@ export async function getReviewSources(
 }
 
 export interface ReviewDiffParams {
-  project_path: string;
+  project_path?: string;
   source: 'worktree' | 'branch' | 'job' | 'commit';
   ref?: string;
   base?: string;
@@ -284,6 +315,7 @@ export interface ReviewDiffParams {
 }
 
 export interface ResolvedReviewDiff {
+  project_path: string;
   diffResult: ParsedDiffResult;
   target_path: string | null;
   base: string;
@@ -293,29 +325,57 @@ export interface ResolvedReviewDiff {
 
 export async function runReviewDiff(
   params: ReviewDiffParams,
-  paths: ServerPaths,
-  readJobs: () => Promise<Array<Record<string, unknown>>>
+  paths: ServerPaths
 ): Promise<ResolvedReviewDiff> {
-  const { project_path, source, ignore_ws, full } = params;
+  const { source, ignore_ws, full } = params;
   const ctx = typeof params.context === 'number' && params.context >= 0 && params.context <= 20
     ? params.context
     : 3;
-  const filterPath = params.path ? validateSafeRelativePath(project_path, params.path) : '';
   const ref = String(params.ref ?? '').trim();
   let base = String(params.base ?? '').trim();
 
+  let effectiveProjectPath = String(params.project_path ?? '').trim();
+
+  if (source === 'job') {
+    if (!isValidJobId(ref)) {
+      throw new ApiValidationError('Invalid job id.', 400);
+    }
+    const jobMeta = readJobMetaDirect(ref, paths);
+    if (!jobMeta) {
+      throw new ApiValidationError(`Job '${ref}' not found.`, 404);
+    }
+
+    if (!effectiveProjectPath) {
+      const resolved = resolveProjectPath(jobMeta.project_path, paths.projectsRoot);
+      if (!resolved) {
+        throw new ApiValidationError('Invalid project_path in job meta.', 400);
+      }
+      effectiveProjectPath = resolved;
+    }
+  }
+
+  if (!effectiveProjectPath) {
+    throw new ApiValidationError('Invalid project_path.', 400);
+  }
+
+  const filterPath = params.path ? validateSafeRelativePath(effectiveProjectPath, params.path) : '';
   let target_path: string | null = null;
-  let rawDiff = '';
   let beforeRef: string | undefined;
 
+  let combinedParsed: ParsedDiffResult = {
+    truncated: false,
+    stats: { files: 0, additions: 0, deletions: 0 },
+    files: [],
+  };
+
   if (source === 'worktree') {
-    target_path = project_path;
-    const hasHeadRes = await runCommand('git', ['-C', project_path, 'rev-parse', '--verify', 'HEAD']);
+    target_path = effectiveProjectPath;
+    const hasHeadRes = await runCommand('git', ['-C', effectiveProjectPath, 'rev-parse', '--verify', 'HEAD']);
     const headTarget = hasHeadRes.code === 0 ? 'HEAD' : '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 
     const diffArgs = [
       '-C',
-      project_path,
+      effectiveProjectPath,
       '-c',
       'core.quotepath=off',
       'diff',
@@ -330,12 +390,16 @@ export async function runReviewDiff(
     }
 
     const diffRes = await runCommand('git', diffArgs);
-    rawDiff = diffRes.stdout;
+    combinedParsed = parseUnifiedDiff(diffRes.stdout, {
+      full: Boolean(full),
+      targetPath: filterPath,
+      untracked: false,
+    });
 
     // Untracked files
     const untrackedArgs = [
       '-C',
-      project_path,
+      effectiveProjectPath,
       '-c',
       'core.quotepath=off',
       'ls-files',
@@ -352,7 +416,7 @@ export async function runReviewDiff(
       for (const uFile of untrackedFiles) {
         const uDiffArgs = [
           '-C',
-          project_path,
+          effectiveProjectPath,
           '-c',
           'core.quotepath=off',
           'diff',
@@ -364,7 +428,15 @@ export async function runReviewDiff(
         uDiffArgs.push('--no-index', '--', '/dev/null', uFile);
         const uDiffRes = await runCommand('git', uDiffArgs);
         if (uDiffRes.stdout) {
-          rawDiff += (rawDiff ? '\n' : '') + uDiffRes.stdout;
+          const uParsed = parseUnifiedDiff(uDiffRes.stdout, {
+            full: Boolean(full),
+            targetPath: filterPath,
+            untracked: true,
+          });
+          combinedParsed.files.push(...uParsed.files);
+          combinedParsed.stats.files += uParsed.stats.files;
+          combinedParsed.stats.additions += uParsed.stats.additions;
+          combinedParsed.stats.deletions += uParsed.stats.deletions;
         }
       }
     }
@@ -373,14 +445,14 @@ export async function runReviewDiff(
       throw new ApiValidationError('Invalid branch ref.', 400);
     }
     if (!base) {
-      base = await getDefaultBase(project_path);
+      base = await getDefaultBase(effectiveProjectPath);
     }
     if (!base || !isValidGitRef(base)) {
       throw new ApiValidationError('Invalid base branch.', 400);
     }
 
     // Target path: the worktree that has ref checked out
-    const wtRes = await runCommand('git', ['-C', project_path, 'worktree', 'list', '--porcelain']);
+    const wtRes = await runCommand('git', ['-C', effectiveProjectPath, 'worktree', 'list', '--porcelain']);
     if (wtRes.code === 0) {
       const blocks = wtRes.stdout.split(/\r?\n\r?\n/);
       for (const b of blocks) {
@@ -404,7 +476,7 @@ export async function runReviewDiff(
 
     const diffArgs = [
       '-C',
-      project_path,
+      effectiveProjectPath,
       '-c',
       'core.quotepath=off',
       'diff',
@@ -418,16 +490,21 @@ export async function runReviewDiff(
       diffArgs.push('--', filterPath);
     }
     const diffRes = await runCommand('git', diffArgs);
-    rawDiff = diffRes.stdout;
+    combinedParsed = parseUnifiedDiff(diffRes.stdout, {
+      full: Boolean(full),
+      targetPath: filterPath,
+      untracked: false,
+    });
   } else if (source === 'job') {
-    if (!isValidJobId(ref)) {
-      throw new ApiValidationError('Invalid job id.', 400);
+    const jobMeta = readJobMetaDirect(ref, paths);
+    if (!jobMeta) {
+      throw new ApiValidationError(`Job '${ref}' not found.`, 404);
     }
 
     // Lowest-numbered ref under refs/maw/checkpoints/<job_id>/
     const cpRes = await runCommand('git', [
       '-C',
-      project_path,
+      effectiveProjectPath,
       'for-each-ref',
       '--format=%(refname)',
       `refs/maw/checkpoints/${ref}/`,
@@ -456,17 +533,18 @@ export async function runReviewDiff(
     numberedRefs.sort((a, b) => a.num - b.num);
     beforeRef = numberedRefs[0]!.ref;
 
-    // Check job working dir from metadata
-    const allJobs = await readJobs();
-    const jobMeta = allJobs.find((j) => String(j.job_id) === ref);
-    const jobWorktree = jobMeta && typeof jobMeta.worktree === 'string' && jobMeta.worktree.trim()
-      ? jobMeta.worktree.trim()
-      : project_path;
+    let workingDir = effectiveProjectPath;
+    if (jobMeta.worktree) {
+      const resolvedWt = resolveProjectPath(jobMeta.worktree, paths.projectsRoot);
+      if (resolvedWt) {
+        workingDir = resolvedWt;
+      }
+    }
 
     if (finishRefExists) {
       const diffArgs = [
         '-C',
-        project_path,
+        effectiveProjectPath,
         '-c',
         'core.quotepath=off',
         'diff',
@@ -480,14 +558,17 @@ export async function runReviewDiff(
         diffArgs.push('--', filterPath);
       }
       const diffRes = await runCommand('git', diffArgs);
-      rawDiff = diffRes.stdout;
+      combinedParsed = parseUnifiedDiff(diffRes.stdout, {
+        full: Boolean(full),
+        targetPath: filterPath,
+        untracked: false,
+      });
       target_path = null;
     } else {
-      // after is working tree
-      target_path = jobWorktree;
+      target_path = workingDir;
       const diffArgs = [
         '-C',
-        jobWorktree,
+        workingDir,
         '-c',
         'core.quotepath=off',
         'diff',
@@ -501,12 +582,15 @@ export async function runReviewDiff(
         diffArgs.push('--', filterPath);
       }
       const diffRes = await runCommand('git', diffArgs);
-      rawDiff = diffRes.stdout;
+      combinedParsed = parseUnifiedDiff(diffRes.stdout, {
+        full: Boolean(full),
+        targetPath: filterPath,
+        untracked: false,
+      });
 
-      // untracked files not in git ls-tree -r --name-only <before>
       const lsTreeRes = await runCommand('git', [
         '-C',
-        jobWorktree,
+        workingDir,
         'ls-tree',
         '-r',
         '--name-only',
@@ -516,7 +600,7 @@ export async function runReviewDiff(
 
       const untrackedArgs = [
         '-C',
-        jobWorktree,
+        workingDir,
         '-c',
         'core.quotepath=off',
         'ls-files',
@@ -534,7 +618,7 @@ export async function runReviewDiff(
           if (!trackedInBefore.has(uFile)) {
             const uDiffArgs = [
               '-C',
-              jobWorktree,
+              workingDir,
               '-c',
               'core.quotepath=off',
               'diff',
@@ -546,7 +630,15 @@ export async function runReviewDiff(
             uDiffArgs.push('--no-index', '--', '/dev/null', uFile);
             const uDiffRes = await runCommand('git', uDiffArgs);
             if (uDiffRes.stdout) {
-              rawDiff += (rawDiff ? '\n' : '') + uDiffRes.stdout;
+              const uParsed = parseUnifiedDiff(uDiffRes.stdout, {
+                full: Boolean(full),
+                targetPath: filterPath,
+                untracked: true,
+              });
+              combinedParsed.files.push(...uParsed.files);
+              combinedParsed.stats.files += uParsed.stats.files;
+              combinedParsed.stats.additions += uParsed.stats.additions;
+              combinedParsed.stats.deletions += uParsed.stats.deletions;
             }
           }
         }
@@ -556,10 +648,10 @@ export async function runReviewDiff(
     if (!ref || (!isValidSha(ref) && !isValidGitRef(ref))) {
       throw new ApiValidationError('Invalid commit sha or ref.', 400);
     }
-    target_path = project_path;
+    target_path = effectiveProjectPath;
     const diffArgs = [
       '-C',
-      project_path,
+      effectiveProjectPath,
       '-c',
       'core.quotepath=off',
       'diff-tree',
@@ -576,18 +668,18 @@ export async function runReviewDiff(
       diffArgs.push('--', filterPath);
     }
     const diffRes = await runCommand('git', diffArgs);
-    rawDiff = diffRes.stdout;
+    combinedParsed = parseUnifiedDiff(diffRes.stdout, {
+      full: Boolean(full),
+      targetPath: filterPath,
+      untracked: false,
+    });
   } else {
     throw new ApiValidationError(`Invalid source '${source}'.`, 400);
   }
 
-  const diffResult = parseUnifiedDiff(rawDiff, {
-    full: Boolean(full),
-    targetPath: filterPath,
-  });
-
   return {
-    diffResult,
+    project_path: effectiveProjectPath,
+    diffResult: combinedParsed,
     target_path,
     base,
     ref,
@@ -617,6 +709,10 @@ export async function createSafetySnapshot(
   const envWithIndex = {
     ...process.env,
     GIT_INDEX_FILE: tmpIndex,
+    GIT_AUTHOR_NAME: 'MAW Review',
+    GIT_AUTHOR_EMAIL: 'maw-review@localhost',
+    GIT_COMMITTER_NAME: 'MAW Review',
+    GIT_COMMITTER_EMAIL: 'maw-review@localhost',
   };
 
   try {
@@ -690,7 +786,6 @@ export async function executeRejectHunk(options: {
 
     const fullFilePath = path.win32.join(targetPath, file.path.replace(/\//g, '\\'));
 
-    // If file is untracked new binary, delete it
     if (file.status === 'A' && file.untracked) {
       if (fs.existsSync(fullFilePath)) {
         fs.unlinkSync(fullFilePath);
@@ -698,7 +793,6 @@ export async function executeRejectHunk(options: {
       return;
     }
 
-    // Tracked binary file: checkout before version
     const checkoutRef = source === 'worktree' ? 'HEAD' : (beforeRef ?? 'HEAD');
     const checkoutRes = await runCommand('git', [
       '-C',
@@ -714,7 +808,6 @@ export async function executeRejectHunk(options: {
     return;
   }
 
-  // Text file reject
   const patchContent = buildHunkPatch(file, hunkId);
   const tmpDir = path.win32.join(paths.featureDataDir('review'), 'tmp');
   if (!fs.existsSync(tmpDir)) {
@@ -729,7 +822,6 @@ export async function executeRejectHunk(options: {
   fs.writeFileSync(patchFile, patchContent, 'utf8');
 
   try {
-    // Check if patch applies reverse cleanly
     const checkRes = await runCommand('git', [
       '-C',
       targetPath,

@@ -26,6 +26,7 @@ export interface ReviewComment {
 export interface ReviewSessionState {
   file: 'accepted' | 'rejected' | null;
   hunks: Record<string, 'accepted' | 'rejected'>;
+  headers?: Record<string, string>;
 }
 
 export interface ReviewSession {

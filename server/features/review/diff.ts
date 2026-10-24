@@ -45,12 +45,14 @@ const MAX_DIFF_FILES = 300;
 
 export function unquoteGitPath(raw: string): string {
   let s = raw.trim();
+  if (s.endsWith('\r')) {
+    s = s.slice(0, -1).trim();
+  }
   if (s === '/dev/null') {
     return '/dev/null';
   }
   if (s.startsWith('"') && s.endsWith('"')) {
     s = s.slice(1, -1);
-    // Unescape octal bytes first to handle UTF-8 sequences
     const bytes: number[] = [];
     for (let i = 0; i < s.length; i++) {
       if (s[i] === '\\' && i + 1 < s.length) {
@@ -116,13 +118,16 @@ export function unquoteGitPath(raw: string): string {
 
 export function computeHunkId(filePath: string, header: string, rawLines: string[]): string {
   const normalizedPath = filePath.replace(/\\/g, '/');
-  const payload = `${normalizedPath}\n${header}\n${rawLines.join('\n')}`;
+  // Strip trailing \r for stable hashing across platforms
+  const cleanHeader = header.endsWith('\r') ? header.slice(0, -1) : header;
+  const cleanLines = rawLines.map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l));
+  const payload = `${normalizedPath}\n${cleanHeader}\n${cleanLines.join('\n')}`;
   return crypto.createHash('sha1').update(payload).digest('hex').slice(0, 12);
 }
 
 export function parseUnifiedDiff(
   rawDiffInput: string,
-  options?: { full?: boolean; targetPath?: string }
+  options?: { full?: boolean; targetPath?: string; untracked?: boolean }
 ): ParsedDiffResult {
   let raw = rawDiffInput;
   let truncated = false;
@@ -134,15 +139,22 @@ export function parseUnifiedDiff(
     raw = buf.toString('utf8');
   }
 
-  // Normalize CRLF to LF for parsing
-  const rawLines = raw.replace(/\r\n/g, '\n').split('\n');
+  // Split on LF only to preserve CR in content
+  const rawLines = raw.split('\n');
   if (rawLines.length > 0 && rawLines[rawLines.length - 1] === '') {
     rawLines.pop();
   }
 
   interface RawFileChunk {
     headerLines: string[];
-    hunkChunks: Array<{ header: string; lines: string[] }>;
+    hunkChunks: Array<{
+      header: string;
+      lines: string[];
+      oldLines: number;
+      newLines: number;
+      oldStart: number;
+      newStart: number;
+    }>;
     isBinary: boolean;
     oldPath: string;
     newPath: string;
@@ -153,11 +165,21 @@ export function parseUnifiedDiff(
 
   const chunks: RawFileChunk[] = [];
   let curChunk: RawFileChunk | null = null;
-  let curHunk: { header: string; lines: string[] } | null = null;
+  let curHunk: {
+    header: string;
+    lines: string[];
+    oldLines: number;
+    newLines: number;
+    oldStart: number;
+    newStart: number;
+    seenOld: number;
+    seenNew: number;
+  } | null = null;
 
   for (let i = 0; i < rawLines.length; i++) {
     const line = rawLines[i]!;
 
+    // Check for diff command boundary
     if (line.startsWith('diff --git ') || line.startsWith('diff --no-index ')) {
       if (curChunk) {
         if (curHunk) {
@@ -173,13 +195,12 @@ export function parseUnifiedDiff(
         isBinary: false,
         oldPath: '',
         newPath: '',
-        status: 'M',
+        status: options?.untracked ? 'A' : 'M',
         totalBytes: Buffer.byteLength(line, 'utf8'),
         totalDiffLines: 0,
       };
 
-      // Try to parse diff --git a/... b/...
-      const gitMatch = /^diff --(?:git|no-index) (?:--\s+)?("?[^"]+"?|\S+)\s+("?[^"]+"?|\S+)$/.exec(line);
+      const gitMatch = /^diff --(?:git|no-index) (?:--\s+)?("?[^"]+"?|\S+)\s+("?[^"]+"?|\S+)/.exec(line);
       if (gitMatch) {
         curChunk.oldPath = unquoteGitPath(gitMatch[1]!);
         curChunk.newPath = unquoteGitPath(gitMatch[2]!);
@@ -188,76 +209,121 @@ export function parseUnifiedDiff(
     }
 
     if (!curChunk) {
-      // Diff header before first diff command, ignore
       continue;
     }
 
     curChunk.totalBytes += Buffer.byteLength(line, 'utf8') + 1;
 
+    // Check for hunk header
+    if (line.startsWith('@@ ')) {
+      if (curHunk) {
+        curChunk.hunkChunks.push(curHunk);
+        curHunk = null;
+      }
+
+      const cleanLine = line.endsWith('\r') ? line.slice(0, -1) : line;
+      const m = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(cleanLine);
+      const oldStart = m ? Number.parseInt(m[1]!, 10) : 1;
+      const oldLines = m ? (m[2] !== undefined ? Number.parseInt(m[2], 10) : 1) : 1;
+      const newStart = m ? Number.parseInt(m[3]!, 10) : 1;
+      const newLines = m ? (m[4] !== undefined ? Number.parseInt(m[4], 10) : 1) : 1;
+
+      curHunk = {
+        header: line,
+        lines: [],
+        oldStart,
+        oldLines,
+        newStart,
+        newLines,
+        seenOld: 0,
+        seenNew: 0,
+      };
+      curChunk.totalDiffLines++;
+
+      // If oldLines == 0 and newLines == 0, hunk is immediately complete
+      if (oldLines === 0 && newLines === 0) {
+        if (i + 1 < rawLines.length && rawLines[i + 1]!.startsWith('\\')) {
+          curHunk.lines.push(rawLines[++i]!);
+          curChunk.totalDiffLines++;
+        }
+        curChunk.hunkChunks.push(curHunk);
+        curHunk = null;
+      }
+      continue;
+    }
+
+    // Inside a hunk: consume strictly by counts
+    if (curHunk) {
+      const prefix = line[0];
+      if (prefix === ' ' || prefix === '-' || prefix === '+' || prefix === '\\') {
+        curHunk.lines.push(line);
+        curChunk.totalDiffLines++;
+
+        if (prefix === ' ') {
+          curHunk.seenOld++;
+          curHunk.seenNew++;
+        } else if (prefix === '-') {
+          curHunk.seenOld++;
+        } else if (prefix === '+') {
+          curHunk.seenNew++;
+        }
+
+        // Check if hunk counts are fulfilled
+        if (curHunk.seenOld >= curHunk.oldLines && curHunk.seenNew >= curHunk.newLines) {
+          // Check for possible trailing "\ No newline"
+          if (i + 1 < rawLines.length && rawLines[i + 1]!.startsWith('\\')) {
+            curHunk.lines.push(rawLines[++i]!);
+            curChunk.totalDiffLines++;
+          }
+          curChunk.hunkChunks.push(curHunk);
+          curHunk = null;
+        }
+        continue;
+      } else {
+        // Line does not start with diff hunk prefix -> hunk ended prematurely
+        curChunk.hunkChunks.push(curHunk);
+        curHunk = null;
+      }
+    }
+
+    // Header lines (outside hunks)
     if (line.startsWith('new file mode ')) {
       curChunk.headerLines.push(line);
       curChunk.status = 'A';
-      continue;
-    }
-    if (line.startsWith('deleted file mode ')) {
+    } else if (line.startsWith('deleted file mode ')) {
       curChunk.headerLines.push(line);
       curChunk.status = 'D';
-      continue;
-    }
-    if (line.startsWith('rename from ')) {
+    } else if (line.startsWith('rename from ')) {
       curChunk.headerLines.push(line);
       curChunk.oldPath = unquoteGitPath(line.slice(12));
       curChunk.status = 'R';
-      continue;
-    }
-    if (line.startsWith('rename to ')) {
+    } else if (line.startsWith('rename to ')) {
       curChunk.headerLines.push(line);
       curChunk.newPath = unquoteGitPath(line.slice(10));
       curChunk.status = 'R';
-      continue;
-    }
-    if (line.startsWith('similarity index ') || line.startsWith('index ') || line.startsWith('old mode ') || line.startsWith('new mode ')) {
+    } else if (
+      line.startsWith('similarity index ') ||
+      line.startsWith('index ') ||
+      line.startsWith('old mode ') ||
+      line.startsWith('new mode ')
+    ) {
       curChunk.headerLines.push(line);
-      continue;
-    }
-    if (line.startsWith('--- ')) {
+    } else if (line.startsWith('--- ')) {
       curChunk.headerLines.push(line);
       const parsed = unquoteGitPath(line.slice(4));
       if (parsed !== '/dev/null') {
         curChunk.oldPath = parsed;
       }
-      continue;
-    }
-    if (line.startsWith('+++ ')) {
+    } else if (line.startsWith('+++ ')) {
       curChunk.headerLines.push(line);
       const parsed = unquoteGitPath(line.slice(4));
       if (parsed !== '/dev/null') {
         curChunk.newPath = parsed;
       }
-      continue;
-    }
-    if (line.startsWith('Binary files ') || line.includes('GIT binary patch')) {
+    } else if (line.startsWith('Binary files ') || line.includes('GIT binary patch')) {
       curChunk.headerLines.push(line);
       curChunk.isBinary = true;
       curChunk.status = 'B';
-      continue;
-    }
-
-    if (line.startsWith('@@ ')) {
-      if (curHunk) {
-        curChunk.hunkChunks.push(curHunk);
-      }
-      curHunk = {
-        header: line,
-        lines: [],
-      };
-      curChunk.totalDiffLines++;
-      continue;
-    }
-
-    if (curHunk) {
-      curHunk.lines.push(line);
-      curChunk.totalDiffLines++;
     } else {
       curChunk.headerLines.push(line);
     }
@@ -295,47 +361,37 @@ export function parseUnifiedDiff(
     if (!isOmitted && !isTooLarge && !chunk.isBinary) {
       for (const rawHunk of chunk.hunkChunks) {
         const header = rawHunk.header;
-        const hunkMatch = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/.exec(header);
-        const oldStart = hunkMatch ? Number.parseInt(hunkMatch[1]!, 10) : 1;
-        const oldLines = hunkMatch ? (hunkMatch[2] !== undefined ? Number.parseInt(hunkMatch[2], 10) : 1) : 0;
-        const newStart = hunkMatch ? Number.parseInt(hunkMatch[3]!, 10) : 1;
-        const newLines = hunkMatch ? (hunkMatch[4] !== undefined ? Number.parseInt(hunkMatch[4], 10) : 1) : 0;
-
         const lines: DiffHunkLine[] = [];
         const rawHunkLines: string[] = [];
 
         for (const l of rawHunk.lines) {
           rawHunkLines.push(l);
-          if (l.startsWith('+')) {
-            fileAdditions++;
-            lines.push(['+', l.slice(1)]);
-          } else if (l.startsWith('-')) {
-            fileDeletions++;
-            lines.push(['-', l.slice(1)]);
-          } else if (l.startsWith('\\')) {
-            lines.push(['\\', l.slice(1)]);
-          } else if (l.startsWith(' ')) {
-            lines.push([' ', l.slice(1)]);
-          } else {
-            // Some diffs might have empty context line represented as empty string
-            lines.push([' ', l]);
+          const p = l[0] as ' ' | '-' | '+' | '\\';
+          let text = l.slice(1);
+          if (text.endsWith('\r')) {
+            text = text.slice(0, -1);
           }
+          if (p === '+') {
+            fileAdditions++;
+          } else if (p === '-') {
+            fileDeletions++;
+          }
+          lines.push([p, text]);
         }
 
         const id = computeHunkId(finalPath, header, rawHunkLines);
         hunks.push({
           id,
-          header,
-          old_start: oldStart,
-          old_lines: oldLines,
-          new_start: newStart,
-          new_lines: newLines,
+          header: header.endsWith('\r') ? header.slice(0, -1) : header,
+          old_start: rawHunk.oldStart,
+          old_lines: rawHunk.oldLines,
+          new_start: rawHunk.newStart,
+          new_lines: rawHunk.newLines,
           lines,
           rawLines: rawHunkLines,
         });
       }
     } else if (!chunk.isBinary) {
-      // Calculate approximate additions/deletions even if hunks omitted
       for (const rawHunk of chunk.hunkChunks) {
         for (const l of rawHunk.lines) {
           if (l.startsWith('+')) fileAdditions++;
@@ -352,7 +408,7 @@ export function parseUnifiedDiff(
       old_path: finalOldPath,
       status: chunk.isBinary ? 'B' : chunk.status,
       binary: chunk.isBinary,
-      untracked: false,
+      untracked: Boolean(options?.untracked),
       too_large: isTooLarge,
       omitted: isOmitted,
       additions: fileAdditions,
@@ -383,7 +439,7 @@ export function buildHunkPatch(file: DiffFile, hunkId: string | null): string {
     throw new Error(`Hunk ${hunkId ?? 'all'} not found in file ${file.path}`);
   }
 
-  // Prepare header
+  // Ensure header lines have line endings
   const header = file.headerLines.join('\n');
   const hunksBody = hunksToInclude
     .map((h) => `${h.header}\n${h.rawLines.join('\n')}`)

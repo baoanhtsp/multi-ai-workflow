@@ -6,7 +6,12 @@ import test from 'node:test';
 import { resolveServerPaths } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
-import { resolveEditorExe, validateEditorConfig } from './editor.ts';
+import {
+  openFileInEditor,
+  resolveEditorExe,
+  saveEditorConfig,
+  validateEditorConfig,
+} from './editor.ts';
 import { feature as filesFeature } from './index.ts';
 
 test('editor resolution: unit-test resolver with fake dir, .cmd shim resolving to VS Code-family real .exe', () => {
@@ -346,10 +351,110 @@ test('files feature end-to-end: tree, dotfiles, .git excluded, path traversal, r
   assert.equal(histRes.commits[0].subject, 'Initial commit');
   assert.ok(histRes.commits[0].additions > 0);
 
+  // 7. POST files_open traversal rejection (400) and missing file (404)
+  await assert.rejects(
+    async () => {
+      await filesFeature.routes.files_open.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=files_open'),
+          query: new URLSearchParams(),
+          body: {
+            project_path: projectDir,
+            path: '../../secret.txt',
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+
+  await assert.rejects(
+    async () => {
+      await filesFeature.routes.files_open.handler(
+        fakeCtx as any,
+        {
+          ...fakeCtx,
+          url: new URL('http://127.0.0.1/api?action=files_open'),
+          query: new URLSearchParams(),
+          body: {
+            project_path: projectDir,
+            path: 'nonexistent_file.txt',
+          },
+          req: {} as any,
+          res: {} as any,
+          ctx: fakeCtx,
+        }
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 404
+  );
+
   // Clean up
   try {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   } catch {
     // Ignore cleanup error
   }
+});
+
+test('openFileInEditor: substitutes placeholders, calls spawnFn, and attaches error listener on real spawn', () => {
+  const tmpRoot = path.win32.join(
+    os.tmpdir(),
+    `maw_files_spawn_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const mawHome = path.win32.join(tmpRoot, 'maw_home');
+  const projectDir = path.win32.join(projectsRoot, 'spawn-repo');
+
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    mawHome,
+    repoRoot: projectDir,
+  });
+
+  const testFilePath = path.win32.join(projectDir, 'sample.txt');
+  fs.writeFileSync(testFilePath, 'hello editor\n', 'utf8');
+
+  // Custom editor config pointing to notepad.exe
+  saveEditorConfig(['notepad.exe', '{file}'], paths);
+
+  let capturedExe = '';
+  let capturedArgs: string[] = [];
+  const res = openFileInEditor({
+    projectPath: projectDir,
+    relPath: 'sample.txt',
+    line: 12,
+    paths,
+    spawnFn: (exe, args) => {
+      capturedExe = exe;
+      capturedArgs = args;
+    },
+  });
+
+  assert.equal(res.ok, true);
+  assert.ok(capturedExe.toLowerCase().endsWith('notepad.exe'));
+  assert.equal(capturedArgs.length, 1);
+  assert.equal(path.normalize(capturedArgs[0]!), path.normalize(testFilePath));
+
+  // Also test without spawnFn using a real executable (notepad.exe) to verify child.on('error') does not crash
+  const liveRes = openFileInEditor({
+    projectPath: projectDir,
+    relPath: 'sample.txt',
+    line: 1,
+    paths,
+  });
+  assert.equal(liveRes.ok, true);
+
+  // Clean up
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
 });

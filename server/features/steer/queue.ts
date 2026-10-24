@@ -5,6 +5,7 @@ import { refreshJobMetaStatus, type JobMeta } from '../../actions/jobs.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
 import type { ServerPaths } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
+import { resolveProjectPath } from '../../lib/paths.ts';
 import { launchSteerJob } from './launch.ts';
 import {
   buildResumeCommand,
@@ -219,6 +220,11 @@ export async function runQueueProcessor(ctx: MawFeatureContext): Promise<void> {
         continue;
       }
 
+      const validatedProject = resolveProjectPath(meta.project_path, ctx.paths.projectsRoot);
+      if (!validatedProject) {
+        continue;
+      }
+
       // Parent is no longer RUNNING: process queued entries
       const mergedMessage = queuedEntries.map((e) => e.message).join('\n\n---\n\n');
       const logFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.log`);
@@ -226,20 +232,54 @@ export async function runQueueProcessor(ctx: MawFeatureContext): Promise<void> {
       const promptFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.prompt.txt`);
       const originalPrompt = fs.existsSync(promptFile) ? fs.readFileSync(promptFile, 'utf8') : '';
 
-      const agent = meta.agent ?? (meta.mode === 'claude' ? 'claude' : meta.mode === 'codex' ? 'codex' : 'antigravity');
-      const role = meta.role ?? 'backend';
+      let agent = meta.agent;
+      let role = meta.role;
+      if (meta.mode === 'antigravity' || (!agent && meta.mode === 'antigravity')) {
+        agent = 'antigravity';
+      } else if (meta.mode === 'claude') {
+        agent = 'claude';
+      } else if (meta.mode === 'codex') {
+        agent = 'codex';
+      } else if (
+        meta.mode === 'council' ||
+        meta.mode === 'auto-gate' ||
+        meta.mode === 'spec-guard'
+      ) {
+        agent = (meta as any).implementer || ctx.registry.defaults?.implementer || 'claude';
+        role = 'backend';
+      }
+      if (!agent) agent = 'antigravity';
+
+      const VALID_TASK_ROLES = new Set([
+        'architect',
+        'leader',
+        'backend',
+        'frontend',
+        'reviewer',
+        'tester',
+      ]);
+      const effectiveRole = VALID_TASK_ROLES.has(role) ? role : 'backend';
       const agentEntry = ctx.registry.agents.find((a) => a.id === agent);
 
-      const sessionRef = parseSessionRefFromLog(logContent, agent, meta.project_path, ctx.paths, agentEntry);
-      const resumeCmd = sessionRef && sessionRef.exists
-        ? buildResumeCommand({
-            platform: agent,
-            sessionId: sessionRef.id,
-            model: meta.model,
-            effort: meta.effort,
-            registryAgent: agentEntry,
-          })
-        : null;
+      const sessionRef = parseSessionRefFromLog(
+        logContent,
+        agent,
+        validatedProject,
+        ctx.paths,
+        agentEntry
+      );
+      const resumeCmd =
+        sessionRef && sessionRef.exists
+          ? buildResumeCommand({
+              platform: agent,
+              sessionId: sessionRef.id,
+              model: meta.model,
+              effort: meta.effort,
+              projectPath: validatedProject,
+              paths: ctx.paths,
+              registryAgent: agentEntry,
+            })
+          : null;
 
       try {
         if (resumeCmd) {
@@ -247,13 +287,14 @@ export async function runQueueProcessor(ctx: MawFeatureContext): Promise<void> {
           const steerRes = await launchSteerJob({
             parentJobId: jobId,
             agent,
-            role,
+            role: effectiveRole,
             model: meta.model,
             effort: meta.effort,
-            projectPath: meta.project_path,
+            projectPath: validatedProject,
             prompt: mergedMessage,
             commandExe: resumeCmd.exe,
             commandArgs: resumeCmd.args,
+            promptVia: resumeCmd.promptVia,
             paths: ctx.paths,
             registry: ctx.registry,
             strategy: 'resume',
@@ -269,8 +310,8 @@ export async function runQueueProcessor(ctx: MawFeatureContext): Promise<void> {
           const summaryPrompt = buildSummaryPrompt({
             jobId,
             agent,
-            role,
-            projectPath: meta.project_path,
+            role: effectiveRole,
+            projectPath: validatedProject,
             originalPrompt,
             logTail: logContent,
             message: mergedMessage,
@@ -279,10 +320,10 @@ export async function runQueueProcessor(ctx: MawFeatureContext): Promise<void> {
           const jobResult = await ctx.startJob({
             mode: 'task',
             agent,
-            role,
+            role: effectiveRole,
             model: meta.model,
             effort: meta.effort,
-            project_path: meta.project_path,
+            project_path: validatedProject,
             prompt: summaryPrompt,
           });
 

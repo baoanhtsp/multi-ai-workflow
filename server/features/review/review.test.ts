@@ -245,6 +245,15 @@ test('review end-to-end on temp git repo: worktree diff, reject hunk, audit log,
   assert.ok(fileADiff);
   assert.ok(untrackedDiff);
   assert.equal(fileADiff.hunks.length, 2);
+  assert.equal(untrackedDiff.untracked, true);
+  assert.equal(untrackedDiff.status, 'A');
+
+  // Verify rawLines and headerLines are stripped from review_diff response
+  assert.equal((fileADiff as any).headerLines, undefined);
+  assert.equal((fileADiff.hunks[0] as any).rawLines, undefined);
+  assert.ok(fileADiff.hunks[0]!.header);
+  assert.equal((untrackedDiff as any).headerLines, undefined);
+  assert.equal((untrackedDiff.hunks[0] as any).rawLines, undefined);
 
   const hunk1 = fileADiff.hunks[0]!;
   const hunk2 = fileADiff.hunks[1]!;
@@ -487,4 +496,224 @@ test('review end-to-end on temp git repo: worktree diff, reject hunk, audit log,
   } catch {
     // Ignore cleanup error
   }
+});
+
+test('diff parser count-based boundary prevents SQL -- comment and ++x from being parsed as diff headers', () => {
+  const diffWithSqlAndPlus =
+    'diff --git a/query.sql b/query.sql\n' +
+    'index 1111111..2222222 100644\n' +
+    '--- a/query.sql\n' +
+    '+++ b/query.sql\n' +
+    '@@ -1,4 +1,4 @@\n' +
+    ' SELECT 1;\n' +
+    '--- old sql comment\n' +
+    '+++ new sql comment\n' +
+    ' SELECT 2;\n';
+
+  const res = parseUnifiedDiff(diffWithSqlAndPlus);
+  assert.equal(res.files.length, 1);
+  const f = res.files[0]!;
+  assert.equal(f.path, 'query.sql');
+  assert.equal(f.hunks.length, 1);
+  const h = f.hunks[0]!;
+  assert.equal(h.old_lines, 4);
+  assert.equal(h.new_lines, 4);
+  assert.equal(h.lines.length, 4);
+  assert.equal(h.lines[1]![0], '-');
+  assert.equal(h.lines[1]![1], '-- old sql comment');
+  assert.equal(h.lines[2]![0], '+');
+  assert.equal(h.lines[2]![1], '++ new sql comment');
+});
+
+test('review_hunk rejects last hunk of tracked file when untracked file also exists without 409 stale hunk id', async () => {
+  const tmpRoot = path.win32.join(
+    os.tmpdir(),
+    `maw_review_lasthunk_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const mawHome = path.win32.join(tmpRoot, 'maw_home');
+  const projectDir = path.win32.join(projectsRoot, 'lasthunk-repo');
+
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    mawHome,
+    repoRoot: projectDir,
+  });
+
+  await runCommand('git', ['-C', projectDir, 'init']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.name', 'Tester']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.email', 'tester@example.com']);
+
+  // Create file with 2 hunks
+  const lines: string[] = [];
+  for (let i = 1; i <= 20; i++) {
+    lines.push(`initial line ${i}`);
+  }
+  fs.writeFileSync(path.win32.join(projectDir, 'code.ts'), lines.join('\n') + '\n', 'utf8');
+  await runCommand('git', ['-C', projectDir, 'add', 'code.ts']);
+  await runCommand('git', ['-C', projectDir, 'commit', '-m', 'Add code.ts']);
+
+  // Modify first and last regions
+  lines[0] = 'modified first line 1';
+  lines[19] = 'modified last line 20';
+  fs.writeFileSync(path.win32.join(projectDir, 'code.ts'), lines.join('\n') + '\n', 'utf8');
+
+  // Add untracked file
+  fs.writeFileSync(path.win32.join(projectDir, 'new_untracked.ts'), 'export const u = 1;\n', 'utf8');
+
+  const fakeCtx = {
+    paths,
+    registry: {} as any,
+    readJobs: async () => [],
+    startJob: async () => ({ ok: true }),
+  };
+
+  // Get diff
+  const diffRes = (await reviewFeature.routes.review_diff.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL(`http://127.0.0.1/api?action=review_diff&project_path=${encodeURIComponent(projectDir)}&source=worktree`),
+      query: new URLSearchParams({ project_path: projectDir, source: 'worktree' }),
+      body: {},
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(diffRes.files.length, 2);
+  const codeFile = diffRes.files.find((f: any) => f.path === 'code.ts');
+  assert.ok(codeFile);
+  assert.equal(codeFile.hunks.length, 2);
+
+  // Reject the LAST hunk (hunk 1)
+  const lastHunk = codeFile.hunks[1]!;
+  const rejectRes = (await reviewFeature.routes.review_hunk.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_hunk'),
+      query: new URLSearchParams(),
+      body: {
+        project_path: projectDir,
+        source: 'worktree',
+        path: 'code.ts',
+        hunk_id: lastHunk.id,
+        action: 'reject',
+        confirm: true,
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(rejectRes.ok, true);
+  assert.equal(rejectRes.action, 'reject');
+
+  // Verify code.ts has first modified kept and last reverted
+  const contentAfter = fs.readFileSync(path.win32.join(projectDir, 'code.ts'), 'utf8');
+  assert.ok(contentAfter.includes('modified first line 1'));
+  assert.ok(contentAfter.includes('initial line 20'));
+  assert.ok(!contentAfter.includes('modified last line 20'));
+
+  // Clean up
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
+});
+
+test('review_hunk on CRLF repository with core.autocrlf=false successfully reverts hunk', async () => {
+  const tmpRoot = path.win32.join(
+    os.tmpdir(),
+    `maw_review_crlf_${Date.now()}_${Math.random().toString(16).slice(2)}`
+  );
+  const projectsRoot = path.win32.join(tmpRoot, 'projects');
+  const mawHome = path.win32.join(tmpRoot, 'maw_home');
+  const projectDir = path.win32.join(projectsRoot, 'crlf-repo');
+
+  fs.mkdirSync(projectDir, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+
+  const paths = resolveServerPaths({
+    projectsRoot,
+    mawHome,
+    repoRoot: projectDir,
+  });
+
+  await runCommand('git', ['-C', projectDir, 'init']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.name', 'Tester']);
+  await runCommand('git', ['-C', projectDir, 'config', 'user.email', 'tester@example.com']);
+  await runCommand('git', ['-C', projectDir, 'config', 'core.autocrlf', 'false']);
+
+  // Commit a CRLF file
+  const crlfContent = 'row 1\r\nrow 2\r\nrow 3\r\nrow 4\r\nrow 5\r\n';
+  fs.writeFileSync(path.win32.join(projectDir, 'crlf.txt'), crlfContent, 'utf8');
+  await runCommand('git', ['-C', projectDir, 'add', 'crlf.txt']);
+  await runCommand('git', ['-C', projectDir, 'commit', '-m', 'Add crlf.txt']);
+
+  // Modify row 3 with CRLF
+  const modifiedCrlf = 'row 1\r\nrow 2\r\nrow 3 MODIFIED\r\nrow 4\r\nrow 5\r\n';
+  fs.writeFileSync(path.win32.join(projectDir, 'crlf.txt'), modifiedCrlf, 'utf8');
+
+  const fakeCtx = {
+    paths,
+    registry: {} as any,
+    readJobs: async () => [],
+    startJob: async () => ({ ok: true }),
+  };
+
+  const diffRes = (await reviewFeature.routes.review_diff.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL(`http://127.0.0.1/api?action=review_diff&project_path=${encodeURIComponent(projectDir)}&source=worktree`),
+      query: new URLSearchParams({ project_path: projectDir, source: 'worktree' }),
+      body: {},
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(diffRes.files.length, 1);
+  const crlfFile = diffRes.files[0]!;
+  assert.equal(crlfFile.hunks.length, 1);
+
+  const hunkToReject = crlfFile.hunks[0]!;
+  const rejectRes = (await reviewFeature.routes.review_hunk.handler(
+    fakeCtx as any,
+    {
+      ...fakeCtx,
+      url: new URL('http://127.0.0.1/api?action=review_hunk'),
+      query: new URLSearchParams(),
+      body: {
+        project_path: projectDir,
+        source: 'worktree',
+        path: 'crlf.txt',
+        hunk_id: hunkToReject.id,
+        action: 'reject',
+        confirm: true,
+      },
+      req: {} as any,
+      res: {} as any,
+      ctx: fakeCtx,
+    }
+  )) as any;
+
+  assert.equal(rejectRes.ok, true);
+
+  // Verify file restored to original CRLF
+  const contentAfter = fs.readFileSync(path.win32.join(projectDir, 'crlf.txt'), 'utf8');
+  assert.ok(contentAfter.includes('row 3\r\n'));
+  assert.ok(!contentAfter.includes('row 3 MODIFIED'));
+
+  // Clean up
+  try {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  } catch {}
 });

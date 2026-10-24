@@ -3,16 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { refreshJobMetaStatus, type JobMeta } from '../../actions/jobs.ts';
 import type { MawFeature } from '../../lib/feature.ts';
+import { resolveProjectPath } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { isValidJobId } from '../review/git.ts';
 import { launchSteerJob } from './launch.ts';
 import {
   appendSteerLogLine,
-  countTotalQueued,
   ensureQueueProcessorRunning,
   findJobChain,
-  getSteerFilePath,
   loadSteerData,
   runQueueProcessor,
   saveSteerData,
@@ -45,6 +44,45 @@ function readJobLogSafe(logPath: string, maxBytes = 8 * 1024 * 1024): string {
   }
 }
 
+const VALID_TASK_ROLES = new Set([
+  'architect',
+  'leader',
+  'backend',
+  'frontend',
+  'reviewer',
+  'tester',
+]);
+
+function resolveAgentAndRole(meta: JobMeta, registryDefaults?: { implementer?: string }): {
+  agent: string;
+  role: string;
+} {
+  let agent = meta.agent;
+  let role = meta.role;
+
+  if (meta.mode === 'antigravity' || (!agent && meta.mode === 'antigravity')) {
+    agent = 'antigravity';
+  } else if (meta.mode === 'claude') {
+    agent = 'claude';
+  } else if (meta.mode === 'codex') {
+    agent = 'codex';
+  } else if (
+    meta.mode === 'council' ||
+    meta.mode === 'auto-gate' ||
+    meta.mode === 'spec-guard'
+  ) {
+    agent = (meta as any).implementer || registryDefaults?.implementer || 'claude';
+    role = 'backend';
+  }
+
+  if (!agent) {
+    agent = 'antigravity';
+  }
+
+  const effectiveRole = VALID_TASK_ROLES.has(role) ? role : 'backend';
+  return { agent, role: effectiveRole };
+}
+
 export const feature: MawFeature = {
   name: 'steer',
   routes: {
@@ -70,23 +108,21 @@ export const feature: MawFeature = {
 
         meta = await refreshJobMetaStatus(meta, ctx.paths.jobsDir, { checkPid: true });
 
+        const validatedProject = resolveProjectPath(meta.project_path, ctx.paths.projectsRoot);
+        if (!validatedProject) {
+          throw new ApiValidationError('Invalid project_path in job meta.', 400);
+        }
+
         const logFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.log`);
         const logContent = readJobLogSafe(logFile);
 
-        const agent =
-          meta.agent ??
-          (meta.mode === 'claude'
-            ? 'claude'
-            : meta.mode === 'codex'
-              ? 'codex'
-              : 'antigravity');
-        const role = meta.role ?? 'backend';
+        const { agent, role } = resolveAgentAndRole(meta, ctx.registry.defaults);
         const agentEntry = ctx.registry.agents.find((a) => a.id === agent);
 
         const sessionRef = parseSessionRefFromLog(
           logContent,
           agent,
-          meta.project_path,
+          validatedProject,
           ctx.paths,
           agentEntry
         );
@@ -101,6 +137,8 @@ export const feature: MawFeature = {
                 sessionId: sessionRef.id,
                 model: meta.model,
                 effort: meta.effort,
+                projectPath: validatedProject,
+                paths: ctx.paths,
                 registryAgent: agentEntry,
               })
             : null;
@@ -149,7 +187,7 @@ export const feature: MawFeature = {
             agent,
             role,
             model: meta.model,
-            project_path: meta.project_path,
+            project_path: validatedProject,
             parent_job_id: (meta as any).parent_job_id,
           },
           session_ref: sessionRef,
@@ -188,23 +226,21 @@ export const feature: MawFeature = {
 
         meta = await refreshJobMetaStatus(meta, ctx.paths.jobsDir, { checkPid: true });
 
+        const validatedProject = resolveProjectPath(meta.project_path, ctx.paths.projectsRoot);
+        if (!validatedProject) {
+          throw new ApiValidationError('Invalid project_path in job meta.', 400);
+        }
+
         const logFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.log`);
         const logContent = readJobLogSafe(logFile);
 
-        const agent =
-          meta.agent ??
-          (meta.mode === 'claude'
-            ? 'claude'
-            : meta.mode === 'codex'
-              ? 'codex'
-              : 'antigravity');
-        const role = meta.role ?? 'backend';
+        const { agent, role } = resolveAgentAndRole(meta, ctx.registry.defaults);
         const agentEntry = ctx.registry.agents.find((a) => a.id === agent);
 
         const sessionRef = parseSessionRefFromLog(
           logContent,
           agent,
-          meta.project_path,
+          validatedProject,
           ctx.paths,
           agentEntry
         );
@@ -219,6 +255,8 @@ export const feature: MawFeature = {
                 sessionId: sessionRef.id,
                 model: typeof req.body.model === 'string' ? req.body.model : meta.model,
                 effort: typeof req.body.effort === 'string' ? req.body.effort : meta.effort,
+                projectPath: validatedProject,
+                paths: ctx.paths,
                 registryAgent: agentEntry,
               })
             : null;
@@ -287,7 +325,6 @@ export const feature: MawFeature = {
         };
 
         if (strategy === 'live') {
-          // Write prompt file
           const tmpDir = path.win32.join(ctx.paths.featureDataDir('steer'), 'tmp');
           if (!fs.existsSync(tmpDir)) {
             fs.mkdirSync(tmpDir, { recursive: true });
@@ -309,7 +346,7 @@ export const feature: MawFeature = {
               '-ConversationId',
               sessionRef!.id,
               '-WorkDir',
-              meta.project_path,
+              validatedProject,
               '-Title',
               'Steer from Mission Control',
               '-PromptFile',
@@ -343,10 +380,11 @@ export const feature: MawFeature = {
               role,
               model: typeof req.body.model === 'string' ? req.body.model : meta.model,
               effort: typeof req.body.effort === 'string' ? req.body.effort : meta.effort,
-              projectPath: meta.project_path,
+              projectPath: validatedProject,
               prompt: message,
               commandExe: resumeCmd!.exe,
               commandArgs: resumeCmd!.args,
+              promptVia: resumeCmd!.promptVia,
               paths: ctx.paths,
               registry: ctx.registry,
               strategy: 'resume',
@@ -357,6 +395,8 @@ export const feature: MawFeature = {
           } catch (err: unknown) {
             entry.status = 'failed';
             entry.error = err instanceof Error ? err.message : String(err);
+            steerData.entries.push(entry);
+            saveSteerData(steerData, ctx.paths);
             throw err;
           }
         } else if (strategy === 'summary') {
@@ -367,26 +407,34 @@ export const feature: MawFeature = {
             jobId,
             agent,
             role,
-            projectPath: meta.project_path,
+            projectPath: validatedProject,
             originalPrompt,
             logTail: logContent,
             message,
           });
 
-          const jobResult = await ctx.startJob({
-            mode: 'task',
-            agent,
-            role,
-            model: typeof req.body.model === 'string' ? req.body.model : meta.model,
-            effort: typeof req.body.effort === 'string' ? req.body.effort : meta.effort,
-            project_path: meta.project_path,
-            prompt: summaryPrompt,
-          });
+          try {
+            const jobResult = await ctx.startJob({
+              mode: 'task',
+              agent,
+              role,
+              model: typeof req.body.model === 'string' ? req.body.model : meta.model,
+              effort: typeof req.body.effort === 'string' ? req.body.effort : meta.effort,
+              project_path: validatedProject,
+              prompt: summaryPrompt,
+            });
 
-          const childJobId = String(jobResult.job_id ?? '');
-          entry.status = 'started';
-          entry.child_job_id = childJobId;
-          appendSteerLogLine(jobId, 'summary', childJobId, message, ctx.paths);
+            const childJobId = String(jobResult.job_id ?? '');
+            entry.status = 'started';
+            entry.child_job_id = childJobId;
+            appendSteerLogLine(jobId, 'summary', childJobId, message, ctx.paths);
+          } catch (err: unknown) {
+            entry.status = 'failed';
+            entry.error = err instanceof Error ? err.message : String(err);
+            steerData.entries.push(entry);
+            saveSteerData(steerData, ctx.paths);
+            throw err;
+          }
         }
 
         steerData.entries.push(entry);
@@ -468,7 +516,6 @@ export const feature: MawFeature = {
   },
 
   status: async (ctx) => {
-    // Run queue processor
     await runQueueProcessor(ctx);
 
     const steerDir = ctx.paths.featureDataDir('steer');
@@ -477,7 +524,6 @@ export const feature: MawFeature = {
 
     if (fs.existsSync(steerDir)) {
       const files = fs.readdirSync(steerDir).filter((f) => f.endsWith('.json'));
-      // Sort by mtime descending (last 30)
       const fileStats = files
         .map((f) => ({
           name: f,

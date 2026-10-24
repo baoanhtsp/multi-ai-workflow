@@ -119,15 +119,46 @@ function searchDirectoryForFileContaining(
   return false;
 }
 
+export interface ResumeCommandResult {
+  exe: string;
+  args: string[];
+  promptVia: 'stdin' | 'file_arg';
+}
+
 export function buildResumeCommand(options: {
   platform: string;
   sessionId: string;
   model?: string;
   effort?: string;
+  projectPath?: string;
+  paths?: ServerPaths;
   registryAgent?: AgentEntry;
-}): { exe: string; args: string[] } | null {
-  const { platform, sessionId, model, effort, registryAgent } = options;
+}): ResumeCommandResult | null {
+  const { platform, sessionId, model, effort, projectPath, paths, registryAgent } = options;
   const p = platform.toLowerCase().trim();
+
+  if (p === 'antigravity') {
+    const scriptsDir = paths?.scriptsDir ?? 'C:\\scripts';
+    const scriptPath = path.win32.join(scriptsDir, 'invoke-antigravity.ps1');
+    const args = [
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-File',
+      scriptPath,
+      '-Action',
+      'send',
+      '-ConversationId',
+      sessionId,
+      '-WorkDir',
+      projectPath ?? 'C:\\project',
+      '-Title',
+      'Continue from Mission Control',
+      '-PromptFile',
+      '{prompt_file}',
+    ];
+    return { exe: 'powershell.exe', args, promptVia: 'file_arg' };
+  }
 
   if (p === 'claude') {
     const args = [
@@ -142,7 +173,7 @@ export function buildResumeCommand(options: {
     ];
     if (model) args.push('--model', model);
     if (effort) args.push('--effort', effort);
-    return { exe: 'claude', args };
+    return { exe: 'claude', args, promptVia: 'stdin' };
   }
 
   if (p === 'codex') {
@@ -155,7 +186,7 @@ export function buildResumeCommand(options: {
     ];
     if (model) args.push('-m', model);
     args.push('-'); // prompt on stdin
-    return { exe: 'codex', args };
+    return { exe: 'codex', args, promptVia: 'stdin' };
   }
 
   if (p === 'gemini') {
@@ -170,7 +201,7 @@ export function buildResumeCommand(options: {
       'yolo',
     ];
     if (model) args.push('-m', model);
-    return { exe: 'gemini', args };
+    return { exe: 'gemini', args, promptVia: 'stdin' };
   }
 
   if (registryAgent?.cli && registryAgent.resume_args && registryAgent.cli.prompt_via === 'stdin') {
@@ -181,6 +212,7 @@ export function buildResumeCommand(options: {
     return {
       exe: registryAgent.cli.command,
       args: combinedArgs,
+      promptVia: 'stdin',
     };
   }
 

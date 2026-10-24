@@ -37,6 +37,7 @@ export async function launchSteerJob(options: {
   prompt: string;
   commandExe: string;
   commandArgs: string[];
+  promptVia?: 'stdin' | 'file_arg';
   paths: ServerPaths;
   registry: LoadedRegistry;
   strategy: 'resume' | 'summary';
@@ -53,6 +54,7 @@ export async function launchSteerJob(options: {
     prompt,
     commandExe,
     commandArgs,
+    promptVia,
     paths,
     registry,
     strategy,
@@ -99,22 +101,30 @@ export async function launchSteerJob(options: {
     `------------------------------------------------------------\n`;
   fs.writeFileSync(logFile, '\uFEFF' + headerLine, 'utf8');
 
-  // 3. Command construction:
-  // Set-Location -LiteralPath '<proj>'; Get-Content -Raw -Encoding UTF8 -LiteralPath '<prompt>' | & '<exe>' <args…>
-  const formattedArgs = commandArgs.map((a) => psq(a)).join(' ');
-  const pipelineCmd =
-    `Set-Location -LiteralPath ${psq(projectPath)}; ` +
-    `Get-Content -Raw -Encoding UTF8 -LiteralPath ${psq(promptFile)} | & ${psq(commandExe)}${formattedArgs ? ' ' + formattedArgs : ''}`;
+  // 3. Command construction
+  const effectiveArgs = commandArgs.map((a) => (a === '{prompt_file}' ? promptFile : a));
+  const formattedArgs = effectiveArgs.map((a) => psq(a)).join(' ');
+
+  let pipelineCmd = '';
+  if (promptVia === 'file_arg') {
+    pipelineCmd =
+      `Set-Location -LiteralPath ${psq(projectPath)}; ` +
+      `& ${psq(commandExe)}${formattedArgs ? ' ' + formattedArgs : ''}`;
+  } else {
+    pipelineCmd =
+      `Set-Location -LiteralPath ${psq(projectPath)}; ` +
+      `Get-Content -Raw -Encoding UTF8 -LiteralPath ${psq(promptFile)} | & ${psq(commandExe)}${formattedArgs ? ' ' + formattedArgs : ''}`;
+  }
 
   const notifyScript = path.win32.join(paths.scriptsDir, 'send-notification.ps1');
   const hooksLib = path.win32.join(paths.scriptsDir, 'lib', 'maw-hooks.ps1');
   const projShort = path.basename(projectPath);
 
-  // Runner script matching handleRunJob template
+  // Runner script matching handleRunJob template with UTF-8 encoding without BOM
   const runnerCode =
     `$ErrorActionPreference = 'Continue'\n` +
     `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n` +
-    `$OutputEncoding = [System.Text.Encoding]::UTF8\n` +
+    `$OutputEncoding = New-Object System.Text.UTF8Encoding $false\n` +
     `$logPath = ${psq(logFile)}\n` +
     `if (Test-Path -LiteralPath ${psq(hooksLib)}) {\n` +
     `    try { . ${psq(hooksLib)} } catch {}\n` +
