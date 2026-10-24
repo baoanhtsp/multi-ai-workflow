@@ -507,10 +507,10 @@
     const g = a ? (a.git || S.gitCache.get(a.workdir)?.v) : null;
     if (a && !g) gitOf(a);
     const ctx = c?.context || {};
-    const pct = Math.round((Number(ctx.pct) || 0) * (Number(ctx.pct) <= 1 ? 100 : 1));
+    const pct = Math.round((Number(ctx.pct) || 0) * 100);
     const meterCls = pct >= 70 ? 'err' : pct >= 60 ? 'warn' : 'ok';
     const plat = platformById(a?.platform);
-    box.innerHTML = `
+    const html = `
       <select id="wsTopAgent" class="ws-top-agent" aria-label="${esc(t('ws.agents'))}" ${S.agents.length ? '' : 'disabled'}>${opts || `<option>${esc(t('ws.agents'))}</option>`}</select>
       ${a ? `<span class="pill ws-plat" title="${esc(plat?.label || a.platform)}"><span class="dot" style="background:${esc(plat?.color || 'var(--faint)')}"></span>${esc(plat?.label || a.platform)}${a.model ? ' · ' + esc(a.model) : ''}</span>` : ''}
       ${a ? (g?.branch ? `<span class="pill mono" title="${esc(a.workdir)}">⎇ ${esc(g.branch)}${g.ahead ? ` ↑${+g.ahead}` : ''}${g.behind ? ` ↓${+g.behind}` : ''}</span>` : `<span class="pill faint">${esc(g && g.has_git === false ? t('ws.noGit') : '⎇ …')}</span>`) : ''}
@@ -519,6 +519,9 @@
       ${c ? `<button type="button" class="pill ws-meter ${meterCls}" id="wsMeter" title="${esc(t('ws.ctx', { pct, used: kfmt(ctx.used_tokens), win: kfmt(ctx.window_tokens) }))}"><span class="ws-meter-bar"><i style="width:${Math.min(100, pct)}%"></i></span>${pct}%</button>` : ''}
       <span class="ws-grow"></span>
       <button type="button" class="btn btn-sm" id="wsReady">${esc(t('ws.ready'))}</button>`;
+    if (box._html === html) return;
+    box._html = html;
+    box.innerHTML = html;
     qs('#wsTopAgent', box).onchange = e => selectAgent(e.target.value);
     qs('#wsReady', box).onclick = () => M.ws.readiness ? M.ws.readiness(a?.team_id ? S.agents.filter(x => x.team_id === a.team_id) : S.agents) : M.toast('feat-teams.js', 'warn');
     const meter = qs('#wsMeter', box);
@@ -527,7 +530,7 @@
   function openMeterMenu(anchor) {
     const c = S.conv; if (!c) return;
     const ctx = c.context || {};
-    const pct = Math.round((Number(ctx.pct) || 0) * (Number(ctx.pct) <= 1 ? 100 : 1));
+    const pct = Math.round((Number(ctx.pct) || 0) * 100);
     openMenu(anchor, [
       { label: t('ws.ctx', { pct, used: kfmt(ctx.used_tokens), win: kfmt(ctx.window_tokens) }), disabled: true },
       { label: t('ws.compact'), disabled: !!c.active_job_id, run: async () => { await post('chat_compact', { conversation_id: c.id }); M.toast(t('ws.compactStarted')); refreshConv(); schedule(500); } },
@@ -537,7 +540,7 @@
   // ---------- left: groups → agents ----------
   function renderTree() {
     const box = qs('#wsTree', S.el); if (!box) return;
-    if (!S.agents.length) { box.innerHTML = `<div class="empty">${esc(S.loadErr ? t('ws.noBackend', { e: S.loadErr }) : t('ws.noAgents'))}</div>`; return; }
+    if (!S.agents.length) { box._html = ''; box.innerHTML = `<div class="empty">${esc(S.loadErr ? t('ws.noBackend', { e: S.loadErr }) : t('ws.noAgents'))}</div>`; return; }
     const f = S.filter.trim().toLowerCase();
     const match = a => !f || [a.name, a.platform, a.team_role, a.model].some(x => String(x || '').toLowerCase().includes(f));
     const groups = [...S.groups].sort((x, y) => (x.order ?? 0) - (y.order ?? 0) || x.name.localeCompare(y.name));
@@ -557,7 +560,13 @@
         <div class="ws-group-b ${open ? '' : 'hidden'}">${list.map(agentRow).join('')}</div>
       </div>`;
     }
-    box.innerHTML = html || `<div class="empty">—</div>`;
+    html = html || `<div class="empty">—</div>`;
+    if (box._html === html) return;
+    box._html = html;
+    const focusId = document.activeElement?.closest?.('#wsTree [data-agent], #wsTree [data-group-h]');
+    const key = focusId ? (focusId.dataset.agent ? `[data-agent="${focusId.dataset.agent}"]` : `[data-group-h="${focusId.dataset.groupH}"]`) : '';
+    box.innerHTML = html;
+    if (key) qs(key, box)?.focus();
   }
   function agentRow(a) {
     const st = STATUSES.includes(a.status) ? a.status : 'idle';
