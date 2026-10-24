@@ -121,7 +121,7 @@ review ──approve (move to done)──▶ done          review ──reject�
 | `task_create` | POST | card fields (`title`, `prompt` required unless `template_id`) + optional `template_id`, `vars: {}`, `status: "backlog"\|"queued"` (default `backlog`), `created_by` (`user` default; `lead` allowed from the API) | `{ ok, task }` |
 | `task_update` | POST | `{ id, …fields }` (not while `running`, except `title`, `labels`, `priority`, `retry`) | `{ ok, task }` |
 | `task_delete` | POST | `{ id }` (not `running` ⇒ 409; removes the id from other cards' `depends_on`) | `{ ok, id }` + audit |
-| `task_move` | POST | `{ id, status, before_id? }` (reorders `order` inside the target column) | `{ ok, task }` |
+| `task_move` | POST | `{ id, status, before_id?, reason? }` (reorders `order` inside the target column; `reason` ≤ 200 chars becomes `status_reason`, e.g. "rejected by user") | `{ ok, task }` |
 | `task_start` | POST | `{ id, ignore_limits?: bool }` — dependencies must be `done` (409 otherwise); starts now | `{ ok, task, job_id }` |
 | `task_cancel` | POST | `{ id }` — cancels the running job (`handleCancelJob`) ⇒ `failed` "cancelled" | `{ ok, task }` + audit |
 | `task_retry` | POST | §2.2 | `{ ok, task }` |
