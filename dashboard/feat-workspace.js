@@ -168,13 +168,18 @@
     const b = qs('.ws-dlg-b', dlg);
     if (typeof body === 'string') b.innerHTML = body; else if (body) b.appendChild(body);
     const f = qs('.ws-dlg-f', dlg);
+    // Resolves exactly once, whichever way the dialog ends (button, submit, Esc, close event).
+    let done = false;
+    const finish = () => { if (done) return; done = true; if (dlg.open) dlg.close(); onClose?.(dlg.returnValue); dlg.remove(); };
     for (const a of actions || []) {
       const btn = h('button', { type: a.submit ? 'submit' : 'button', class: 'btn ' + (a.primary ? 'btn-primary' : a.danger ? 'btn-danger' : ''), value: a.value || '' }, esc(a.label));
-      if (a.run) btn.onclick = async ev => { ev.preventDefault(); btn.disabled = true; try { if (await a.run(dlg) !== false) dlg.close(); } catch (e) { fail(e); } finally { btn.disabled = false; } };
+      if (a.run) btn.onclick = async ev => { ev.preventDefault(); btn.disabled = true; try { if (await a.run(dlg) !== false) finish(); } catch (e) { fail(e); } finally { btn.disabled = false; } };
       f.appendChild(btn);
     }
     if (!f.children.length) f.remove();
-    dlg.addEventListener('close', () => { onClose?.(dlg.returnValue); dlg.remove(); });
+    qs('form', dlg).addEventListener('submit', () => setTimeout(finish, 0));
+    dlg.addEventListener('cancel', () => setTimeout(finish, 0));
+    dlg.addEventListener('close', finish);
     document.body.appendChild(dlg);
     dlg.showModal();
     return dlg;
@@ -656,7 +661,11 @@
     const fill = list => {
       menuEl.innerHTML = '';
       for (const it of list) {
-        if (it === '-') { menuEl.append(h('div', { class: 'ws-menu-sep', role: 'separator' })); continue; }
+        if (it === '-') {
+          // no leading or doubled separators when the items around them are hidden
+          if (menuEl.lastElementChild && !menuEl.lastElementChild.classList.contains('ws-menu-sep')) menuEl.append(h('div', { class: 'ws-menu-sep', role: 'separator' }));
+          continue;
+        }
         if (!it || it.hidden) continue;
         const b = h('button', { type: 'button', role: 'menuitem', class: 'ws-menu-i' + (it.danger ? ' danger' : ''), disabled: it.disabled }, esc(it.label) + (it.sub ? ' <span aria-hidden="true">▸</span>' : ''));
         b.onclick = async () => {
@@ -1023,9 +1032,9 @@
     comp.classList.toggle('hidden', !a || !S.selConv);
     if (!a) return;
     const plat = qs('#wsPlat', el);
-    const want = plat.dataset.agent === a.id && plat.value ? plat.value : (S.conv?.platform || a.platform);
+    const want = plat.dataset.forAgent === a.id && plat.value ? plat.value : (S.conv?.platform || a.platform);
     plat.innerHTML = S.platforms.map(p => `<option value="${esc(p.id)}" ${p.id === want ? 'selected' : ''} ${p.installed === false ? 'class="faint"' : ''}>${esc(p.label)}${p.installed === false ? ' ⚠' : ''}</option>`).join('');
-    if (plat.dataset.agent !== a.id) { plat.dataset.agent = a.id; fillModelEffort(true); } else fillModelEffort(false);
+    if (plat.dataset.forAgent !== a.id) { plat.dataset.forAgent = a.id; fillModelEffort(true); } else fillModelEffort(false);
     qs('#wsInput', el).placeholder = t('ws.ph', { agent: a.name });
     const busy = !!S.conv?.active_job_id;
     const steer = busy && (S.conv?.platform || a.platform) === 'antigravity' && S.conv?.resume?.token;

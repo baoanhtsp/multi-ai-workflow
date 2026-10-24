@@ -401,6 +401,7 @@ Scripts can load in any order, so `feat-teams.js` / `feat-palette.js` wait for `
 
 ### 8.3 Right column panels
 - `Handoffs` (always present): "ĐANG CHỜ (n)" list (started / running with timers), finished cards with the structured result (status badge, summary, files, evidence collapsible, blockers, cost, scope violations, actions: accept / retry / cancel / open member chat / merge (S1)). At the bottom: the **Lead summary table rendered from the records** (role, agent, status, duration, files, cost).
+- `Memory` (N7, always present): the entries of the agent's project `decisions.md` with search, add, edit, pin / unpin and delete (confirm). Every finished assistant message has "Lưu vào bộ nhớ dự án", which opens the same editor prefilled.
 - `Files` (S5), `History`, `Auto Run` (S2): rendered by whatever registers through `MAW.ws.addPanel`; else a placeholder card "Chưa có — cần luồng S5/S2". `History` falls back to our own data: the agent's turns (time, platform, actual model, status, cost).
 - Toast on every handoff that becomes terminal: "Handoff h_1a2b · Worker A xong (2m10s): <summary 80 chars>".
 
@@ -444,6 +445,8 @@ Every string through `MAW.addI18n('vi' | 'en', …)` with an `ws`-prefixed key; 
 - **R5 — Leader role for chat.** The runner's task roles exclude `leader`, so the S6 Lead runs as `architect` with the S6 dispatch-tool brief. Fine for now; a `leader`-in-chat mode would need `MAW_DEPTH` handling.
 - **R6 — `.gitignore`.** Suggest documenting that projects may ignore `.maw/attachments/` (kept out of the repo) while `.maw/team.json`, `.maw/roles/` and `.maw/memory/` are meant to be committed.
 - **R7 — Registry `context_window`** (optional) per agent, replacing the constant table in §3.3.
+- **R8 — Bug in `invoke-cli-agent.ps1`: output lines are reordered.** It reads stdout / stderr with `Register-ObjectEvent … OutputDataReceived` actions that push into a queue; PowerShell runs those actions out of order, so a multi-line reply arrives scrambled in the job log. Reproduced with a fake `text`-mode CLI that prints `Plan…`, a fenced block opener, a JSON line and the fence closer: the log had the lines in another order, which breaks every fenced block (S6 handoffs, reviewer `VERDICT` lines, code blocks). Suggested fix: read stdout synchronously on a dedicated thread (`$proc.StandardOutput.ReadLine()` loop in a runspace) or tag each line with a sequence number and sort before writing. S6 tests use the `gemini-json` output mode, which is not affected.
+- **R9 — Expose `MAW.selectProject(path)`** (see R1) and `MAW.relogin(platform)` from S3, which the S6 "Đăng nhập lại" chip calls when present.
 
 ## 10. Tests (Antigravity, `server/features/<name>/tests/*.test.ts`, run with `node --test`)
 - Log parser fixtures (Claude, Codex, Antigravity, generic, failed, auth error).
