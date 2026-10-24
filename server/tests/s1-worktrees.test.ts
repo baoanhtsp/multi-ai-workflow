@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -7,6 +8,7 @@ import test from 'node:test';
 import { feature } from '../features/worktrees/index.ts';
 import {
   activeCheckRuns,
+  generateBestOfId,
   handleBestOfPick,
   handleBestOfStart,
   handleBestOfStatus,
@@ -572,6 +574,8 @@ test('S1 Worktrees: best-of-N full cycle (start, advance state, mock council, ra
       confirm: true,
     });
     assert.equal(pickRes.ok, true);
+    assert.equal(pickRes.merged, true);
+    assert.ok(pickRes.commit);
     assert.ok(pickRes.picked);
   } finally {
     cleanupWorktreeEnv(env);
@@ -882,6 +886,309 @@ test('S1 Worktrees R2-5 & R2-6: merge falls back to job agent when owner is empt
 
     assert.equal(mergeRes.ok, true);
     assert.equal(mergeRes.merged, true);
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees X1: SPEC Guard fails closed on error/timeout/fail unless force: true', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    fs.writeFileSync(path.win32.join(env.repoDir, 'SPEC.md'), '# Spec\n', 'utf8');
+    await runCommand('git', ['add', 'SPEC.md'], { cwd: env.repoDir });
+    await runCommand('git', ['commit', '-m', 'add SPEC.md'], { cwd: env.repoDir });
+
+    const wt = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'x1-spec-test',
+      owner: 'claude',
+      origin: 'job',
+    });
+
+    fs.writeFileSync(path.win32.join(wt.worktree.worktree_path, 'work.txt'), 'work\n', 'utf8');
+    await runCommand('git', ['add', '.'], { cwd: wt.worktree.worktree_path });
+    await runCommand('git', ['commit', '-m', 'commit in worktree'], { cwd: wt.worktree.worktree_path });
+
+    fs.mkdirSync(env.paths.scriptsDir, { recursive: true });
+    const sgScript = path.win32.join(env.paths.scriptsDir, 'invoke-spec-guard.ps1');
+    fs.writeFileSync(sgScript, 'Write-Error "SPEC Guard internal crash"\nexit 1\n', 'utf8');
+
+    const blockRes = await handleWorktreeMerge(env.ctx, {
+      id: wt.worktree.id,
+      strategy: 'merge',
+      confirm: true,
+    });
+    assert.equal(blockRes.ok, true);
+    assert.equal(blockRes.merged, false);
+    assert.equal(blockRes.blocked, 'spec_guard');
+    assert.ok(blockRes.spec_guard);
+
+    const forceRes = await handleWorktreeMerge(env.ctx, {
+      id: wt.worktree.id,
+      strategy: 'merge',
+      force: true,
+      confirm: true,
+    });
+    assert.equal(forceRes.ok, true);
+    assert.equal(forceRes.merged, true);
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees X2: Discard preserves uncommitted work in refs/maw/discarded/* and fails safe without deleting branch', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    const wt = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'x2-discard-test',
+    });
+    const wtPath = wt.worktree.worktree_path;
+    fs.writeFileSync(path.win32.join(wtPath, 'uncommitted.txt'), 'precious uncommitted\n', 'utf8');
+
+    const discardRes = await handleWorktreeDiscard(env.ctx, {
+      id: 'x2-discard-test',
+      confirm: true,
+    });
+
+    assert.equal(discardRes.ok, true);
+    assert.equal(discardRes.kept_ref, 'refs/maw/discarded/x2-discard-test');
+
+    const lsRes = await runCommand('git', ['ls-tree', '-r', '--name-only', 'refs/maw/discarded/x2-discard-test'], {
+      cwd: env.repoDir,
+    });
+    assert.equal(lsRes.code, 0);
+    assert.ok(lsRes.stdout.includes('uncommitted.txt'), 'Snapshot must contain uncommitted work');
+
+    assert.equal(fs.existsSync(wtPath), false);
+    const brRes = await runCommand('git', ['rev-parse', '--verify', 'maw/x2-discard-test'], {
+      cwd: env.repoDir,
+    });
+    assert.notEqual(brRes.code, 0, 'Branch must be deleted on successful discard');
+
+    const wtFail = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'x2-fail-test',
+    });
+    const wtFailPath = wtFail.worktree.worktree_path;
+    fs.writeFileSync(path.win32.join(wtFailPath, 'test.txt'), 'hello\n', 'utf8');
+
+    // Hold cwd lock on Windows so git worktree remove --force fails
+    const lockProc = spawn('cmd.exe', ['/c', 'ping -n 30 127.0.0.1'], { cwd: wtFailPath, stdio: 'ignore' });
+
+    let caughtErr: any = null;
+    try {
+      await handleWorktreeDiscard(env.ctx, {
+        id: 'x2-fail-test',
+        confirm: true,
+      });
+    } catch (err: any) {
+      caughtErr = err;
+    } finally {
+      lockProc.kill('SIGKILL');
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    assert.ok(caughtErr, 'handleWorktreeDiscard should have thrown on failed remove');
+    assert.equal(caughtErr.statusCode, 500);
+
+    const store = await loadWorktreesStore(env.paths.featureDataDir('worktrees'));
+    const rec = store.worktrees.find((w) => w.id === 'x2-fail-test');
+    assert.ok(rec);
+    assert.equal(rec.status, 'active');
+
+    const brFailRes = await runCommand('git', ['rev-parse', '--verify', 'maw/x2-fail-test'], {
+      cwd: env.repoDir,
+    });
+    assert.equal(brFailRes.code, 0, 'Branch must NOT be deleted when remove fails');
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees X4: Create reserves status creating, list leaves creating untouched with live.exists false, then switches active', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    const dataDir = env.paths.featureDataDir('worktrees');
+    const store = await loadWorktreesStore(dataDir);
+    const nonExistentPath = path.win32.join(env.repoDir, '.maw-wt', 'ghost-wt');
+
+    const ghostRec: WorktreeRecord = {
+      id: 'ghost-wt',
+      project_path: env.repoDir,
+      worktree_path: nonExistentPath,
+      branch: 'maw/ghost-wt',
+      base: 'master',
+      base_commit: 'abc1234',
+      port: 4488,
+      origin: 'manual',
+      status: 'creating',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    store.worktrees.push(ghostRec);
+    await saveWorktreesStore(dataDir, store);
+
+    const listHandler = feature.routes.worktree_list!.handler;
+    const req = makeMockRequest(
+      env.ctx,
+      `http://127.0.0.1/api?action=worktree_list&project_path=${encodeURIComponent(env.repoDir)}`
+    );
+    const res = (await listHandler(req, req)) as Record<string, unknown>;
+    assert.equal(res.ok, true);
+
+    const worktrees = res.worktrees as Array<Record<string, unknown>>;
+    const found = worktrees.find((w) => w.id === 'ghost-wt');
+    assert.ok(found);
+    assert.equal(found.status, 'creating');
+    const live = found.live as Record<string, unknown>;
+    assert.equal(live.exists, false);
+
+    const storeAfter = await loadWorktreesStore(dataDir);
+    const recordAfter = storeAfter.worktrees.find((w) => w.id === 'ghost-wt');
+    assert.equal(recordAfter?.status, 'creating');
+
+    const realWt = await createWorktreeRecord(env.ctx, {
+      project_path: env.repoDir,
+      name: 'real-wt-status-test',
+    });
+    assert.equal(realWt.worktree.status, 'active');
+    const storeReal = await loadWorktreesStore(dataDir);
+    const realRecord = storeReal.worktrees.find((w) => w.id === 'real-wt-status-test');
+    assert.equal(realRecord?.status, 'active');
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees X5: COUNCIL_RESULT parses all reviewer pairs, min score, and requires all reviewers approved', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    const runId = generateBestOfId();
+    const dataDir = env.paths.featureDataDir('worktrees');
+    const candWt1 = await createWorktreeRecord(env.ctx, { project_path: env.repoDir, name: 'x5-c1' });
+
+    const councilJobId = 'job_council_x5';
+    const metaPath = path.win32.join(env.jobsDir, `${councilJobId}.json`);
+    const logPath = path.win32.join(env.jobsDir, `${councilJobId}.log`);
+    fs.writeFileSync(metaPath, JSON.stringify({ job_id: councilJobId, status: 'DONE' }), 'utf8');
+
+    const baseRun = {
+      id: runId,
+      project_path: env.repoDir,
+      base: 'master',
+      judge: 'council' as const,
+      reviewers: ['claude', 'codex'],
+      state: 'judging' as const,
+      winner: null,
+      candidates: [
+        {
+          i: 1,
+          agent: 'antigravity',
+          worktree_id: 'x5-c1',
+          worktree_path: candWt1.worktree.worktree_path,
+          port: candWt1.worktree.port,
+          job_id: 'j1',
+          job_status: 'DONE',
+          council: {
+            job_id: councilJobId,
+            status: 'RUNNING',
+            verdicts: null,
+            score: null,
+            approved: null,
+          },
+        },
+      ],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    saveBestOfRun(dataDir, baseRun as any);
+
+    // Case A: claude=APPROVED|9.5 codex=REJECTED|3 -> score: 3, approved: false
+    fs.writeFileSync(
+      logPath,
+      '=== COUNCIL_RESULT claude=APPROVED|9.5 codex=REJECTED|3 ===\n',
+      'utf8'
+    );
+    await handleBestOfStatus(env.ctx, new URLSearchParams(`id=${runId}`));
+    let runA = loadBestOfRun(dataDir, runId)!;
+    assert.equal(runA.candidates[0]!.council!.score, 3);
+    assert.equal(runA.candidates[0]!.council!.approved, false);
+    assert.equal(runA.candidates[0]!.council!.verdicts?.claude, 'APPROVED');
+    assert.equal(runA.candidates[0]!.council!.verdicts?.codex, 'REJECTED');
+
+    // Case B: claude=APPROVED|9 codex=APPROVED|8.5 -> score: 8.5, approved: true
+    runA.state = 'judging';
+    runA.candidates[0]!.council!.status = 'RUNNING';
+    saveBestOfRun(dataDir, runA);
+    fs.writeFileSync(
+      logPath,
+      '=== COUNCIL_RESULT claude=APPROVED|9 codex=APPROVED|8.5 ===\n',
+      'utf8'
+    );
+    await handleBestOfStatus(env.ctx, new URLSearchParams(`id=${runId}`));
+    let runB = loadBestOfRun(dataDir, runId)!;
+    assert.equal(runB.candidates[0]!.council!.score, 8.5);
+    assert.equal(runB.candidates[0]!.council!.approved, true);
+
+    // Case C: Missing codex on the line -> approved must be false
+    runB.state = 'judging';
+    runB.candidates[0]!.council!.status = 'RUNNING';
+    saveBestOfRun(dataDir, runB);
+    fs.writeFileSync(
+      logPath,
+      '=== COUNCIL_RESULT claude=APPROVED|9.0 ===\n',
+      'utf8'
+    );
+    await handleBestOfStatus(env.ctx, new URLSearchParams(`id=${runId}`));
+    let runC = loadBestOfRun(dataDir, runId)!;
+    assert.equal(runC.candidates[0]!.council!.approved, false, 'Missing codex must result in approved=false');
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees X7: worktree_list and bestof_list throw 400 on invalid project_path', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    const listHandler = feature.routes.worktree_list!.handler;
+    const bestofHandler = feature.routes.bestof_list!.handler;
+
+    const reqWtInvalid = makeMockRequest(
+      env.ctx,
+      `http://127.0.0.1/api?action=worktree_list&project_path=../outside/traversal`
+    );
+    let caughtWtErr: any = null;
+    try {
+      await listHandler(reqWtInvalid, reqWtInvalid);
+    } catch (err: any) {
+      caughtWtErr = err;
+    }
+    assert.ok(caughtWtErr, 'worktree_list should have thrown 400 on invalid project_path');
+    assert.equal(caughtWtErr.statusCode, 400);
+    assert.match(caughtWtErr.message, /Invalid project path/i);
+
+    const reqBoInvalid = makeMockRequest(
+      env.ctx,
+      `http://127.0.0.1/api?action=bestof_list&project_path=../outside/traversal`
+    );
+    let caughtBoErr: any = null;
+    try {
+      await bestofHandler(reqBoInvalid, reqBoInvalid);
+    } catch (err: any) {
+      caughtBoErr = err;
+    }
+    assert.ok(caughtBoErr, 'bestof_list should have thrown 400 on invalid project_path');
+    assert.equal(caughtBoErr.statusCode, 400);
+    assert.match(caughtBoErr.message, /Invalid project path/i);
+
+    const reqWtEmpty = makeMockRequest(env.ctx, `http://127.0.0.1/api?action=worktree_list`);
+    const wtEmptyRes = (await listHandler(reqWtEmpty, reqWtEmpty)) as Record<string, unknown>;
+    assert.equal(wtEmptyRes.ok, true);
+
+    const reqBoEmpty = makeMockRequest(env.ctx, `http://127.0.0.1/api?action=bestof_list`);
+    const boEmptyRes = (await bestofHandler(reqBoEmpty, reqBoEmpty)) as Record<string, unknown>;
+    assert.equal(boEmptyRes.ok, true);
   } finally {
     cleanupWorktreeEnv(env);
   }

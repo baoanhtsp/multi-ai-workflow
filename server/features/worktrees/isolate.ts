@@ -162,7 +162,7 @@ export async function createWorktreeRecord(
       port: allocatedPort,
       origin,
       owner,
-      status: 'active',
+      status: 'creating',
       created_at: nowIso,
       updated_at: nowIso,
     };
@@ -185,6 +185,18 @@ export async function createWorktreeRecord(
     });
     throw err;
   }
+
+  // Worktree add succeeded: switch status to active under lock
+  await withStoreLock(async () => {
+    const store = await loadWorktreesStore(dataDir);
+    const item = store.worktrees.find((w) => w.id === name);
+    if (item) {
+      item.status = 'active';
+      item.updated_at = new Date().toISOString();
+      await saveWorktreesStore(dataDir, store);
+    }
+  });
+  record.status = 'active';
 
   // Copy .worktreeinclude files (W12)
   const copied = copyWorktreeIncludeFiles(repo, wtDir);

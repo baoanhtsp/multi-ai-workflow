@@ -1083,9 +1083,9 @@ export async function restoreTree(
   cwd: string,
   checkpointId: string,
   options: {
-    confirm: boolean;
-    auditFile: string;
-    checkpointsAuditFile: string;
+    confirm?: boolean;
+    auditFile?: string;
+    checkpointsAuditFile?: string;
   }
 ): Promise<{
   ok: true;
@@ -1129,8 +1129,8 @@ export async function restoreTree(
     Project: top,
     Detail: `Restored checkpoint ${validatedId} (safety: ${safetyCheckpointId})`,
   };
-  appendAuditEntry(options.auditFile, auditEntry);
-  appendAuditEntry(options.checkpointsAuditFile, auditEntry);
+  if (options.auditFile) appendAuditEntry(options.auditFile, auditEntry);
+  if (options.checkpointsAuditFile) appendAuditEntry(options.checkpointsAuditFile, auditEntry);
 
   // C5: Files to write = AMT from currentTree to targetTree
   const writeRes = await gitRun(
@@ -1161,17 +1161,30 @@ export async function restoreTree(
 
   try {
     if (filesToWrite.length > 0) {
-      await gitRun(['read-tree', targetTree], {
+      const readTreeRes = await gitRun(['read-tree', targetTree], {
         cwd: top,
         env: { GIT_INDEX_FILE: tmpIndex },
+        allowFailure: true,
       });
+      if (readTreeRes.code !== 0) {
+        throw new ApiValidationError(
+          `Failed to read tree for restore (safety checkpoint ${safetyCheckpointId}): ${readTreeRes.stderr || 'git read-tree failed'}`,
+          500
+        );
+      }
 
       // Write only the changed files via -z --stdin
       const stdinData = filesToWrite.join('\0') + '\0';
-      await gitRunWithStdin(['checkout-index', '-f', '-z', '--stdin'], stdinData, {
+      const checkoutRes = await gitRunWithStdin(['checkout-index', '-f', '-z', '--stdin'], stdinData, {
         cwd: top,
         env: { GIT_INDEX_FILE: tmpIndex },
       });
+      if (checkoutRes.code !== 0) {
+        throw new ApiValidationError(
+          `Failed to checkout files for restore (safety checkpoint ${safetyCheckpointId}): ${checkoutRes.stderr || 'git checkout-index failed'}`,
+          500
+        );
+      }
 
       filesWritten = filesToWrite.length;
     }

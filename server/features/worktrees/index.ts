@@ -47,7 +47,7 @@ export async function computeWorktreeLiveStats(
   jobStatusSource?: Map<string, string> | string
 ): Promise<WorktreeLiveStats> {
   const wtPath = record.worktree_path;
-  if (!isDirectorySafe(wtPath)) {
+  if (record.status === 'creating' || !isDirectorySafe(wtPath)) {
     return {
       exists: false,
       head: null,
@@ -224,7 +224,13 @@ export const feature: MawFeature = {
       handler: async (ctx, req) => {
         const dataDir = ctx.paths.featureDataDir('worktrees');
         const rawProject = req.url.searchParams.get('project_path');
-        const projectPath = rawProject ? resolveProjectPath(rawProject, ctx.paths.projectsRoot) : null;
+        let projectPath: string | null = null;
+        if (rawProject !== null && rawProject !== '') {
+          projectPath = resolveProjectPath(rawProject, ctx.paths.projectsRoot);
+          if (!projectPath) {
+            throw new ApiValidationError('Invalid project path.', 400);
+          }
+        }
         const includeAll = req.url.searchParams.get('include') === 'all';
 
         const store = await withStoreLock(async () => {
@@ -262,7 +268,7 @@ export const feature: MawFeature = {
           if (projectPath && wt.project_path.toLowerCase() !== projectPath.toLowerCase()) {
             return false;
           }
-          if (!includeAll && wt.status !== 'active') {
+          if (!includeAll && (wt.status !== 'active' && wt.status !== 'creating')) {
             return false;
           }
           return true;

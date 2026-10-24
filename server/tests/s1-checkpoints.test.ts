@@ -443,3 +443,48 @@ test('S1 Checkpoints: 3 concurrent createCheckpoint calls allocate distinct sequ
     cleanupTestEnv(env);
   }
 });
+
+test('S1 Checkpoints X3: restoreTree throws 500 mentioning safety checkpoint if checkout-index fails and does not delete files', async () => {
+  const env = await setupTestEnv();
+  const subDir = path.win32.join(env.repoDir, 'sub_protected');
+  fs.mkdirSync(subDir, { recursive: true });
+  fs.writeFileSync(path.win32.join(subDir, 'sub_file.txt'), 'sub initial\n', 'utf8');
+  await runCommand('git', ['add', '.'], { cwd: env.repoDir });
+  await runCommand('git', ['commit', '-m', 'add sub_protected'], { cwd: env.repoDir });
+
+  try {
+    const cp1 = await createCheckpoint(env.repoDir, {
+      jobKey: 'job_x3',
+      label: 'initial checkpoint',
+    });
+
+    // Add a file that target commit does NOT have (filesToDelete)
+    const extraFilePath = path.win32.join(env.repoDir, 'will_it_be_deleted.txt');
+    fs.writeFileSync(extraFilePath, 'precious new file\n', 'utf8');
+
+    // Modify sub_file.txt so it will be in filesToWrite
+    fs.writeFileSync(path.win32.join(subDir, 'sub_file.txt'), 'modified sub\n', 'utf8');
+
+    // Deny write on subDir so checkout-index fails
+    await runCommand('icacls', [subDir, '/deny', 'Everyone:(W)']);
+
+    let caughtErr: any = null;
+    try {
+      await restoreTree(env.repoDir, cp1.checkpoint.id, { confirm: true });
+    } catch (err: any) {
+      caughtErr = err;
+    }
+
+    assert.ok(caughtErr, 'restoreTree should have thrown');
+    assert.equal(caughtErr.statusCode, 500);
+    assert.match(caughtErr.message, /safety checkpoint/i);
+
+    // Verify extra file was NOT deleted
+    assert.ok(fs.existsSync(extraFilePath), 'Precious file must not have been deleted');
+  } finally {
+    try {
+      await runCommand('icacls', [subDir, '/remove:d', 'Everyone']);
+    } catch {}
+    cleanupTestEnv(env);
+  }
+});

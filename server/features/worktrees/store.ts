@@ -20,7 +20,7 @@ export interface WorktreeRecord {
   source_job_id?: string; // fork source
   bestof_id?: string;
   owner?: string; // registry agent id, used by SPEC Guard
-  status: 'active' | 'merged' | 'discarded' | 'missing';
+  status: 'creating' | 'active' | 'merged' | 'discarded' | 'missing';
   created_at: string;
   updated_at: string;
   merged?: { strategy: string; commit: string; at: string };
@@ -111,7 +111,7 @@ export async function saveWorktreesStore(dataDir: string, store: WorktreesStoreF
 export function allocateWorktreePortFromStore(store: WorktreesStoreFile): number {
   const usedPorts = new Set<number>();
   for (const wt of store.worktrees) {
-    if (wt.status === 'active' && typeof wt.port === 'number') {
+    if ((wt.status === 'active' || wt.status === 'creating') && typeof wt.port === 'number') {
       usedPorts.add(wt.port);
     }
   }

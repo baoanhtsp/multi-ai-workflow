@@ -157,22 +157,31 @@ export async function handleWorktreeMerge(
       await gitRun(['reset', '--soft', mergeBase], { cwd: wtPath });
       try {
         const specGuardScript = path.win32.join(ctx.paths.scriptsDir, 'invoke-spec-guard.ps1');
-        const sgRes = await runCommand(
-          'powershell.exe',
-          [
-            '-NoProfile',
-            '-ExecutionPolicy',
-            'Bypass',
-            '-File',
-            specGuardScript,
-            '-WorkDir',
-            wtPath,
-            '-Owner',
-            owner,
-            '-Json',
-          ],
-          { cwd: wtPath, timeoutMs: 120000 }
-        );
+        let sgRes: { code: number; stdout: string; stderr: string };
+        try {
+          sgRes = await runCommand(
+            'powershell.exe',
+            [
+              '-NoProfile',
+              '-ExecutionPolicy',
+              'Bypass',
+              '-File',
+              specGuardScript,
+              '-WorkDir',
+              wtPath,
+              '-Owner',
+              owner,
+              '-Json',
+            ],
+            { cwd: wtPath, timeoutMs: 120000 }
+          );
+        } catch (err: any) {
+          sgRes = {
+            code: 1,
+            stdout: '',
+            stderr: String(err?.message ?? 'SPEC Guard failed to run.'),
+          };
+        }
 
         const outLines = sgRes.stdout.split(/\r?\n/).filter((l) => l.trim().startsWith('{'));
         const lastJsonLine = outLines.length > 0 ? outLines[outLines.length - 1]! : '';
@@ -188,7 +197,10 @@ export async function handleWorktreeMerge(
           specGuardResult = { error: tail || 'SPEC Guard produced no JSON output.' };
         }
 
-        if (specGuardResult && specGuardResult.verdict === 'FAIL' && body.force !== true) {
+        const isAllowed =
+          specGuardResult &&
+          (specGuardResult.verdict === 'PASS' || specGuardResult.verdict === 'WARN');
+        if (!isAllowed && body.force !== true) {
           return {
             ok: true,
             merged: false,
@@ -563,25 +575,46 @@ export async function handleWorktreeDiscard(
           fs.unlinkSync(msgFile);
         } catch {}
 
-        if (commitRes.code === 0 && commitRes.stdout.trim()) {
-          const discardCommitSha = commitRes.stdout.trim();
-          await gitRun(['update-ref', keptRef, discardCommitSha], { cwd: repoPath });
+        if (commitRes.code !== 0 || !commitRes.stdout.trim()) {
+          throw new Error(`commit-tree failed: ${commitRes.stderr || 'unknown git error'}`);
         }
-      } catch {
-        // Fallback: rev-parse HEAD
-        const headRes = await gitRun(['rev-parse', 'HEAD'], { cwd: wtPath, allowFailure: true });
-        if (headRes.code === 0 && headRes.stdout.trim()) {
-          await gitRun(['update-ref', keptRef, headRes.stdout.trim()], {
-            cwd: repoPath,
-            allowFailure: true,
-          });
+
+        const discardCommitSha = commitRes.stdout.trim();
+        const updateRes = await gitRun(['update-ref', keptRef, discardCommitSha], { cwd: repoPath });
+        if (updateRes.code !== 0) {
+          throw new Error(`update-ref ${keptRef} failed: ${updateRes.stderr || 'unknown git error'}`);
         }
+      } catch (err: any) {
+        throw new ApiValidationError(
+          `Failed to preserve discard snapshot before removal: ${err?.message || 'unknown error'}`,
+          500
+        );
       }
 
-      await gitRun(['worktree', 'remove', '--force', wtPath], {
+      const removeRes = await gitRun(['worktree', 'remove', '--force', wtPath], {
         cwd: repoPath,
         allowFailure: true,
       });
+      if (removeRes.code !== 0) {
+        throw new ApiValidationError(
+          `Failed to remove worktree: ${removeRes.stderr || 'git worktree remove failed'}`,
+          500
+        );
+      }
+    } else {
+      const branchHeadRes = await gitRun(['rev-parse', '--verify', '-q', record.branch], {
+        cwd: repoPath,
+        allowFailure: true,
+      });
+      if (branchHeadRes.code === 0 && branchHeadRes.stdout.trim()) {
+        const updateRes = await gitRun(['update-ref', keptRef, branchHeadRes.stdout.trim()], { cwd: repoPath });
+        if (updateRes.code !== 0) {
+          throw new ApiValidationError(
+            `Failed to update discard ref ${keptRef}: ${updateRes.stderr || 'unknown error'}`,
+            500
+          );
+        }
+      }
     }
 
     if (body.delete_branch !== false) {

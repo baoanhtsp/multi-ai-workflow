@@ -502,27 +502,48 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
                 // Parse council log for verdicts/scores
                 if (isFileSafe(logFile)) {
                   const logContent = fs.readFileSync(logFile, 'utf8');
-                  const match = logContent.match(
-                    /===\s*COUNCIL_RESULT\s+([^\r\n=]+)=([^\r\n|]+)\|([\d.]+)/g
-                  );
-                  if (match) {
+                  const lines = logContent.split(/\r?\n/);
+                  let foundResultLine = '';
+                  for (const line of lines) {
+                    if (line.includes('COUNCIL_RESULT')) {
+                      foundResultLine = line;
+                    }
+                  }
+
+                  if (foundResultLine) {
+                    const idx = foundResultLine.indexOf('COUNCIL_RESULT');
+                    let afterResult = foundResultLine.slice(idx + 'COUNCIL_RESULT'.length);
+                    const endIdx = afterResult.indexOf('===');
+                    if (endIdx !== -1) {
+                      afterResult = afterResult.slice(0, endIdx);
+                    }
+
+                    const pairRegex = /([a-z][a-z0-9-]{1,23})=([A-Z_]+)\|([\d.]+|\?)/g;
                     const verdicts: Record<string, string> = {};
                     const scores: number[] = [];
-                    for (const m of match) {
-                      const itemMatch = m.match(/COUNCIL_RESULT\s+([^=]+)=([^|]+)\|([\d.]+)/);
-                      if (itemMatch) {
-                        const rId = itemMatch[1]!.trim();
-                        const verd = itemMatch[2]!.trim();
-                        const sc = Number.parseFloat(itemMatch[3]!);
-                        verdicts[rId] = verd;
+                    let pMatch: RegExpExecArray | null;
+                    while ((pMatch = pairRegex.exec(afterResult)) !== null) {
+                      const rId = pMatch[1]!;
+                      const verd = pMatch[2]!;
+                      const scoreStr = pMatch[3]!;
+                      verdicts[rId] = verd;
+                      if (scoreStr !== '?') {
+                        const sc = Number.parseFloat(scoreStr);
                         if (Number.isFinite(sc)) scores.push(sc);
                       }
                     }
+
                     c.council.verdicts = verdicts;
                     c.council.score = scores.length > 0 ? Math.min(...scores) : null;
-                    c.council.approved =
-                      Object.values(verdicts).length > 0 &&
-                      Object.values(verdicts).every((v) => v === 'APPROVED');
+
+                    // approved = every reviewer in run.reviewers has verdict APPROVED (a reviewer missing from the line = not approved)
+                    const reqReviewers = Array.isArray(run.reviewers) && run.reviewers.length > 0
+                      ? run.reviewers
+                      : Object.keys(verdicts);
+                    const allApproved =
+                      reqReviewers.length > 0 &&
+                      reqReviewers.every((r) => verdicts[r] === 'APPROVED');
+                    c.council.approved = allApproved;
                   }
                 }
               } else {
@@ -770,7 +791,13 @@ export async function handleBestOfList(
   const dataDir = ctx.paths.featureDataDir('worktrees');
   const bestofDir = getBestOfDir(dataDir);
   const rawProject = query.get('project_path');
-  const projectPath = rawProject ? resolveProjectPath(rawProject, ctx.paths.projectsRoot) : null;
+  let projectPath: string | null = null;
+  if (rawProject !== null && rawProject !== '') {
+    projectPath = resolveProjectPath(rawProject, ctx.paths.projectsRoot);
+    if (!projectPath) {
+      throw new ApiValidationError('Invalid project path.', 400);
+    }
+  }
 
   let files: string[] = [];
   try {
@@ -887,6 +914,8 @@ export async function handleBestOfPick(
 
     return {
       ok: true,
+      merged: true,
+      commit: String(mergeRes.commit ?? ''),
       picked: run.picked,
       run,
     };
