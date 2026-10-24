@@ -154,6 +154,7 @@ Same shape as `checkpoint_diff`, from `merge-base(base, HEAD)` to the worktree s
 1. Record must be `active`; its job (if any) must not be `RUNNING` ⇒ `409 "Job is still running."`.
 2. **Commit pending work in the worktree**: if dirty, `git add -A` + `git commit -m "maw: work from <job_id|name>"` (author from git config; fallback `MAW <maw@localhost>` through env).
 3. **SPEC Guard on the branch diff (before merging)** — owner = `owner` ‖ `record.owner` ‖ the job's agent. In the worktree: remember `tip`, `git reset --soft <merge-base>` (index + files unchanged, so every branch change shows as staged), run `invoke-spec-guard.ps1 -WorkDir <wt> -Owner <owner> -Json` through `powershell.exe` (argument array, 120 s), then `git reset --soft <tip>` in `finally`. Skipped when the repo has no `SPEC.md` or no owner. A violation and `force !== true` ⇒ no merge: `{ ok:true, merged:false, blocked:"spec_guard", spec_guard }`.
+3b. **S4 test gate** (when the `checks` feature is loaded and `ctx.callAction` exists, R11): `checks_gate?project_path=<wt>&scope=merge[&override_token=<body.checks_override_token>]`; `green: false` ⇒ `{ ok:true, merged:false, blocked:"checks", checks: <gate> }` (no `force` bypass — the override is S4's `checks_override`, which returns a one-time token). Without S4 the gate is skipped and the response carries `checks: null`.
 4. The main checkout must be on `base` and have no tracked changes (`git status --porcelain --untracked-files=no` empty) ⇒ else `409` with the reason. A safety checkpoint of the main checkout is taken (event `merge`).
 5. Merge in the main checkout:
    - `merge`: `git merge --no-ff -m <msg> maw/<name>`;
@@ -221,7 +222,7 @@ interface BestOfRun {
 ```
 ### 4.2 State machine (advanced lazily by `bestof_status` and by the feature `status()`; idempotent, guarded by a per-run lock)
 - `running` → when every candidate job is finished ⇒ `judging`:
-  - **tests** (`tests`/`both`): checks from `<repo>/.maw/checks.json` (S4 format, read tolerantly: `{ "checks": [{ "name", "command": string[] | string, "timeout_s"? }] }` or a bare array). `command` as a string is split on whitespace (no shell). Each check runs in the candidate worktree with an argument array (`runCommand`, timeout default 600 s). A `.cmd`/`.bat` program (e.g. `npm`) runs as `cmd.exe /d /s /c <program> <args…>` only when every argument matches `^[A-Za-z0-9_./:=@+-]+$`; otherwise the check is `error`. No `checks.json` ⇒ `tests.status:"none"`. Checks run in a background promise; the run file shows `running` meanwhile.
+  - **tests** (`tests`/`both`) — **through S4 only** (revised 2026-10-25 after S4's review): S1 never executes `.maw/checks.json` itself, because S4 runs a config only after the user trusted its sha256, and an agent or a cloned repo could otherwise make S1 run arbitrary commands. When the `checks` feature is loaded (`ctx.callAction` available, R11): `checks_run { project_path:<wt> }`, then poll `checks_status?project_path=<wt>` in the background until it is no longer pending. `tests.status` = `pass` when `gate.green`, `fail` when red, `error` when S4 reports an error, with `results[]` copied from S4 (`{ id, label, status, exit_code, duration_s, tail }`). Without S4 / R11 ⇒ `tests: { status:"unavailable", results:[] }`, which ranks like `none`. The judge `tests` alone is refused with 400 "Test gate (S4 checks) is not available" when S4 is absent.
   - **council** (`council`/`both`): one job per candidate `ctx.startJob({ mode:"council", project_path:<wt>, reviewers, prompt:"Best-of-N candidate <i> for: <prompt>" })`. Council reviews the worktree's uncommitted diff (`Get-ReviewDiff`); a candidate that committed is first `git reset --soft <base_commit>` (same trick as §2.5, restored afterwards is **not** needed because the merge commits pending work anyway). Verdicts/score parsed from `=== COUNCIL_RESULT <id>=<VERDICT>|<score> … ===` in the council job log; score = minimum.
   - `cost_usd`: sum of `CostUsd` of audit lines whose time is within the candidate job's start/finish and whose agent matches (estimate; `null` when unknown).
 - `judging` → `done` when tests and council are finished. Ranking: failed job last; then tests pass > none > fail; then council approved; then score (desc); then smaller diff; then shorter duration. `winner` = rank 1.
@@ -247,9 +248,73 @@ Responses: `{ ok, output }` (stdout+stderr tail, 4000 chars) plus the parsed dat
 
 ---
 
+## 5b. C1 — Cleanup of dashboard-made branches, worktrees and checkpoints (feature `worktrees`, file `server/features/worktrees/cleanup.ts`)
+
+### 5b.1 Settings
+`featureDataDir('worktrees')/cleanup-config.json` (defaults in brackets), read/written by `GET cleanup_config` / `POST cleanup_config { …partial }` (integers, validated ranges):
+- `keep_after_merge_days` [0] (0–90): 0 = `worktree_merge` removes the worktree + deletes `maw/<name>` right away (today's behaviour). N > 0 = keep both; the record gets `remove_after = merged.at + N days` and the sweep removes them later. The merge body's `remove` still overrides per call; the UI checkbox defaults to `keep_after_merge_days === 0`.
+- `stale_branch_days` [14] (1–365): unmerged `maw/*` older than this is a (risky) candidate.
+- `trash_days` [30] (1–365): age after which `refs/maw/trash/*` backups are purged.
+- `sweep_hours` [24] (1–168), `sweep_enabled` [true].
+
+### 5b.2 Candidates — `GET cleanup_preview?project_path=` (dry run, never deletes)
+Scope = the repository of `project_path` (its main worktree root, as in §2.1). Only dashboard-made objects are ever listed:
+| kind | what | merged | risky (unchecked by default) |
+| :--- | :--- | :--- | :--- |
+| `merged_branch` | local `maw/*` branch whose tip is an ancestor of its base (`git merge-base --is-ancestor`), or whose S1 record is `merged` (squash merges are not ancestors) | true | no |
+| `kept_worktree` | worktree of a `merged` record past `remove_after` | true | no |
+| `orphan_worktree` | (a) git-registered worktree under `.maw-wt/<repo>/` whose folder is gone (`prunable` in `git worktree list --porcelain`), (b) folder under `.maw-wt/<repo>/` not registered in git, (c) registered worktree there without an S1 record | — | (b)/(c) with files: yes |
+| `stale_worktree` | `active` record whose job meta is gone (or no job) and whose last commit / folder mtime is older than `stale_branch_days` | false | yes |
+| `stale_branch` | unmerged `maw/*` branch without an active worktree, last commit older than `stale_branch_days` | false | yes |
+| `checkpoint_excess` | `refs/maw/checkpoints/**` beyond `retention` for a workdir (normally pruned at creation) | — | no |
+| `checkpoint_orphan` | checkpoint refs whose `MAW-Workdir` folder no longer exists | — | no |
+| `trash_expired` | `refs/maw/trash/*` older than `trash_days` | — | no |
+
+Each candidate:
+```json
+{ "id": "merged_branch:maw/wt-1", "kind": "merged_branch", "name": "maw/wt-1", "path": null,
+  "reason": "merged into main", "merged": true, "risky": false, "dirty": false, "protected": false,
+  "last_commit_at": "2026-10-20T10:00:00+07:00", "size_bytes": 12345, "default_selected": true }
+```
+- `id` = `<kind>:<name>`; `name` is the branch, the ref or the worktree folder name. `path` = absolute folder for worktree kinds.
+- `size_bytes`: worktree kinds = folder size (walk, `.git` file excluded, stop after 200 000 entries ⇒ approximate `size_approx: true`); branch kinds = `git rev-list --objects --disk-usage <base>..<branch>` (null when git is too old); refs = null.
+- `dirty` (worktree kinds): `git status --porcelain` not empty ⇒ `risky: true`, `default_selected: false`.
+- Response: `{ ok, project_path, scanned_at, config, candidates[], totals: { count, size_bytes, risky } }`.
+
+### 5b.3 Apply — `POST cleanup_apply { project_path, items: [ids], confirm: true, confirm_risky?: [ids] }`
+1. Recompute the candidates (same code as preview). An id that is not in the fresh list is skipped with `reason: "no longer a candidate"` — the client can never name arbitrary refs or folders.
+2. A risky or dirty item is deleted only when its id is also in `confirm_risky`; otherwise skipped `"needs confirm_risky"`.
+3. **Safety rules (backend, every item, re-checked right before deleting):**
+   - branches: name must match `^maw/[a-z0-9][a-z0-9._/-]{0,80}$` and pass `validateRefName`; refuse `main`, `master`, `develop`, `release/*` (defence in depth), any branch checked out in **any** worktree (`git worktree list --porcelain` `branch` lines).
+   - worktree folders: realpath must be inside `<dirname(repo)>\.maw-wt\<basename(repo)>\` (no junction/symlink escape); never the main worktree.
+   - refs: only `refs/maw/checkpoints/**` and `refs/maw/trash/**`.
+   - an unmerged branch (or a dirty worktree's state) is first saved as `refs/maw/trash/<branch-with-/-as-->-<yyyyMMddHHmmss>` (dirty worktree ⇒ snapshot commit of its files, like §2.7). Creating the backup must succeed, else the item fails.
+   - git calls with argument arrays only; folder removal via `git worktree remove --force` (registered) or `fs.rmSync` (unregistered folder, after the path check).
+   - one audit line per deleted item (`Tool: maw-s1, Action: cleanup_delete, Detail: <kind> <name> [backup <ref>]`) in both audit files.
+   - records: branch/worktree items set the S1 record to `discarded` (`cleaned_at`); `git worktree prune` once at the end.
+4. Response `{ ok, deleted: [{ id, kind, name, backup_ref? }], skipped: [{ id, reason }], freed_bytes }`.
+
+### 5b.4 Trash — `GET cleanup_trash?project_path=` / `POST cleanup_restore { project_path, ref, confirm: true }`
+- List `refs/maw/trash/*` with `{ ref, branch, created_at, expires_at, last_commit_subject }`.
+- Restore recreates the branch from the backup (`git branch <branch> <ref>`; when the name exists, `<branch>-restored-<n>`), keeps the trash ref, writes an audit line. Returns `{ ok, branch }`.
+
+### 5b.5 Scan and periodic sweep — `GET cleanup_scan?project_path=` (contract for S2 schedules and S3 inbox)
+- Same candidates as preview, never deletes; without `project_path` it scans every repository known to S1 (projects of worktree records + repos with a `.maw-wt/<name>` folder under `projectsRoot`). Stores the latest result in `featureDataDir('worktrees')/cleanup-latest.json`.
+- Response: `{ ok, scanned_at, projects: [{ project_path, count, size_bytes, risky }], total: { count, size_bytes } }` (candidates omitted; call preview for them).
+- `status.feature_data.worktrees.cleanup = { scanned_at, count, size_bytes, by_project: { <path>: count } }` read from `cleanup-latest.json` (no git in status).
+- **Internal sweep** until S2 / S3 are merged: started lazily the first time the feature sees a ctx (first `status()` call, i.e. right after server start), then every `sweep_hours`; timers are `unref()`ed; disabled when env `MAW_CLEANUP_SWEEP=0` (tests) or `sweep_enabled: false`. The sweep runs `cleanup_scan` and performs only the two automatic, non-destructive-to-work actions: removing `kept_worktree` items (merged, past `remove_after`) and purging `trash_expired` refs. Everything else waits for the user.
+- S2 can schedule `GET cleanup_scan` weekly; S3 can read `status.feature_data.worktrees.cleanup.count` ("N items can be cleaned").
+
+### 5b.6 Tests
+- node (`server/tests/s1-cleanup.test.ts`): candidate detection for every kind; protected branch refused even when its id is forged; checked-out branch refused; dirty worktree skipped without `confirm_risky` and deleted with it (backup ref created); unmerged branch ⇒ trash ref exists and `cleanup_restore` brings it back; items not in the fresh list skipped; path outside `.maw-wt` refused; trash purge after `trash_days`; `keep_after_merge_days` keeps then sweep removes; scan writes `cleanup-latest.json` and feature_data reflects it.
+- Pester `tests/S1Cleanup.Tests.ps1`: starts `node server/main.ts` on a free port with temp `--projects-root`, `MAW_HOME`, `TEMP`/`TMP` and `MAW_CLEANUP_SWEEP=0`; creates a temp repo with one merged `maw/*` branch, one unmerged stale branch and one orphan worktree folder; calls `cleanup_preview`, then `cleanup_apply` with only the merged branch + orphan; asserts those are gone and the stale branch is still there.
+- Tests never touch the real install, `%TEMP%\maw_jobs` or `~/.maw` (own scriptsDir / jobsDir / MAW_HOME).
+
+---
+
 ## 6. `status()` of the two features
 - `feature_data.checkpoints = { enabled, retention }`.
-- `feature_data.worktrees = { active: <count>, jobs: { <job_id>: { id, branch, path } }, bestof_active }` — read from the JSON files only (no git calls; status runs every few seconds).
+- `feature_data.worktrees = { active: <count>, jobs: { <job_id>: { id, branch, path } }, bestof_active, cleanup: { scanned_at, count, size_bytes, by_project } }` — read from the JSON files only (no git calls; status runs every few seconds).
 
 ---
 
@@ -260,6 +325,7 @@ Both use only `window.MAW` (`api`, `t`, `toast`, `esc`, `badge`, `fmt`, `on`, `a
 - **Worktrees tab** (`addTab id:"worktrees"`): cards per worktree (branch, origin, job status badge, ahead/behind, `+a −d`, dirty count, port) with **Diff**, **Merge** (dialog: strategy, message, owner, "remove after merge"; shows SPEC Guard block / conflicts with a "Fix conflicts with agent ▾" button), **Discard** (confirm, shows the kept ref), **Open in job** (runs a job there through `MAW.runJob` with the project path set to the worktree).
 - **Best-of-N** section in the same tab: launcher (prompt, role, 2–4 candidate rows agent+model, judge) and a **comparison card** per run: one column per candidate with rank, job status, tests, council verdicts + score, cost, time, diff size, "View diff" and **"Merge winner"** (`bestof_pick`).
 - **Project actions**: "New worktree" (base, name), "Best-of-N…" (opens the launcher), "Run isolated" (prompt + agent → `worktree_job`).
+- **Cleanup sub-view (C1)** — 4th segment "Dọn dẹp / Cleanup" in the Worktrees tab, with the count from `feature_data.worktrees.cleanup.count` on the segment: "Scan" (= `cleanup_preview`), candidates grouped by kind with checkbox, name, reason, merged/risky/dirty badges, last commit (relative), size; a sticky footer with "N selected · X MB reclaimed" and "Clean up…". Risky items start unchecked; the confirm dialog lists the selected items, and when any risky item is selected a second checkbox "I understand these are unmerged / have uncommitted work (a backup ref is kept for 30 days)" must be ticked before the button enables (those ids go in `confirm_risky`). Result toast + skipped reasons. Below: settings (keep after merge days, stale days) and the Trash list with "Restore". The project action "Clean up…" opens it. The merge dialog's "remove after merge" checkbox defaults from `keep_after_merge_days`. Merge `blocked: "checks"` shows S4's gate items.
 - **Git panel** (small, inside the Worktrees tab): log (20), current branch, pull / push (confirm) / switch / create branch — the S6 context menu calls the same actions.
 - Polling: the tab refreshes on the `data` event only while it is visible, and a running best-of-N card polls `bestof_status` every 5 s.
 
@@ -285,3 +351,5 @@ Both use only `window.MAW` (`api`, `t`, `toast`, `esc`, `badge`, `fmt`, `on`, `a
 - **R8 — feature tab restore** (`index.html`): on load, `selectTab([...built-ins].includes(stored) ? stored : 'audit')` overwrites `maw_tab` before the feature scripts call `addTab`, so a selected feature tab (Checkpoints / Worktrees / any stream's tab) is never restored after a reload. Keep the stored value when it is not a built-in tab.
 - **R9 — hook output in the job log**: `Invoke-MawHooks` swallows the strings a hook writes, so `[checkpoint] <id>` never reaches the job log (§1.2). Optionally pass non-Block string output through so the runner logs it.
 - **R10 — `MAW_PORT` for isolated jobs**: with R1, the runner should export the worktree's `port` as `MAW_PORT` to the job (the setup script already gets it).
+- **R11 — `ctx.callAction(action, { query?, body? })`** in `server/lib/feature.ts` / `http.ts`: lets one feature call another feature's route in-process with the same validation (S1 → S4 `checks_run` / `checks_status` / `checks_gate`). Until it exists, best-of-N reports `tests: unavailable` and the merge skips the S4 gate; S1 never runs `.maw/checks.json` itself.
+- **R12 — test isolation**: give every test runner its own `TEMP`/`TMP`, `MAW_HOME` and scripts dir (an S1 test once overwrote the installed `invoke-spec-guard.ps1` through `paths.scriptsDir`; fixed in `1ed73af`). A guard in `resolveServerPaths` that refuses the real install when `NODE_TEST_CONTEXT` is set would stop this class of bug.
