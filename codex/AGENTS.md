@@ -16,7 +16,17 @@ When the user asks you to coordinate with **Claude Code** and **Antigravity (Gem
 
 ---
 
-## 2. How to Delegate 100% Frontend to Claude Code (`invoke-claude.ps1`)
+## 2. CRITICAL RULE: Never Ask the User to Watch Antigravity Manually!
+
+> **STRICT PROHIBITION**:
+> - **NEVER** tell the user *"Mình không tự theo dõi Antigravity trong nền được. Khi bạn thấy Antigravity báo xong, nhắn mình một câu..."*!
+> - `invoke-antigravity.ps1` **AUTOMATICALLY WAITS BY DEFAULT** (polls `transcript.jsonl` every 2 seconds up to 600s and prints Antigravity's complete untruncated response directly to your terminal output).
+> - Never run `invoke-antigravity.ps1` as a detached background job and stop your turn. Run it synchronously and wait for its output.
+> - If a long task ever hits a command timeout while Antigravity is still working, **immediately run `invoke-antigravity.ps1 -Action wait -WorkDir "<project_path>"` yourself** in the next step until Antigravity's completed `[Step ...]:` response appears, then immediately review `git diff`!
+
+---
+
+## 3. How to Delegate 100% Frontend to Claude Code (`invoke-claude.ps1`)
 
 ### A. Build or update Frontend UI with Claude Sonnet (`-Role frontend`):
 ```powershell
@@ -37,34 +47,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\conf
 
 ---
 
-## 3. How to Delegate Backend & Tests to Antigravity (`invoke-antigravity.ps1`)
+## 4. How to Delegate Backend & Tests to Antigravity (`invoke-antigravity.ps1`)
 
-`invoke-antigravity.ps1` includes a **Zero-Config Live Self-Healing Bridge** that automatically discovers the active Antigravity IDE language server port and CSRF token, routes by project directory (`-WorkDir`), and waits for full untruncated completion (`-Wait` via `transcript_full.jsonl`).
-
-### A. Send Backend/Test tasks to the active Antigravity project window and wait for completion:
+### A. Send Backend/Test tasks to Antigravity (Auto-Waits for Completion by Default):
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1" `
   -Action send-latest `
   -WorkDir "<project_path>" `
-  -Wait `
   -Title "Task from Codex Leader" `
   -Prompt "<backend_and_test_tasks_per_SPEC.md>"
 ```
 
-### B. Spawn a new Antigravity conversation if no window is open for the project yet:
+### B. Continue waiting if a massive Backend task exceeded shell timeout:
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1" `
+  -Action wait `
+  -WorkDir "<project_path>"
+```
+
+### C. Spawn a new Antigravity conversation if no window is open for the project yet:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1" `
   -Action new `
   -WorkDir "<project_path>" `
   -Model pro `
-  -Wait `
   -Title "Backend Implementation from Codex Leader" `
   -Prompt "<backend_and_test_tasks_per_SPEC.md>"
-```
-
-### C. Check Antigravity's status manually (if `-Wait` was not used):
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1" `
-  -Action status `
-  -WorkDir "<project_path>"
 ```

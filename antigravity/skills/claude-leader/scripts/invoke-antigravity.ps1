@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory=$true)]
     [ValidateSet("send-latest", "send", "new", "status", "list-active", "wait")]
     [string]$Action,
@@ -18,7 +18,9 @@ param(
 
     [switch]$Wait,
 
-    [int]$TimeoutSeconds = 300
+    [switch]$NoWait,
+
+    [int]$TimeoutSeconds = 600
 )
 
 $ErrorActionPreference = "Stop"
@@ -348,7 +350,7 @@ switch ($Action) {
         }
         $newOut = (& $agentApi new-conversation "--model=$Model" "--title=$Title" $Prompt) -join "`n"
         Write-Output $newOut
-        if ($Wait) {
+        if (-not $NoWait) {
             $newCid = $null
             if ($newOut -match '([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})') {
                 $newCid = $Matches[1]
@@ -373,7 +375,7 @@ switch ($Action) {
         $initialMaxStep = Get-MaxStepIndex -cid $ConversationId
         & $agentApi send-message "--title=$Title" $ConversationId $Prompt
         Write-Output "Sent message to Antigravity conversation: $ConversationId"
-        if ($Wait) {
+        if (-not $NoWait) {
             Wait-AntigravityTurn -cid $ConversationId -initialStepIndex $initialMaxStep -timeoutSec $TimeoutSeconds
         }
     }
@@ -390,7 +392,7 @@ switch ($Action) {
         $initialMaxStep = Get-MaxStepIndex -cid $targetId
         & $agentApi send-message "--title=$Title" $targetId $Prompt
         Write-Output "Sent message to latest Antigravity conversation: $targetId"
-        if ($Wait) {
+        if (-not $NoWait) {
             Wait-AntigravityTurn -cid $targetId -initialStepIndex $initialMaxStep -timeoutSec $TimeoutSeconds
         }
     }
@@ -429,3 +431,4 @@ switch ($Action) {
         }
     }
 }
+

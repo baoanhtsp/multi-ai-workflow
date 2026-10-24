@@ -9,6 +9,11 @@ metadata:
 
 When this skill is invoked, you (**OpenAI Codex**) act as **Tech Lead, Algorithm Specialist & Security Reviewer**, coordinating **Claude Code** (100% Frontend UI) and **Antigravity (`Gemini 4 Argon`)** (Backend, Database, APIs & Automated Tests).
 
+> **CRITICAL RULE (NO MANUAL POLLING BY USER)**:
+> - **NEVER** stop your turn and tell the user *"Mình không tự theo dõi Antigravity trong nền được. Khi bạn thấy Antigravity báo xong, nhắn mình một câu..."*!
+> - `invoke-antigravity.ps1` **automatically blocks and waits by default** until Antigravity finishes its turn and prints the full untruncated response right back to your terminal.
+> - Always run `invoke-antigravity.ps1` synchronously (never as a detached background task). If a command ever times out while Antigravity is still coding, **immediately call `invoke-antigravity.ps1 -Action wait -WorkDir "<project_path>"` yourself** until Antigravity completes, then immediately review `git diff`!
+
 ## 4-Step Execution Workflow
 
 ### Step 1: Lock Down `SPEC.md`
@@ -32,22 +37,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\conf
 - For small CSS/UI adjustments, use `-Role ui-tweak` (Haiku).
 
 ### Step 3: Delegate Backend, Database & Tests to Antigravity (`invoke-antigravity.ps1`)
-Send the Backend/Core and Automated Test tasks to **Antigravity (`Gemini 4 Argon`)** and wait for its complete untruncated report in a single command:
+Send the Backend/Core and Automated Test tasks to **Antigravity (`Gemini 4 Argon`)** (auto-waits for completion by default):
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1" `
   -Action send-latest `
   -WorkDir "<project_path>" `
-  -Wait `
   -Title "Task from Codex Leader" `
   -Prompt "Read SPEC.md and implement all Backend, Database, APIs, and Automated Tests (<list_files>). Run tests and report results."
 ```
-- If no Antigravity window is open for `<project_path>` yet, replace `-Action send-latest` with `-Action new -Model pro -Wait`.
+- If the command times out while Antigravity is still working, immediately run `-Action wait -WorkDir "<project_path>"` until it returns Antigravity's final report.
+- If no Antigravity window is open for `<project_path>` yet, replace `-Action send-latest` with `-Action new -Model pro`.
 
 ### Step 4: Security/Diff Review, Score (`X/10`) & Commit
-1. Inspect `git status` and `git diff` across the repository, verifying security, race conditions, edge cases, and adherence to `SPEC.md`.
+1. Immediately after `invoke-antigravity.ps1` returns Antigravity's completion report, inspect `git status` and `git diff` across the repository, verifying security, race conditions, edge cases, and adherence to `SPEC.md`.
 2. Score the implementation (`X/10`) and declare `APPROVED` (if `>= 8.5/10` with zero critical bugs) or `CHANGES_REQUESTED`.
 3. If fixes are needed:
-   - Re-invoke `invoke-antigravity.ps1 -Action send-latest -WorkDir "<project_path>" -Wait` for Backend/Test fixes.
+   - Re-invoke `invoke-antigravity.ps1 -Action send-latest -WorkDir "<project_path>"` for Backend/Test fixes.
    - Re-invoke `invoke-claude.ps1 -Role frontend` (or `ui-tweak`) for Frontend fixes.
 4. Once `APPROVED`, stage all files and create a clean `git commit`.
