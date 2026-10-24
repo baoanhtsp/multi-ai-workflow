@@ -1,0 +1,808 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { handleCancelJob } from '../../actions/jobs.ts';
+import type { MawFeature } from '../../lib/feature.ts';
+import { isFileSafe } from '../../lib/paths.ts';
+import { runCommand } from '../../lib/proc.ts';
+import { ApiValidationError } from '../../lib/validate.ts';
+import { CONVERSATION_ID_REGEX, generateConversationId, generateMessageId, generateQueueId } from '../agents-ws/lib/ids.ts';
+import { allowedModels } from '../agents-ws/lib/models.ts';
+import { withS6State } from '../agents-ws/lib/mutex.ts';
+import { getMaxMessageCharsForAgent } from '../agents-ws/lib/prompt.ts';
+import { assertSafeProjectMawWrite } from '../agents-ws/lib/security.ts';
+import { appendAuditLog, readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
+import type { Agent } from '../agents-ws/types.ts';
+import type { Team } from '../teams/types.ts';
+import {
+  appendConversationMessage,
+  ensureTickStarted,
+  getWindowTokens,
+  readConversationMessages,
+  startCompactionJob,
+  startTurnJob,
+  tick,
+  updateConversationMessages,
+} from './tick.ts';
+import type { Conversation, Message, QueueItem } from './types.ts';
+
+const IMAGE_PLATFORMS = ['claude', 'codex', 'gemini', 'cursor'];
+
+export const feature: MawFeature = {
+  name: 'chat',
+  routes: {
+    chat_list: {
+      method: 'GET',
+      handler: async (ctx) => {
+        ensureTickStarted(ctx);
+        await tick(ctx);
+
+        const chatDir = ctx.paths.featureDataDir('chat');
+        const convsFile = path.win32.join(chatDir, 'conversations.json');
+        const convsData = await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
+          version: 1,
+          conversations: [],
+        });
+
+        const agentId = String(ctx.query?.get('agent_id') ?? '').trim();
+        let list = convsData.conversations.filter((c) => c.deleted_at === null);
+
+        if (agentId) {
+          list = list.filter((c) => c.agent_id === agentId);
+        } else {
+          list = list.slice(0, 200);
+        }
+
+        list.sort(
+          (a, b) => new Date(b.updated_at || b.created_at).getTime() - new Date(a.updated_at || a.created_at).getTime()
+        );
+
+        return {
+          ok: true,
+          conversations: list,
+        };
+      },
+    },
+
+    chat_get: {
+      method: 'GET',
+      handler: async (ctx) => {
+        ensureTickStarted(ctx);
+        await tick(ctx);
+
+        const convId = String(ctx.query?.get('conversation_id') ?? '').trim();
+        if (!convId || !CONVERSATION_ID_REGEX.test(convId)) {
+          throw new ApiValidationError('Invalid or missing conversation_id.', 400);
+        }
+
+        const chatDir = ctx.paths.featureDataDir('chat');
+        const convsFile = path.win32.join(chatDir, 'conversations.json');
+        const convsData = await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
+          version: 1,
+          conversations: [],
+        });
+
+        const conv = convsData.conversations.find((c) => c.id === convId && c.deleted_at === null);
+        if (!conv) {
+          throw new ApiValidationError(`Conversation '${convId}' not found.`, 404);
+        }
+
+        const afterSeq = Math.max(0, Number.parseInt(String(ctx.query?.get('after_seq') ?? '0'), 10) || 0);
+        const allMsgs = readConversationMessages(chatDir, conv.id);
+        const filteredMsgs = allMsgs.filter((m) => m.seq > afterSeq).slice(-300);
+
+        let runningInfo: { job_id: string; kind: string; elapsed_sec: number; log_tail: string } | null = null;
+        if (conv.active_job_id) {
+          const logFile = path.win32.join(ctx.paths.jobsDir, `${conv.active_job_id}.log`);
+          let logTail = '';
+          if (fs.existsSync(logFile)) {
+            try {
+              const content = fs.readFileSync(logFile, 'utf8');
+              logTail = content.slice(-1500);
+            } catch {
+              logTail = '';
+            }
+          }
+          const elapsedSec = conv.active_started_at
+            ? Math.max(1, Math.round((Date.now() - new Date(conv.active_started_at).getTime()) / 1000))
+            : 1;
+
+          runningInfo = {
+            job_id: conv.active_job_id,
+            kind: conv.active_kind,
+            elapsed_sec: elapsedSec,
+            log_tail: logTail,
+          };
+        }
+
+        return {
+          ok: true,
+          conversation: conv,
+          messages: filteredMsgs,
+          running: runningInfo,
+        };
+      },
+    },
+
+    chat_create: {
+      method: 'POST',
+      handler: async (ctx) => {
+        return await withS6State(async () => {
+          ensureTickStarted(ctx);
+          const body = ctx.body ?? {};
+          const agentId = String(body.agent_id ?? '').trim();
+          if (!agentId) {
+            throw new ApiValidationError('Missing agent_id.', 400);
+          }
+
+          const agentsDir = ctx.paths.featureDataDir('agents-ws');
+          const agentsFile = path.win32.join(agentsDir, 'agents.json');
+          const agentsData = await readJsonStore<{ version: number; agents: Agent[] }>(agentsFile, {
+            version: 1,
+            agents: [],
+          });
+
+          const agent = agentsData.agents.find((a) => a.id === agentId && a.deleted_at === null);
+          if (!agent) {
+            throw new ApiValidationError(`Agent '${agentId}' not found.`, 404);
+          }
+
+          const title = String(body.title ?? 'Chat 1').trim().slice(0, 80) || 'Chat 1';
+          const nowIso = new Date().toISOString();
+
+          const newConv: Conversation = {
+            id: generateConversationId(),
+            agent_id: agent.id,
+            title,
+            kind: 'chat',
+            created_at: nowIso,
+            updated_at: nowIso,
+            deleted_at: null,
+            seq: 0,
+            session: 1,
+            platform: agent.platform,
+            model: agent.model,
+            effort: agent.effort,
+            resume: null,
+            summary: '',
+            summary_seq: 0,
+            active_job_id: '',
+            active_kind: '',
+            active_started_at: '',
+            queue: [],
+            cost_usd: 0,
+            tokens_in: 0,
+            tokens_out: 0,
+            context: { used_tokens: 0, window_tokens: getWindowTokens(agent.platform), pct: 0 },
+            last_status: '',
+            last_error: '',
+          };
+
+          const chatDir = ctx.paths.featureDataDir('chat');
+          const convsFile = path.win32.join(chatDir, 'conversations.json');
+          const convsData = await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
+            version: 1,
+            conversations: [],
+          });
+
+          convsData.conversations.unshift(newConv);
+          await writeJsonStore(convsFile, convsData);
+
+          return {
+            ok: true,
+            conversation: newConv,
+          };
+        });
+      },
+    },
+
+    chat_rename: {
+      method: 'POST',
+      handler: async (ctx) => {
+        return await withS6State(async () => {
+          const body = ctx.body ?? {};
+          const convId = String(body.conversation_id ?? '').trim();
+          const title = String(body.title ?? '').trim();
+
+          if (!convId || !CONVERSATION_ID_REGEX.test(convId)) {
+            throw new ApiValidationError('Invalid conversation_id.', 400);
+          }
+          if (!title || title.length > 80) {
+            throw new ApiValidationError('Title must be between 1 and 80 characters.', 400);
+          }
+
+          const chatDir = ctx.paths.featureDataDir('chat');
+          const convsFile = path.win32.join(chatDir, 'conversations.json');
+          const convsData = await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
+            version: 1,
+            conversations: [],
+          });
+
+          const conv = convsData.conversations.find((c) => c.id === convId && c.deleted_at === null);
+          if (!conv) {
+            throw new ApiValidationError(`Conversation '${convId}' not found.`, 404);
+          }
+
+          conv.title = title;
+          conv.updated_at = new Date().toISOString();
+          await writeJsonStore(convsFile, convsData);
+
+          return {
+            ok: true,
+            conversation: conv,
+          };
+        });
+      },
+    },
+
+    chat_delete: {
+      method: 'POST',
+      handler: async (ctx) => {
+        return await withS6State(async () => {
+          const body = ctx.body ?? {};
+          const convId = String(body.conversation_id ?? '').trim();
+          if (!convId || !CONVERSATION_ID_REGEX.test(convId)) {
+            throw new ApiValidationError('Invalid conversation_id.', 400);
+          }
+
+          const chatDir = ctx.paths.featureDataDir('chat');
+          const convsFile = path.win32.join(chatDir, 'conversations.json');
+          const convsData = await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
+            version: 1,
+            conversations: [],
+          });
+
+          const conv = convsData.conversations.find((c) => c.id === convId && c.deleted_at === null);
+          if (!conv) {
+            throw new ApiValidationError(`Conversation '${convId}' not found.`, 404);
+          }
+
+          if (conv.active_job_id) {
+            throw new ApiValidationError('Cannot delete conversation while a turn is running.', 409);
+          }
+
+          conv.deleted_at = new Date().toISOString();
+          conv.updated_at = conv.deleted_at;
+          await writeJsonStore(convsFile, convsData);
+
+          await appendAuditLog(chatDir, {
+            action: 'chat_delete',
+            target: convId,
+            detail: { title: conv.title },
+          });
+
+          return {
+            ok: true,
+          };
+        });
+      },
+    },
+
+    chat_send: {
+      method: 'POST',
+      handler: async (ctx) => {
+        return await withS6State(async () => {
+          ensureTickStarted(ctx);
+          const body = ctx.body ?? {};
+          const convId = String(body.conversation_id ?? '').trim();
+          if (!convId || !CONVERSATION_ID_REGEX.test(convId)) {
+            throw new ApiValidationError('Invalid conversation_id.', 400);
+          }
+
+          const text = String(body.text ?? '').trim();
+          if (!text || text.length > 15000) {
+            throw new ApiValidationError('Text is required and must not exceed 15,000 characters.', 400);
+          }
+
+          const chatDir = ctx.paths.featureDataDir('chat');
+          const convsFile = path.win32.join(chatDir, 'conversations.json');
+          const convsData = await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
+            version: 1,
+            conversations: [],
+          });
+
+          const conv = convsData.conversations.find((c) => c.id === convId && c.deleted_at === null);
+          if (!conv) {
+            throw new ApiValidationError(`Conversation '${convId}' not found.`, 404);
+          }
+
+          const agentsDir = ctx.paths.featureDataDir('agents-ws');
+          const agentsFile = path.win32.join(agentsDir, 'agents.json');
+          const agentsData = await readJsonStore<{ version: number; agents: Agent[] }>(agentsFile, {
+            version: 1,
+            agents: [],
+          });
+
+          const agent = agentsData.agents.find((a) => a.id === conv.agent_id);
+          if (!agent) {
+            throw new ApiValidationError(`Agent '${conv.agent_id}' not found.`, 404);
+          }
+          if (agent.deleted_at !== null) {
+            throw new ApiValidationError('Agent deleted.', 409);
+          }
+
+          const platformSpecified = Boolean(body.platform && String(body.platform).trim());
+          const targetPlatform = String(body.platform ?? conv.platform ?? agent.platform).trim().toLowerCase();
+          const registryAgent = ctx.registry.agents.find((a) => a.id === targetPlatform);
+          if (!registryAgent) {
+            throw new ApiValidationError(`Invalid platform '${targetPlatform}'.`, 400);
+          }
+
+          // Item 5: when body has platform, use its model / effort exactly ('' = platform default);
+          // never fall back to conversation's previous platform's model/effort
+          let targetModel = '';
+          let targetEffort = '';
+
+          if (platformSpecified) {
+            const bodyModel = body.model !== undefined && body.model !== null ? String(body.model).trim() : undefined;
+            const bodyEffort = body.effort !== undefined && body.effort !== null ? String(body.effort).trim() : undefined;
+            targetModel = bodyModel ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.model || '') : '');
+            targetEffort = bodyEffort ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.effort || '') : '');
+          } else {
+            const bodyModel = body.model !== undefined && body.model !== null ? String(body.model).trim() : undefined;
+            const bodyEffort = body.effort !== undefined && body.effort !== null ? String(body.effort).trim() : undefined;
+            const convPlatform = (conv.platform || agent.platform).toLowerCase();
+            if (targetPlatform === convPlatform) {
+              targetModel = bodyModel ?? (conv.model || (targetPlatform === agent.platform.toLowerCase() ? agent.model : ''));
+              targetEffort = bodyEffort ?? (conv.effort || (targetPlatform === agent.platform.toLowerCase() ? agent.effort : ''));
+            } else {
+              targetModel = bodyModel ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.model || '') : '');
+              targetEffort = bodyEffort ?? (targetPlatform === agent.platform.toLowerCase() ? (agent.effort || '') : '');
+            }
+          }
+
+          const allowed = allowedModels(ctx, targetPlatform);
+          if (targetModel && !allowed.includes(targetModel)) {
+            throw new ApiValidationError(
+              `Invalid model '${targetModel}'. Allowed: ${allowed.join(', ')}.`,
+              400
+            );
+          }
+
+          if (targetEffort && !registryAgent.efforts.includes(targetEffort)) {
+            throw new ApiValidationError(
+              `Invalid effort '${targetEffort}'. Allowed: ${registryAgent.efforts.join(', ')}.`,
+              400
+            );
+          }
+
+          // Handle attachments (Item 18 & Codex Pass 6 Item 3: run safe check BEFORE any mkdir/write)
+          const rawAttachments = body.attachments;
+          const savedAttachments: Array<{ name: string; path: string }> = [];
+          const validatedAttachments: Array<{ name: string; uniqueFileName: string; buf: Buffer; subPath: string; relPath: string }> = [];
+
+          if (Array.isArray(rawAttachments) && rawAttachments.length > 0) {
+            if (!IMAGE_PLATFORMS.includes(targetPlatform)) {
+              throw new ApiValidationError(
+                `Platform '${targetPlatform}' does not support image attachments. Supported: ${IMAGE_PLATFORMS.join(', ')}.`,
+                400
+              );
+            }
+            if (rawAttachments.length > 3) {
+              throw new ApiValidationError('Maximum 3 attachments allowed.', 400);
+            }
+
+            // Item 3 (Codex Pass 6): Run safe-path check BEFORE any mkdir or write
+            assertSafeProjectMawWrite(agent.workdir, path.join('.maw', 'attachments'), ctx.paths.projectsRoot);
+            assertSafeProjectMawWrite(agent.workdir, path.join('.maw', 'attachments', conv.id), ctx.paths.projectsRoot);
+
+            const nowTs = Date.now();
+            for (let i = 0; i < rawAttachments.length; i++) {
+              const att = rawAttachments[i];
+              if (!att || typeof att !== 'object') {
+                throw new ApiValidationError(`Attachment at index ${i} is invalid.`, 400);
+              }
+              const attObj = att as { name?: string; data_url?: string };
+              const dataUrl = String(attObj.data_url ?? '');
+              const match = /^data:image\/(png|jpeg|webp|gif);base64,/i.exec(dataUrl);
+              if (!match) {
+                throw new ApiValidationError(
+                  `Attachment at index ${i} must be a valid base64 data URL with type image/png, image/jpeg, image/webp, or image/gif.`,
+                  400
+                );
+              }
+
+              const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
+              const defaultName = `image_${i + 1}.${ext}`;
+              const rawName = String(attObj.name ?? defaultName).replace(/[^a-zA-Z0-9._-]/g, '_');
+              const base64Data = dataUrl.slice(match[0].length);
+              const buf = Buffer.from(base64Data, 'base64');
+              if (buf.length > 150 * 1024) {
+                throw new ApiValidationError(`Attachment '${rawName}' exceeds 150 KB limit.`, 400);
+              }
+
+              // Item 4 (Codex Pass 7): Generate unique file names (<timestamp>-<random>-<safe name>)
+              const randHex = crypto.randomBytes(4).toString('hex');
+              const uniqueFileName = `${nowTs}-${randHex}-${rawName}`;
+              const subPath = path.join('.maw', 'attachments', conv.id, uniqueFileName);
+              assertSafeProjectMawWrite(agent.workdir, subPath, ctx.paths.projectsRoot);
+              const relPath = `.maw/attachments/${conv.id}/${uniqueFileName}`;
+              validatedAttachments.push({ name: rawName, uniqueFileName, buf, subPath, relPath });
+            }
+          }
+
+          // Item 4 (Codex Pass 7): Write attachments only AFTER all validation (prompt budget, queue capacity) has passed
+          const writeValidatedAttachments = () => {
+            if (validatedAttachments.length > 0 && savedAttachments.length === 0) {
+              const attachDir = path.win32.join(agent.workdir, '.maw', 'attachments', conv.id);
+              if (!fs.existsSync(attachDir)) {
+                fs.mkdirSync(attachDir, { recursive: true });
+              }
+              for (const item of validatedAttachments) {
+                const savePath = path.win32.join(attachDir, item.uniqueFileName);
+                fs.writeFileSync(savePath, item.buf);
+                savedAttachments.push({ name: item.name, path: item.relPath });
+              }
+            }
+          };
+
+          // Item 1 (Codex Pass 6): Prompt budget accounting for fixed sections (agent, hooks, attachments, dispatch)
+          let mayDelegate = false;
+          if (agent.team_id && agent.workdir) {
+            const teamFile = path.win32.join(agent.workdir, '.maw', 'team.json');
+            if (isFileSafe(teamFile)) {
+              try {
+                const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
+                const myRole = team.roles.find((r) => r.key === agent.team_role || r.agent_id === agent.id);
+                mayDelegate = Boolean(myRole?.may_delegate);
+              } catch {}
+            }
+          }
+
+          const attachLines = validatedAttachments.map((a) => `Attached image: ${a.relPath}`);
+          const maxAllowedChars = getMaxMessageCharsForAgent(
+            {
+              name: agent.name,
+              team_role: agent.team_role,
+              hooks: agent.hooks,
+              may_delegate: mayDelegate,
+            },
+            {
+              attachmentLines: attachLines,
+            }
+          );
+          if (text.length > maxAllowedChars) {
+            throw new ApiValidationError(`Message too long for this agent (max ${maxAllowedChars} chars)`, 400);
+          }
+
+          // Auto-set title from first message if title was default
+          if (conv.seq === 0 && (conv.title === 'Chat 1' || conv.title === '')) {
+            conv.title = text.slice(0, 48).trim();
+          }
+
+          // Busy check
+          const isBusy = Boolean(conv.active_job_id);
+          if (isBusy) {
+            // Item 17: Steer check - only when active_kind === 'turn'
+            const activePlatform = (conv.platform || agent.platform).toLowerCase();
+            let antigravityCid = '';
+            if (conv.resume?.platform === 'antigravity') {
+              antigravityCid = conv.resume.token || '';
+            }
+
+            if (!antigravityCid && activePlatform === 'antigravity') {
+              const logFile = path.win32.join(ctx.paths.jobsDir, `${conv.active_job_id}.log`);
+              if (fs.existsSync(logFile)) {
+                const m = /CONVERSATION_ID:\s*([a-zA-Z0-9._-]+)/i.exec(fs.readFileSync(logFile, 'utf8'));
+                if (m) {
+                  antigravityCid = m[1]!;
+                }
+              }
+            }
+
+            if (conv.active_kind === 'turn' && activePlatform === 'antigravity' && antigravityCid) {
+              const scriptPath = path.win32.join(ctx.paths.scriptsDir, 'invoke-antigravity.ps1');
+              const tmpFile = path.win32.join(
+                ctx.paths.tempDir,
+                `maw_steer_${crypto.randomBytes(4).toString('hex')}.txt`
+              );
+              let steerSuccess = false;
+
+              try {
+                fs.writeFileSync(tmpFile, '\uFEFF' + text, 'utf8');
+
+                const steerArgs = [
+                  '-NoProfile',
+                  '-ExecutionPolicy',
+                  'Bypass',
+                  '-File',
+                  scriptPath,
+                  '-Action',
+                  'send',
+                  '-ConversationId',
+                  antigravityCid,
+                  '-NoWait',
+                  '-PromptFile',
+                  tmpFile,
+                ];
+
+                const steerRes = await runCommand('powershell.exe', steerArgs, { timeoutMs: 15000 });
+                if (steerRes.code === 0) {
+                  steerSuccess = true;
+                }
+              } catch {
+                // Steer failure falls through to queue
+              } finally {
+                try {
+                  if (fs.existsSync(tmpFile)) {
+                    fs.unlinkSync(tmpFile);
+                  }
+                } catch {}
+              }
+
+              if (steerSuccess) {
+                writeValidatedAttachments();
+                conv.seq++;
+                const steerMsg: Message = {
+                  seq: conv.seq,
+                  id: generateMessageId(),
+                  role: 'user',
+                  text,
+                  ts: new Date().toISOString(),
+                  platform: activePlatform,
+                  model: conv.model,
+                  effort: conv.effort,
+                  actual_model: '',
+                  job_id: conv.active_job_id,
+                  status: 'done',
+                  cost_usd: null,
+                  tokens_in: null,
+                  tokens_out: null,
+                  duration_sec: null,
+                  attachments: savedAttachments,
+                  handoff_id: '',
+                  steered: true,
+                };
+
+                appendConversationMessage(chatDir, conv.id, steerMsg);
+                conv.updated_at = new Date().toISOString();
+                await writeJsonStore(convsFile, convsData);
+
+                return {
+                  ok: true,
+                  message: steerMsg,
+                  steered: true,
+                };
+              }
+            }
+
+            // Busy and not steered => Queue
+            if (conv.queue.length >= 20) {
+              throw new ApiValidationError('Queue is full (maximum 20 items).', 409);
+            }
+
+            writeValidatedAttachments();
+
+            const queueItem: QueueItem = {
+              id: generateQueueId(),
+              text,
+              platform: targetPlatform,
+              model: targetModel,
+              effort: targetEffort,
+              ts: new Date().toISOString(),
+              attachments: savedAttachments,
+            };
+
+            conv.queue.push(queueItem);
+            conv.updated_at = new Date().toISOString();
+            await writeJsonStore(convsFile, convsData);
+
+            return {
+              ok: true,
+              queued: true,
+              queue_item: queueItem,
+              queue_len: conv.queue.length,
+            };
+          }
+
+          // Idle: start turn job directly
+          writeValidatedAttachments();
+          // Item 6: Reset retry_attempts when a new user (non-retry) turn starts
+          conv.retry_attempts = 0;
+          const qItem: QueueItem = {
+            id: generateQueueId(),
+            text,
+            platform: targetPlatform,
+            model: targetModel,
+            effort: targetEffort,
+            ts: new Date().toISOString(),
+            attachments: savedAttachments,
+          };
+
+          try {
+            await startTurnJob(ctx, conv, qItem, agent, chatDir);
+          } finally {
+            conv.updated_at = new Date().toISOString();
+            await writeJsonStore(convsFile, convsData);
+          }
+
+          const allMsgs = readConversationMessages(chatDir, conv.id);
+          const latestMsg = allMsgs[allMsgs.length - 1]!;
+
+          return {
+            ok: true,
+            message: latestMsg,
+            job_id: conv.active_job_id,
+            queued: false,
+          };
+        });
+      },
+    },
+
+    chat_queue_remove: {
+      method: 'POST',
+      handler: async (ctx) => {
+        return await withS6State(async () => {
+          const body = ctx.body ?? {};
+          const convId = String(body.conversation_id ?? '').trim();
+          const queueId = String(body.queue_id ?? '').trim();
+
+          if (!convId || !CONVERSATION_ID_REGEX.test(convId)) {
+            throw new ApiValidationError('Invalid conversation_id.', 400);
+          }
+          if (!queueId) {
+            throw new ApiValidationError('Missing queue_id.', 400);
+          }
+
+          const chatDir = ctx.paths.featureDataDir('chat');
+          const convsFile = path.win32.join(chatDir, 'conversations.json');
+          const convsData = await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
+            version: 1,
+            conversations: [],
+          });
+
+          const conv = convsData.conversations.find((c) => c.id === convId && c.deleted_at === null);
+          if (!conv) {
+            throw new ApiValidationError(`Conversation '${convId}' not found.`, 404);
+          }
+
+          const idx = conv.queue.findIndex((q) => q.id === queueId);
+          if (idx !== -1) {
+            conv.queue.splice(idx, 1);
+            conv.updated_at = new Date().toISOString();
+            await writeJsonStore(convsFile, convsData);
+          }
+
+          return {
+            ok: true,
+            queue: conv.queue,
+          };
+        });
+      },
+    },
+
+    chat_stop: {
+      method: 'POST',
+      handler: async (ctx) => {
+        return await withS6State(async () => {
+          const body = ctx.body ?? {};
+          const convId = String(body.conversation_id ?? '').trim();
+          if (!CONVERSATION_ID_REGEX.test(convId)) {
+            throw new ApiValidationError('Invalid conversation_id.', 400);
+          }
+
+          const chatDir = ctx.paths.featureDataDir('chat');
+          const convsFile = path.win32.join(chatDir, 'conversations.json');
+          const convsData = await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
+            version: 1,
+            conversations: [],
+          });
+
+          const conv = convsData.conversations.find((c) => c.id === convId && c.deleted_at === null);
+          if (!conv) {
+            throw new ApiValidationError(`Conversation '${convId}' not found.`, 404);
+          }
+
+          if (!conv.active_job_id) {
+            throw new ApiValidationError('Conversation has no active job to stop.', 409);
+          }
+
+          const jobId = conv.active_job_id;
+          let cancelSucceeded = false;
+          let alreadyFinished = false;
+          try {
+            await handleCancelJob({ job_id: jobId }, ctx.paths);
+            cancelSucceeded = true;
+          } catch (err: unknown) {
+            // Item 2 (Pass 5): Stop / cancel race: when handleCancelJob answers 409 with a terminal status (DONE / FAILED / CANCELLED),
+            // do NOT clear active_job_id and do NOT mark the handoff cancelled — run tick() so the real result is recorded,
+            // and return { ok: true, already_finished: true }. Only a successful cancel finalizes as cancelled.
+            if (
+              err instanceof ApiValidationError &&
+              err.statusCode === 409 &&
+              typeof (err as unknown as Record<string, unknown>).status === 'string'
+            ) {
+              const termStatus = String((err as unknown as Record<string, unknown>).status);
+              if (['DONE', 'FAILED', 'CANCELLED'].includes(termStatus)) {
+                alreadyFinished = true;
+              } else {
+                cancelSucceeded = true;
+              }
+            } else {
+              throw err;
+            }
+          }
+
+          if (alreadyFinished) {
+            await tick(ctx);
+            return {
+              ok: true,
+              already_finished: true,
+            };
+          }
+
+          if (cancelSucceeded) {
+            // Mark running message cancelled
+            const msgs = readConversationMessages(chatDir, conv.id);
+            const runningMsg = msgs.find((m) => m.job_id === jobId);
+            if (runningMsg) {
+              runningMsg.status = 'cancelled';
+              updateConversationMessages(chatDir, conv.id, msgs);
+            }
+
+            conv.active_job_id = '';
+            conv.active_kind = '';
+            conv.active_started_at = '';
+            conv.updated_at = new Date().toISOString();
+            await writeJsonStore(convsFile, convsData);
+
+            await appendAuditLog(chatDir, {
+              action: 'chat_stop',
+              target: convId,
+              detail: { cancelled_job_id: jobId },
+            });
+          }
+
+          return {
+            ok: true,
+            cancelled: jobId,
+          };
+        });
+      },
+    },
+
+    chat_compact: {
+      method: 'POST',
+      handler: async (ctx) => {
+        return await withS6State(async () => {
+          const body = ctx.body ?? {};
+          const convId = String(body.conversation_id ?? '').trim();
+          if (!convId || !CONVERSATION_ID_REGEX.test(convId)) {
+            throw new ApiValidationError('Invalid conversation_id.', 400);
+          }
+
+          const chatDir = ctx.paths.featureDataDir('chat');
+          const convsFile = path.win32.join(chatDir, 'conversations.json');
+          const convsData = await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
+            version: 1,
+            conversations: [],
+          });
+
+          const conv = convsData.conversations.find((c) => c.id === convId && c.deleted_at === null);
+          if (!conv) {
+            throw new ApiValidationError(`Conversation '${convId}' not found.`, 404);
+          }
+
+          if (conv.active_job_id) {
+            throw new ApiValidationError('Cannot compact conversation while a job is running.', 409);
+          }
+
+          const agentsDir = ctx.paths.featureDataDir('agents-ws');
+          const agentsFile = path.win32.join(agentsDir, 'agents.json');
+          const agentsData = await readJsonStore<{ version: number; agents: Agent[] }>(agentsFile, {
+            version: 1,
+            agents: [],
+          });
+
+          await startCompactionJob(ctx, conv, chatDir, agentsData.agents);
+          await writeJsonStore(convsFile, convsData);
+
+          return {
+            ok: true,
+            job_id: conv.active_job_id,
+          };
+        });
+      },
+    },
+  },
+};
