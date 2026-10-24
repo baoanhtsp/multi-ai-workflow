@@ -204,9 +204,15 @@
     d.innerHTML = `<div class="tk-dlg-h"><h3>${esc(title)}</h3><button type="button" class="btn btn-sm tk-x" aria-label="${esc(t('tk.close'))}">✕</button></div><div class="tk-dlg-b"></div>`;
     const b = d.querySelector('.tk-dlg-b');
     if (typeof body === 'string') b.innerHTML = body; else if (body) b.appendChild(body);
+    // Clean up on close without relying on the async 'close' event alone (some embedded browsers delay it).
+    let done = false;
+    const finish = () => { if (done) return; done = true; d.remove(); onClose?.(); };
+    const nativeClose = d.close.bind(d);
+    d.close = v => { if (d.open) nativeClose(v); finish(); };
+    d.addEventListener('close', finish);
+    d.addEventListener('cancel', e => { e.preventDefault(); d.close(); });
     d.querySelector('.tk-x').onclick = () => d.close();
     d.addEventListener('click', e => { if (e.target === d) d.close(); });
-    d.addEventListener('close', () => { d.remove(); onClose?.(); });
     document.body.appendChild(d);
     d.showModal();
     return d;
