@@ -268,7 +268,7 @@
 
     async function editorSettings() {
       let cfg;
-      try { cfg = await api('files_config'); } catch (e) { toast(e.message, 'err'); return; }
+      try { cfg = await api('files_config', {}); } catch (e) { toast(e.message, 'err'); return; }
       const back = document.createElement('div');
       back.className = 'rv-modal-back fl-modal-back';
       back.innerHTML = `<div class="rv-modal card" role="dialog" aria-modal="true" aria-label="${esc(t('fl.editorCfg'))}">

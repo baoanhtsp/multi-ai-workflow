@@ -115,6 +115,7 @@ tr.del .rv-ln { background: var(--rv-del-strong); }
 .rv-grid2 > label { display: block; min-width: 0; }
 .rv-prompt { max-height: 280px; overflow: auto; margin: 0; padding: 10px; border-radius: 6px; background: var(--code-bg); color: var(--code-text); font-size: 12px; white-space: pre-wrap; }
 
+.rv-picker { padding: 14px 16px; }
 .rv-picker .seg { flex-wrap: wrap; }
 .rv-recent { display: grid; gap: 2px; }
 .rv-recent-row { display: flex; align-items: center; gap: 8px; padding: 5px 6px; border: 0; border-radius: 5px; background: none; color: var(--text); font-size: 12px; text-align: left; cursor: pointer; }

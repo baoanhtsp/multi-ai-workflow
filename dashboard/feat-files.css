@@ -1,4 +1,5 @@
 /* S5 / V9 — files panel (also embedded by the S6 workspace). Theme tokens only. */
+.feature-panel > .fl-root, .feature-panel.fl-root { padding: 14px 16px; }
 .fl-root { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 8px; min-height: 420px; }
 .fl-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .fl-bar .fl-q { flex: 1 1 180px; width: auto; }

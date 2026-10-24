@@ -165,9 +165,11 @@
   let V = null; // the open viewer state
 
   function open(params) {
-    const p = { project_path: params.project_path || MAW.project()?.path || '', source: params.source || 'worktree',
+    const source = params.source || 'worktree';
+    // A job diff takes its project from the job meta, so the selected project is only a fallback there.
+    const p = { project_path: params.project_path || (source === 'job' ? '' : MAW.project()?.path || ''), source,
       ref: params.ref || '', base: params.base || '', path: params.path || '' };
-    if (!p.project_path) { toast(t('rv.pickProject'), 'warn'); return; }
+    if (!p.project_path && source !== 'job') { toast(t('rv.pickProject'), 'warn'); return; }
     if (V) closeViewer();
     const el = document.createElement('div');
     el.className = 'rv-overlay';
@@ -208,7 +210,8 @@
     el.querySelector('[data-opt="ctx"]').value = '3';
     el.addEventListener('click', onClick);
     el.addEventListener('change', onChange);
-    el.addEventListener('keydown', onKey);
+    // On the document, so Escape still works after focus fell back to <body> (e.g. a closed dialog).
+    document.addEventListener('keydown', onKey);
     el.querySelector('.rv-filter').addEventListener('input', renderFileList);
     syncTools();
     load();
@@ -218,6 +221,7 @@
   function closeViewer() {
     if (!V) return;
     V.el.remove();
+    document.removeEventListener('keydown', onKey);
     document.documentElement.classList.remove('rv-locked');
     try { V.prevFocus?.focus?.(); } catch { /* element gone */ }
     V = null;
@@ -240,7 +244,8 @@
     } catch (e) {
       if (V !== v) return;
       if (e.status === 404 && v.p.source === 'job') {
-        v.p = { ...v.p, source: 'worktree', ref: '' };
+        v.p = { ...v.p, source: 'worktree', ref: '', project_path: v.p.project_path || MAW.project()?.path || '' };
+        if (!v.p.project_path) { main.innerHTML = `<div class="empty">${esc(t('rv.pickProject'))}</div>`; return; }
         toast(t('rv.noCheckpoint'), 'warn');
         return load();
       }
@@ -488,8 +493,9 @@
       const r = await api('review_hunk', body({ path, hunk_id: hunkId || null, action, confirm: action === 'reject' ? true : undefined }));
       const st = session().states[path] ||= { file: null, hunks: {} };
       st.hunks ||= {};
-      if (hunkId) { if (action === 'reset') delete st.hunks[hunkId]; else st.hunks[hunkId] = r.state || (action === 'accept' ? 'accepted' : 'rejected'); }
-      else st.file = action === 'reset' ? null : (r.state || (action === 'accept' ? 'accepted' : 'rejected'));
+      const mark = action === 'accept' ? 'accepted' : 'rejected';
+      if (hunkId) { if (action === 'reset') delete st.hunks[hunkId]; else st.hunks[hunkId] = mark; }
+      else st.file = action === 'reset' ? null : mark;
       if (action === 'reject') {
         toast(t('rv.rejectedToast', { ref: r.snapshot_ref || '—' }), 'ok');
         await load(true); // the working tree changed: line numbers of the other hunks moved
@@ -602,6 +608,7 @@
   }
 
   function onKey(e) {
+    if (!V || document.querySelector('.rv-modal-back, .st-back')) return;
     if (e.key === 'Escape' && !e.defaultPrevented) {
       if (V.draft || V.editing) { const p = V.draft?.path || session().comments.find(c => c.id === V.editing)?.path; V.draft = null; V.editing = null; if (p) rerenderFile(p); }
       else closeViewer();
