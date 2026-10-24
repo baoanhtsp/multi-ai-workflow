@@ -393,7 +393,7 @@
       </div>
       ${G.out ? `<pre class="s1-out" style="margin-bottom:10px">${esc(G.out)}</pre>` : ''}
       <div class="section-title">${esc(t('gtLog'))}</div>
-      ${G.log.length ? `<ul class="s1-log">${G.log.map(c => `<li><span class="s1-mono">${esc(c.short || String(c.sha || '').slice(0, 7))}</span><span class="s1-subj" title="${esc(c.subject || '')}">${esc(c.subject || '')}</span>
+      ${G.log.length ? `<ul class="s1-log">${G.log.map(c => `<li><span class="s1-mono">${esc(c.short_sha || c.short || String(c.sha || '').slice(0, 7))}</span><span class="s1-subj" title="${esc(c.subject || '')}">${esc(c.subject || '')}</span>
         <span class="s1-meta">${esc(c.author || '')} · <span title="${esc(S().absTime(c.date))}">${esc(S().relTime(c.date))}</span></span></li>`).join('')}</ul>`
         : `<div class="empty">${esc(G.loading || !G.at ? t('s1Loading') : t('gtNoLog'))}</div>`}`;
   }

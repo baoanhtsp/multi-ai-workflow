@@ -81,3 +81,4 @@
 
 .btn.btn-danger-solid { background: var(--err); border-color: var(--err); color: #fff; }
 .btn.btn-danger-solid:hover { filter: brightness(1.08); background: var(--err); }
+.s1-dlg span.lbl, .s1-launch span.lbl { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
