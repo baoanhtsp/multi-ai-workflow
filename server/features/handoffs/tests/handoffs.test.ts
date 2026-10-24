@@ -9,7 +9,7 @@ import { resolveServerPaths } from '../../../lib/paths.ts';
 import { runCommand } from '../../../lib/proc.ts';
 import { ApiValidationError } from '../../../lib/validate.ts';
 import { feature as agentsFeature } from '../../agents-ws/index.ts';
-import { getBaseCommit, getNonIsolatedChangedFiles, getWorktreeChangedFiles } from '../../agents-ws/lib/git.ts';
+import { getBaseCommit, getDirtyFilesWithHashes, getNonIsolatedChangedFiles, getWorktreeChangedFiles } from '../../agents-ws/lib/git.ts';
 import { feature as chatFeature } from '../../chat/index.ts';
 import { setWorktreeFeatureCheckerForTest, tick } from '../../chat/tick.ts';
 import { BUILTIN_FULL_TEMPLATE } from '../../teams/defaults.ts';
@@ -278,18 +278,28 @@ test('handoffs: Invalid json block results in needs_review, retry and accept', a
   assert.equal(targetHandoff.status, 'needs_review');
   assert.ok(targetHandoff.parse_error.includes('Missing fenced ```json'));
 
+  // Retry while in needs_review -> 200 OK
+  const retryReq = makeReq({ id: handoffId });
+  const retryRes = (await feature.routes['handoff_retry']!.handler(retryReq, retryReq)) as any;
+  assert.equal(retryRes.ok, true);
+  assert.equal(retryRes.handoff.attempts, 1);
+  assert.equal(retryRes.handoff.status, 'started');
+
+  await tick(baseCtx); // member job finishes again with missing json -> needs_review
+
   // Accept user override
   const acceptReq = makeReq({ id: handoffId, note: 'Approved manually by tech lead' });
   const acceptRes = (await feature.routes['handoff_accept']!.handler(acceptReq, acceptReq)) as any;
   assert.equal(acceptRes.ok, true);
   assert.equal(acceptRes.handoff.status, 'completed');
 
-  // Retry
-  const retryReq = makeReq({ id: handoffId });
-  const retryRes = (await feature.routes['handoff_retry']!.handler(retryReq, retryReq)) as any;
-  assert.equal(retryRes.ok, true);
-  assert.equal(retryRes.handoff.attempts, 1);
-  assert.equal(retryRes.handoff.status, 'started');
+  // Retry after completed -> 409
+  await assert.rejects(
+    async () => {
+      await feature.routes['handoff_retry']!.handler(retryReq, retryReq);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409
+  );
 });
 
 test('handoffs: [finalize] cancel and accept append Lead message', async () => {
@@ -618,11 +628,12 @@ test('handoffs: [Item 4] terminal handoffs 409 guards and idempotent Lead notifi
     (err: any) => err instanceof ApiValidationError && err.statusCode === 409
   );
 
-  // 5. Verify exactly ONE Lead message was appended for this terminal handoff
+  // 5. Verify Lead messages: 1 for needs_review outcome, 1 for accepted by user outcome
   const getLeadReq = makeReq({}, { conversation_id: leadConvId });
   const getLeadRes = (await chatFeature.routes['chat_get']!.handler(getLeadReq, getLeadReq)) as any;
   const matchingLeadMsgs = getLeadRes.messages.filter((m: any) => m.handoff_id === handoffId);
-  assert.equal(matchingLeadMsgs.length, 1, 'Exactly one Lead message per terminal handoff');
+  assert.equal(matchingLeadMsgs.length, 2, 'One message for needs_review, one message for accepted by user');
+  assert.match(matchingLeadMsgs[1].text, /accepted by user \(was needs_review\)/);
 });
 
 test('handoffs: [Item 2] handoff_cancel preserves running tracking on cancel failure', async () => {
@@ -1521,6 +1532,200 @@ test('handoffs: [Item 5] working_style drives member conversation (persistent, p
   const testH1 = listResTest.handoffs.find((h: any) => h.id === t1Res.handoff.id);
   const testH2 = listResTest.handoffs.find((h: any) => h.id === t2Res.handoff.id);
   assert.notEqual(testH1.member_conversation_id, testH2.member_conversation_id, 'new_chat_per_task always creates a new conversation');
+});
+
+test('handoffs: [Pass 7 Item 1] write_scope fails closed if team.json missing, falls back to handoff record, or marks write scope unknown', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  setNextReply(`
+\`\`\`json
+{
+  "status": "completed",
+  "summary": "Completed planner task",
+  "files_changed": ["specs/plan.md"],
+  "evidence": "",
+  "blockers": []
+}
+\`\`\`
+`);
+
+  // Dispatch to planner (planner has write_scope: ['specs/**', 'docs/**'])
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'planner',
+    task: 'Write specifications',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  const handoffId = dispRes.handoff.id;
+  assert.deepEqual(dispRes.handoff.write_scope, ['specs/**', 'docs/**'], 'write_scope is captured at dispatch time');
+
+  // Case A: Remove team.json before verification -> tick should fall back to handoff.write_scope
+  const teamJsonPath = path.join(testProj, '.maw', 'team.json');
+  fs.unlinkSync(teamJsonPath);
+
+  await tick(baseCtx); // starts job
+  await tick(baseCtx); // finishes job and verifies scope
+
+  const listResA = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const hA = listResA.handoffs.find((h: any) => h.id === handoffId);
+  // Outside git, since write_scope is ['specs/**', 'docs/**'] (not ['**']), it fails closed to needs_review
+  assert.equal(hA.status, 'needs_review');
+  assert.equal(hA.parse_error, 'changes could not be verified: not a git repository');
+
+  // Case B: Both team.json and handoff.write_scope are missing -> marks 'write scope unknown'
+  const handoffsFile = path.join(baseCtx.paths.featureDataDir('handoffs'), 'handoffs.json');
+  const hData = JSON.parse(fs.readFileSync(handoffsFile, 'utf8'));
+  const targetH = hData.handoffs.find((h: any) => h.id === handoffId);
+  delete targetH.write_scope;
+  targetH.status = 'started';
+  targetH.job_id = '';
+  targetH.finished_at = '';
+  fs.writeFileSync(handoffsFile, JSON.stringify(hData), 'utf8');
+
+  await tick(baseCtx); // starts job
+  await tick(baseCtx); // finishes job
+
+  const listResB = (await feature.routes['handoff_list']!.handler(makeReq({}, { team_id: applyRes.team.id }), makeReq())) as any;
+  const hB = listResB.handoffs.find((h: any) => h.id === handoffId);
+  assert.equal(hB.status, 'needs_review');
+  assert.equal(hB.parse_error, 'write scope unknown');
+});
+
+test('handoffs: [Pass 7 Item 2] git porcelain -z handles spaces, quotes, and renames; hash-object failure marks needs_review', async () => {
+  const tempGitDir = fs.mkdtempSync(path.join(ORIG_TMP, 'maw git space quote '));
+  try {
+    await runCommand('git.exe', ['-C', tempGitDir, 'init']);
+    await runCommand('git.exe', ['-C', tempGitDir, 'config', 'user.name', 'Test']);
+    await runCommand('git.exe', ['-C', tempGitDir, 'config', 'user.email', 'test@example.com']);
+
+    // Commit baseline file
+    const baseFile = path.join(tempGitDir, 'initial.txt');
+    fs.writeFileSync(baseFile, 'hello\n', 'utf8');
+    await runCommand('git.exe', ['-C', tempGitDir, 'add', 'initial.txt']);
+    await runCommand('git.exe', ['-C', tempGitDir, 'commit', '-m', 'init']);
+    const baseCommit = (await getBaseCommit(tempGitDir))!;
+    assert.ok(baseCommit);
+
+    // Create file with spaces
+    const spaceFile = path.join(tempGitDir, 'my cool file with space.txt');
+    fs.writeFileSync(spaceFile, 'space content\n', 'utf8');
+
+    // Create file with quote (single quote is valid on Windows NTFS)
+    const quoteFile = path.join(tempGitDir, "app 'quoted'.ts");
+    fs.writeFileSync(quoteFile, 'export const x = 1;\n', 'utf8');
+
+    // Rename initial.txt to renamed file with spaces
+    await runCommand('git.exe', ['-C', tempGitDir, 'mv', 'initial.txt', 'renamed initial.txt']);
+
+    // Test getWorktreeChangedFiles with porcelain=v1 -z and diff -z
+    const wtRes = await getWorktreeChangedFiles(tempGitDir, baseCommit);
+    assert.equal(wtRes.ok, true);
+    assert.ok(wtRes.files.includes('my cool file with space.txt'));
+    assert.ok(wtRes.files.includes("app 'quoted'.ts"));
+    assert.ok(wtRes.files.includes('renamed initial.txt'));
+    assert.ok(wtRes.files.includes('initial.txt'), 'renames record both new and old path');
+
+    // Test getDirtyFilesWithHashes
+    const dirtyRes = await getDirtyFilesWithHashes(tempGitDir);
+    assert.equal(dirtyRes.ok, true);
+    assert.ok('my cool file with space.txt' in dirtyRes.files);
+    assert.ok("app 'quoted'.ts" in dirtyRes.files);
+    assert.ok('renamed initial.txt' in dirtyRes.files);
+
+    // Test hash-object failure
+    const fakeDir = path.join(tempGitDir, 'nonexistent_sub');
+    const badRes = await getDirtyFilesWithHashes(fakeDir);
+    assert.equal(badRes.ok, false);
+    assert.ok(badRes.error);
+  } finally {
+    try {
+      fs.rmSync(tempGitDir, { recursive: true, force: true });
+    } catch {}
+  }
+});
+
+test('handoffs: [Pass 7 Item 5 & 6] handoff_retry status 409 guard and handoff_accept appends short Lead message with idempotent outcome', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: BUILTIN_FULL_TEMPLATE.team,
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+
+  const applyReq = makeReq({ project_path: testProj });
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(applyReq, applyReq)) as any;
+
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+  const createConvReq = makeReq({ agent_id: leadAgent.id });
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(createConvReq, createConvReq)) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  setNextReply('Invalid result block');
+  const dispReq = makeReq({
+    lead_conversation_id: leadConvId,
+    to: 'worker',
+    task: 'Failing worker task',
+  });
+  const dispRes = (await feature.routes['handoff_dispatch']!.handler(dispReq, dispReq)) as any;
+  const handoffId = dispRes.handoff.id;
+
+  // Item 5: Retry while started -> 409
+  await assert.rejects(
+    async () => {
+      await feature.routes['handoff_retry']!.handler(makeReq({ id: handoffId }), makeReq());
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409
+  );
+
+  await tick(baseCtx); // finishes with needs_review
+
+  // Item 6: Accept handoff -> short Lead message, NO member message, idempotent outcome
+  const acceptReq = makeReq({ id: handoffId, note: 'Approved manually' });
+  const acceptRes = (await feature.routes['handoff_accept']!.handler(acceptReq, acceptReq)) as any;
+  assert.equal(acceptRes.ok, true);
+  assert.equal(acceptRes.handoff.status, 'completed');
+  assert.equal(acceptRes.handoff.lead_notified_outcome, 'completed');
+
+  // Verify member conversation has NO assistant message appended from accept
+  const memberConvId = acceptRes.handoff.member_conversation_id;
+  assert.ok(memberConvId);
+  const getMemReq = makeReq({}, { conversation_id: memberConvId });
+  const getMemRes = (await chatFeature.routes['chat_get']!.handler(getMemReq, getMemReq)) as any;
+  // Should only have user message (task) and the needs_review assistant message, not an accept assistant message
+  const memAssistantMsgs = getMemRes.messages.filter((m: any) => m.role === 'assistant');
+  assert.equal(memAssistantMsgs.length, 1);
+
+  // Verify Lead conversation has short accept message
+  const getLeadReq = makeReq({}, { conversation_id: leadConvId });
+  const getLeadRes = (await chatFeature.routes['chat_get']!.handler(getLeadReq, getLeadReq)) as any;
+  const leadMsgs = getLeadRes.messages.filter((m: any) => m.handoff_id === handoffId);
+  assert.equal(leadMsgs.length, 2);
+  assert.match(leadMsgs[1].text, /^\[Handoff h_[a-f0-9]{8}\] accepted by user \(was needs_review\)/);
+
+  // Item 5: Retry while completed -> 409
+  await assert.rejects(
+    async () => {
+      await feature.routes['handoff_retry']!.handler(makeReq({ id: handoffId }), makeReq());
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409
+  );
 });
 
 

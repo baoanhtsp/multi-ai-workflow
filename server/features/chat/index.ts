@@ -369,6 +369,7 @@ export const feature: MawFeature = {
           // Handle attachments (Item 18 & Codex Pass 6 Item 3: run safe check BEFORE any mkdir/write)
           const rawAttachments = body.attachments;
           const savedAttachments: Array<{ name: string; path: string }> = [];
+          const validatedAttachments: Array<{ name: string; uniqueFileName: string; buf: Buffer; subPath: string; relPath: string }> = [];
 
           if (Array.isArray(rawAttachments) && rawAttachments.length > 0) {
             if (!IMAGE_PLATFORMS.includes(targetPlatform)) {
@@ -385,8 +386,7 @@ export const feature: MawFeature = {
             assertSafeProjectMawWrite(agent.workdir, path.join('.maw', 'attachments'), ctx.paths.projectsRoot);
             assertSafeProjectMawWrite(agent.workdir, path.join('.maw', 'attachments', conv.id), ctx.paths.projectsRoot);
 
-            const validatedAttachments: Array<{ name: string; buf: Buffer; subPath: string; relPath: string }> = [];
-
+            const nowTs = Date.now();
             for (let i = 0; i < rawAttachments.length; i++) {
               const att = rawAttachments[i];
               if (!att || typeof att !== 'object') {
@@ -404,31 +404,37 @@ export const feature: MawFeature = {
 
               const ext = match[1] === 'jpeg' ? 'jpg' : match[1];
               const defaultName = `image_${i + 1}.${ext}`;
-              const name = String(attObj.name ?? defaultName).replace(/[^a-zA-Z0-9._-]/g, '_');
+              const rawName = String(attObj.name ?? defaultName).replace(/[^a-zA-Z0-9._-]/g, '_');
               const base64Data = dataUrl.slice(match[0].length);
               const buf = Buffer.from(base64Data, 'base64');
               if (buf.length > 150 * 1024) {
-                throw new ApiValidationError(`Attachment '${name}' exceeds 150 KB limit.`, 400);
+                throw new ApiValidationError(`Attachment '${rawName}' exceeds 150 KB limit.`, 400);
               }
-              const subPath = path.join('.maw', 'attachments', conv.id, `${i + 1}-${name}`);
+
+              // Item 4 (Codex Pass 7): Generate unique file names (<timestamp>-<random>-<safe name>)
+              const randHex = crypto.randomBytes(4).toString('hex');
+              const uniqueFileName = `${nowTs}-${randHex}-${rawName}`;
+              const subPath = path.join('.maw', 'attachments', conv.id, uniqueFileName);
               assertSafeProjectMawWrite(agent.workdir, subPath, ctx.paths.projectsRoot);
-              const relPath = `.maw/attachments/${conv.id}/${i + 1}-${name}`;
-              validatedAttachments.push({ name, buf, subPath, relPath });
-            }
-
-            // ONLY after all validations and safe-path checks pass, create directory and write files
-            const attachDir = path.win32.join(agent.workdir, '.maw', 'attachments', conv.id);
-            if (!fs.existsSync(attachDir)) {
-              fs.mkdirSync(attachDir, { recursive: true });
-            }
-
-            for (let i = 0; i < validatedAttachments.length; i++) {
-              const item = validatedAttachments[i]!;
-              const savePath = path.win32.join(attachDir, `${i + 1}-${item.name}`);
-              fs.writeFileSync(savePath, item.buf);
-              savedAttachments.push({ name: item.name, path: item.relPath });
+              const relPath = `.maw/attachments/${conv.id}/${uniqueFileName}`;
+              validatedAttachments.push({ name: rawName, uniqueFileName, buf, subPath, relPath });
             }
           }
+
+          // Item 4 (Codex Pass 7): Write attachments only AFTER all validation (prompt budget, queue capacity) has passed
+          const writeValidatedAttachments = () => {
+            if (validatedAttachments.length > 0 && savedAttachments.length === 0) {
+              const attachDir = path.win32.join(agent.workdir, '.maw', 'attachments', conv.id);
+              if (!fs.existsSync(attachDir)) {
+                fs.mkdirSync(attachDir, { recursive: true });
+              }
+              for (const item of validatedAttachments) {
+                const savePath = path.win32.join(attachDir, item.uniqueFileName);
+                fs.writeFileSync(savePath, item.buf);
+                savedAttachments.push({ name: item.name, path: item.relPath });
+              }
+            }
+          };
 
           // Item 1 (Codex Pass 6): Prompt budget accounting for fixed sections (agent, hooks, attachments, dispatch)
           let mayDelegate = false;
@@ -443,7 +449,7 @@ export const feature: MawFeature = {
             }
           }
 
-          const attachLines = savedAttachments.map((a) => `Attached image: ${a.path || a.name}`);
+          const attachLines = validatedAttachments.map((a) => `Attached image: ${a.relPath}`);
           const maxAllowedChars = getMaxMessageCharsForAgent(
             {
               name: agent.name,
@@ -525,6 +531,7 @@ export const feature: MawFeature = {
               }
 
               if (steerSuccess) {
+                writeValidatedAttachments();
                 conv.seq++;
                 const steerMsg: Message = {
                   seq: conv.seq,
@@ -564,6 +571,8 @@ export const feature: MawFeature = {
               throw new ApiValidationError('Queue is full (maximum 20 items).', 409);
             }
 
+            writeValidatedAttachments();
+
             const queueItem: QueueItem = {
               id: generateQueueId(),
               text,
@@ -587,6 +596,7 @@ export const feature: MawFeature = {
           }
 
           // Idle: start turn job directly
+          writeValidatedAttachments();
           // Item 6: Reset retry_attempts when a new user (non-retry) turn starts
           conv.retry_attempts = 0;
           const qItem: QueueItem = {

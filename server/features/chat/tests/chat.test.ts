@@ -1242,5 +1242,78 @@ test('chat: [Item 1] prompt budget with 15000-char message + two 2000-char hooks
   );
 });
 
+test('chat: [Pass 7 Item 4] unique attachment filenames (<timestamp>-<random>-<safe name>) written only after validations pass', async () => {
+  const { makeReq, testProj, paths } = setupChatTestContext();
+
+  const agReq = makeReq({
+    agent: {
+      name: 'Image Bot',
+      platform: 'claude',
+      workdir: testProj,
+    },
+  });
+  const agRes = (await agentsFeature.routes['ws_agent_save']!.handler(agReq, agReq)) as any;
+  const agentId = agRes.agent.id;
+
+  const convReq = makeReq({ agent_id: agentId });
+  const convRes = (await feature.routes['chat_create']!.handler(convReq, convReq)) as any;
+  const convId = convRes.conversation.id;
+
+  const validDataUrl =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGP6zwAAAgcBApocMXEAAAAASUVORK5CYII=';
+
+  // 1. Successful send with attachment -> file is written with unique name format
+  const sendReq1 = makeReq({
+    conversation_id: convId,
+    text: 'Hello with attachment',
+    attachments: [{ name: 'screenshot.png', data_url: validDataUrl }],
+  });
+  const sendRes1 = (await feature.routes['chat_send']!.handler(sendReq1, sendReq1)) as any;
+  assert.equal(sendRes1.ok, true);
+
+  const attachDir = path.join(testProj, '.maw', 'attachments', convId);
+  assert.equal(fs.existsSync(attachDir), true);
+  const filesWritten = fs.readdirSync(attachDir);
+  assert.equal(filesWritten.length, 1);
+  assert.match(
+    filesWritten[0]!,
+    /^\d+-[a-f0-9]{8}-screenshot\.png$/,
+    'Unique file name matches <timestamp>-<random>-<safe name>'
+  );
+
+  // 2. Make conversation busy with full queue (20 items)
+  const chatDataDir = paths.featureDataDir('chat');
+  const convsStoreFile = path.join(chatDataDir, 'conversations.json');
+  const chatData = JSON.parse(fs.readFileSync(convsStoreFile, 'utf8'));
+  const targetConv = chatData.conversations.find((c: any) => c.id === convId);
+  targetConv.active_job_id = 'job_busy';
+  targetConv.active_kind = 'turn';
+  targetConv.queue = new Array(20).fill(0).map((_, i) => ({
+    id: `q_test_${i}`,
+    text: `queued ${i}`,
+    ts: new Date().toISOString(),
+  }));
+  fs.writeFileSync(convsStoreFile, JSON.stringify(chatData), 'utf8');
+
+  // Attempt send 21st item with attachment -> rejected with 409
+  const sendReq2 = makeReq({
+    conversation_id: convId,
+    text: 'Overflow message',
+    attachments: [{ name: 'rejected_overflow.png', data_url: validDataUrl }],
+  });
+
+  await assert.rejects(
+    async () => {
+      await feature.routes['chat_send']!.handler(sendReq2, sendReq2);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 409
+  );
+
+  // Verify rejected_overflow was NOT written to disk
+  const filesAfterReject = fs.readdirSync(attachDir);
+  assert.equal(filesAfterReject.length, 1, 'No new file written when queue capacity validation fails');
+  assert.equal(filesAfterReject.some((f) => f.includes('rejected_overflow')), false);
+});
+
 
 

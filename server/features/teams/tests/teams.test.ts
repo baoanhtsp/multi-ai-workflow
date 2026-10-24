@@ -575,3 +575,50 @@ test('teams: [Item 4] team_apply re-validates team.json and resolves model/effor
   );
 });
 
+test('teams: [Pass 7 Item 3] team_apply with role workdir override reuses existing agent on repeated apply', async () => {
+  const { makeReq, testProj, paths } = setupTestContext();
+
+  const customSubDir = path.join(paths.projectsRoot, 'custom-backend-sub');
+  fs.mkdirSync(customSubDir, { recursive: true });
+
+  const saveReq = makeReq({
+    project_path: testProj,
+    team: {
+      ...BUILTIN_FULL_TEMPLATE.team,
+      shared: {
+        ...BUILTIN_FULL_TEMPLATE.team.shared,
+        workdir: testProj,
+      },
+      roles: BUILTIN_FULL_TEMPLATE.team.roles.map((r) => {
+        if (r.key === 'worker') {
+          return {
+            ...r,
+            override: { workdir: customSubDir },
+          };
+        }
+        return r;
+      }),
+    },
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await feature.routes['team_save']!.handler(saveReq, saveReq);
+
+  // First apply
+  const applyReq1 = makeReq({ project_path: testProj });
+  const applyRes1 = (await feature.routes['team_apply']!.handler(applyReq1, applyReq1)) as any;
+  assert.equal(applyRes1.ok, true);
+  const initialCount = applyRes1.agents.length;
+  const initialWorker = applyRes1.agents.find((a: any) => a.team_role === 'worker');
+  assert.equal(initialWorker.workdir.toLowerCase(), customSubDir.toLowerCase());
+
+  // Second apply
+  const applyReq2 = makeReq({ project_path: testProj });
+  const applyRes2 = (await feature.routes['team_apply']!.handler(applyReq2, applyReq2)) as any;
+  assert.equal(applyRes2.ok, true);
+  assert.equal(applyRes2.agents.length, initialCount, 'Repeated apply creates no duplicate agents');
+
+  const secondWorker = applyRes2.agents.find((a: any) => a.team_role === 'worker');
+  assert.equal(secondWorker.id, initialWorker.id, 'Agent in override workdir is reused');
+  assert.equal(secondWorker.workdir.toLowerCase(), customSubDir.toLowerCase());
+});
+

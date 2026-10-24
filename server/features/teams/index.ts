@@ -523,30 +523,39 @@ export const feature: MawFeature = {
             const workdir = role.override?.workdir || team.shared.workdir || validPath;
 
             let agent: Agent | undefined;
+            const targetWorkdir = workdir.toLowerCase();
 
-            // 1. Try finding by role.agent_id ONLY when workdir equals project path and team_id matches or empty
+            // 1. Try finding by role.agent_id if present
             if (role.agent_id) {
               const candidate = agentsData.agents.find((a) => a.id === role.agent_id && a.deleted_at === null);
               if (
                 candidate &&
-                candidate.workdir.toLowerCase() === validPath.toLowerCase() &&
+                candidate.workdir.toLowerCase() === targetWorkdir &&
                 (!candidate.team_id || candidate.team_id === team.id)
               ) {
                 agent = candidate;
               }
             }
 
-            // 2. If not found (fresh save, import overwrite), reuse a live agent in THIS project with same workdir + team_role
+            // 2. Item 3 (Codex Pass 7): Match existing agent in target workdir by team_id + team_role
             if (!agent) {
-              const matching = agentsData.agents.filter(
+              agent = agentsData.agents.find(
                 (a) =>
                   a.deleted_at === null &&
-                  a.workdir.toLowerCase() === validPath.toLowerCase() &&
-                  a.team_role === role.key
+                  a.team_id === team.id &&
+                  a.team_role === role.key &&
+                  a.workdir.toLowerCase() === targetWorkdir
               );
-              if (matching.length > 0) {
-                agent = matching.find((a) => a.team_id === team.id) ?? matching[0];
-              }
+            }
+
+            // 3. Fallback: match by workdir + team_role
+            if (!agent) {
+              agent = agentsData.agents.find(
+                (a) =>
+                  a.deleted_at === null &&
+                  a.team_role === role.key &&
+                  a.workdir.toLowerCase() === targetWorkdir
+              );
             }
 
             const nowIso = new Date().toISOString();

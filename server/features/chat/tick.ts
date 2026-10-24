@@ -148,6 +148,8 @@ export async function finalizeHandoff(
     tokens_out?: number | null;
     note?: string;
     error?: string;
+    skipMemberMessage?: boolean;
+    leadMessageText?: string;
   },
   inMemoryConvsData?: { version: number; conversations: Conversation[] },
   inMemoryHandoffsData?: { version: number; handoffs: Handoff[] }
@@ -222,8 +224,8 @@ export async function finalizeHandoff(
     }
   }
 
-  // Item 4: Append assistant response in member conversation if present
-  if (target.member_conversation_id) {
+  // Item 4: Append assistant response in member conversation if present (skip on accept/manual actions)
+  if (!options?.skipMemberMessage && target.member_conversation_id) {
     const memberConv = convsData.conversations.find((c) => c.id === target.member_conversation_id);
     if (memberConv) {
       memberConv.seq++;
@@ -259,10 +261,13 @@ export async function finalizeHandoff(
     }
   }
 
-  // Append [Handoff ...] message to Lead conversation (idempotent: only if not already notified)
+  // Append [Handoff ...] message to Lead conversation (idempotent per outcome)
   const leadConv = convsData.conversations.find((c) => c.id === target.lead_conversation_id);
-  if (leadConv && !target.lead_notified_at) {
+  const currentOutcome = status;
+  if (leadConv && target.lead_notified_outcome !== currentOutcome) {
+    target.lead_notified_outcome = currentOutcome;
     target.lead_notified_at = new Date().toISOString();
+    h.lead_notified_outcome = target.lead_notified_outcome;
     h.lead_notified_at = target.lead_notified_at;
     leadConv.seq++;
     const memberAgent = agentsData.agents.find((a) => a.id === target.to);
@@ -278,7 +283,9 @@ export async function finalizeHandoff(
     const filesCount = target.result?.files_changed?.length ?? 0;
     const blockersCount = target.result?.blockers?.length ?? 0;
 
-    const handoffMsgText = `[Handoff ${target.id}] ${target.to_role} · ${memberName} (${target.platform}) ${target.status} in ${durStr} — ${summaryText} · files: ${filesCount} · blockers: ${blockersCount}`;
+    const handoffMsgText =
+      options?.leadMessageText ||
+      `[Handoff ${target.id}] ${target.to_role} · ${memberName} (${target.platform}) ${target.status} in ${durStr} — ${summaryText} · files: ${filesCount} · blockers: ${blockersCount}`;
 
     const handoffMsg: Message = {
       seq: leadConv.seq,
@@ -651,6 +658,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
                     );
                   }
 
+                  const roleScope = targetRole?.override?.write_scope ?? team.shared?.write_scope;
                   const hRecord: Handoff = {
                     id: generateHandoffId(),
                     team_id: team.id,
@@ -680,6 +688,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
                     scope_violations: [],
                     attempts: 0,
                     thread: item.thread ? String(item.thread).trim().slice(0, 60) : undefined,
+                    write_scope: Array.isArray(roleScope) ? [...roleScope] : undefined,
                   };
 
                   handoffsData.handoffs.unshift(hRecord);
@@ -840,16 +849,41 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         const targetAgent = agentsData.agents.find((a) => a.id === h.to);
         const checkDir = h.worktree || targetAgent?.workdir || '';
 
-        let writeScope: string[] = ['**'];
+        // Item 1 (Codex Pass 7): Scope fails closed: do NOT default to ['**'].
+        // Use write_scope from .maw/team.json, fallback to handoff's stored write_scope,
+        // and if both are unavailable, mark needs_review "write scope unknown".
+        let writeScope: string[] | undefined;
+        let scopeUnknown = false;
+
         if (targetAgent?.workdir) {
           const teamFile = path.win32.join(targetAgent.workdir, '.maw', 'team.json');
           if (isFileSafe(teamFile)) {
             try {
               const team = JSON.parse(fs.readFileSync(teamFile, 'utf8')) as Team;
-              const role = team.roles.find((r) => r.key === h.to_role);
-              writeScope = role?.override?.write_scope ?? team.shared.write_scope ?? ['**'];
+              const role = team.roles.find(
+                (r) => r.key === h.to_role || r.key === h.to || r.agent_id === h.to
+              );
+              if (role?.override?.write_scope !== undefined) {
+                writeScope = role.override.write_scope;
+              } else if (team.shared?.write_scope !== undefined) {
+                writeScope = team.shared.write_scope;
+              }
             } catch {}
           }
+        }
+
+        if (writeScope === undefined) {
+          if (Array.isArray(h.write_scope)) {
+            writeScope = h.write_scope;
+          } else {
+            scopeUnknown = true;
+            writeScope = [];
+          }
+        }
+
+        if (scopeUnknown) {
+          finalStatus = 'needs_review';
+          h.parse_error = 'write scope unknown';
         }
 
         if (checkDir && hasGitRepo(checkDir)) {
@@ -931,7 +965,9 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
           const isUnconstrained = writeScope.length === 1 && writeScope[0] === '**';
           if (!isUnconstrained) {
             finalStatus = 'needs_review';
-            h.parse_error = 'changes could not be verified: not a git repository';
+            if (!h.parse_error) {
+              h.parse_error = 'changes could not be verified: not a git repository';
+            }
           }
         }
 

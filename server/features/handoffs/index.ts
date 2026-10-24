@@ -162,6 +162,7 @@ export const feature: MawFeature = {
           let toRole = to;
           let memberPlatform = memberAgent?.platform || 'codex';
           let mayDelegate: boolean | null = null;
+          let roleWriteScope: string[] | undefined;
 
           if (leadAgent.workdir) {
             const teamFile = path.win32.join(leadAgent.workdir, '.maw', 'team.json');
@@ -182,6 +183,11 @@ export const feature: MawFeature = {
                 );
                 if (r) {
                   toRole = r.key;
+                  if (r.override?.write_scope !== undefined) {
+                    roleWriteScope = r.override.write_scope;
+                  } else if (team.shared?.write_scope !== undefined) {
+                    roleWriteScope = team.shared.write_scope;
+                  }
                   if (!memberAgent && r.agent_id) {
                     memberAgent = agentsData.agents.find((a) => a.id === r.agent_id && a.deleted_at === null);
                   }
@@ -260,6 +266,7 @@ export const feature: MawFeature = {
             scope_violations: [],
             attempts: 0,
             thread: thread || undefined,
+            write_scope: Array.isArray(roleWriteScope) ? [...roleWriteScope] : undefined,
           };
 
           handoffsData.handoffs.unshift(newHandoff);
@@ -384,8 +391,13 @@ export const feature: MawFeature = {
             throw new ApiValidationError(`Handoff '${id}' not found.`, 404);
           }
 
-          if (handoff.status === 'running') {
-            throw new ApiValidationError(`Cannot retry handoff '${id}' while running.`, 409);
+          // Item 5 (Codex Pass 7): handoff_retry only for failed | blocked | needs_review | cancelled (409 otherwise)
+          const RETRYABLE_STATUSES: HandoffStatus[] = ['failed', 'blocked', 'needs_review', 'cancelled'];
+          if (!RETRYABLE_STATUSES.includes(handoff.status)) {
+            throw new ApiValidationError(
+              `Cannot retry handoff '${id}' in status '${handoff.status}'. Must be failed, blocked, needs_review, or cancelled.`,
+              409
+            );
           }
 
           handoff.attempts++;
@@ -401,6 +413,7 @@ export const feature: MawFeature = {
           handoff.dirty_baseline = undefined;
           handoff.baseline_error = undefined;
           handoff.lead_notified_at = undefined;
+          handoff.lead_notified_outcome = undefined;
 
           await writeJsonStore(handoffsFile, handoffsData);
 
@@ -446,7 +459,12 @@ export const feature: MawFeature = {
           const note = String(body.note ?? '').trim();
           handoff.parse_error = '';
           handoff.scope_violations = [];
-          await finalizeHandoff(ctx, handoff, 'completed', { note });
+          // Item 6 (Codex Pass 7): Short Lead message "[Handoff <id>] accepted by user (was needs_review)" and no member-conversation message
+          await finalizeHandoff(ctx, handoff, 'completed', {
+            note,
+            skipMemberMessage: true,
+            leadMessageText: `[Handoff ${handoff.id}] accepted by user (was needs_review)${note ? ` — note: ${note}` : ''}`,
+          });
 
           await appendAuditLog(handoffsDir, {
             action: 'handoff_accept',

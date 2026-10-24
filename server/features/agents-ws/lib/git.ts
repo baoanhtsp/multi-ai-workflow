@@ -42,6 +42,45 @@ export async function getBaseCommitResult(
   }
 }
 
+export interface GitStatusEntry {
+  newPath: string;
+  oldPath?: string;
+}
+
+export function parsePorcelainV1Z(stdout: string): GitStatusEntry[] {
+  if (!stdout) return [];
+  const items = stdout.split('\0');
+  const result: GitStatusEntry[] = [];
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!item) continue;
+    // Format: XY <path>
+    const statusCode = item.slice(0, 2);
+    let filePath = item.slice(3);
+
+    const isRenameOrCopy =
+      statusCode[0] === 'R' || statusCode[1] === 'R' || statusCode[0] === 'C' || statusCode[1] === 'C';
+
+    let oldPath: string | undefined;
+    if (isRenameOrCopy && i + 1 < items.length) {
+      oldPath = items[i + 1]?.replace(/\\/g, '/');
+      i++; // advance past oldPath
+    } else if (filePath.includes(' -> ')) {
+      const parts = filePath.split(' -> ');
+      oldPath = parts[0]?.trim().replace(/\\/g, '/');
+      filePath = parts[1]?.trim() || filePath;
+    }
+
+    result.push({
+      newPath: filePath.replace(/\\/g, '/'),
+      oldPath,
+    });
+  }
+
+  return result;
+}
+
 export async function getDirtyFilesWithHashes(
   worktreePath: string
 ): Promise<{ ok: boolean; files: Record<string, string>; error?: string }> {
@@ -50,7 +89,7 @@ export async function getDirtyFilesWithHashes(
   try {
     const statusRes = await runCommand(
       'git.exe',
-      ['-C', worktreePath, 'status', '--porcelain', '-uall'],
+      ['-C', worktreePath, 'status', '--porcelain=v1', '-z', '-uall'],
       { timeoutMs: 8000 }
     );
     if (statusRes.code !== 0) {
@@ -61,23 +100,17 @@ export async function getDirtyFilesWithHashes(
       return { ok: true, files: {} };
     }
 
-    const lines = statusRes.stdout.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    if (lines.length > 500) {
+    const entries = parsePorcelainV1Z(statusRes.stdout);
+    if (entries.length > 500) {
       return {
         ok: false,
         files: {},
-        error: `too many uncommitted files to verify (${lines.length})`,
+        error: `too many uncommitted files to verify (${entries.length})`,
       };
     }
 
-    for (const line of lines) {
-      const filePart = line.slice(3).trim();
-      let relPath = filePart;
-      if (filePart.includes(' -> ')) {
-        const parts = filePart.split(' -> ');
-        if (parts[1]) relPath = parts[1].trim();
-      }
-      relPath = relPath.replace(/\\/g, '/');
+    for (const entry of entries) {
+      const relPath = entry.newPath;
 
       const hashRes = await runCommand(
         'git.exe',
@@ -87,7 +120,12 @@ export async function getDirtyFilesWithHashes(
       if (hashRes.code === 0 && hashRes.stdout) {
         result[relPath] = hashRes.stdout.trim();
       } else {
-        result[relPath] = '__DELETED__';
+        // Item 2 (Pass 7): A hash-object failure is a verification failure (needs_review), never a sentinel value.
+        return {
+          ok: false,
+          files: {},
+          error: `hash-object verification failed for ${relPath}`,
+        };
       }
     }
 
@@ -103,45 +141,40 @@ export async function getWorktreeChangedFiles(
 ): Promise<WorktreeChangedFilesResult> {
   const changed = new Set<string>();
 
-  // 1. git status --porcelain for staged, unstaged, and untracked files
+  // 1. git status --porcelain=v1 -z -uall for staged, unstaged, and untracked files
   try {
     const statusRes = await runCommand(
       'git.exe',
-      ['-C', worktreePath, 'status', '--porcelain'],
+      ['-C', worktreePath, 'status', '--porcelain=v1', '-z', '-uall'],
       { timeoutMs: 8000 }
     );
     if (statusRes.code !== 0) {
       return { ok: false, files: [], error: 'could not list changed files' };
     }
     if (statusRes.stdout) {
-      for (const line of statusRes.stdout.split(/\r?\n/)) {
-        if (!line.trim()) continue;
-        const filePart = line.slice(3).trim();
-        if (filePart.includes(' -> ')) {
-          const parts = filePart.split(' -> ');
-          if (parts[1]) changed.add(parts[1].trim().replace(/\\/g, '/'));
-        } else if (filePart) {
-          changed.add(filePart.replace(/\\/g, '/'));
-        }
+      const entries = parsePorcelainV1Z(statusRes.stdout);
+      for (const entry of entries) {
+        if (entry.newPath) changed.add(entry.newPath);
+        if (entry.oldPath) changed.add(entry.oldPath);
       }
     }
   } catch {
     return { ok: false, files: [], error: 'could not list changed files' };
   }
 
-  // 2. git diff --name-only <base_commit>...HEAD for all commits made since start
+  // 2. git diff --name-only -z <base_commit>...HEAD for all commits made since start
   if (baseCommit) {
     try {
       const diffRes = await runCommand(
         'git.exe',
-        ['-C', worktreePath, 'diff', '--name-only', `${baseCommit}...HEAD`],
+        ['-C', worktreePath, 'diff', '--name-only', '-z', `${baseCommit}...HEAD`],
         { timeoutMs: 8000 }
       );
       if (diffRes.code !== 0) {
         return { ok: false, files: [], error: 'could not list changed files' };
       }
       if (diffRes.stdout) {
-        for (const line of diffRes.stdout.split(/\r?\n/)) {
+        for (const line of diffRes.stdout.split('\0')) {
           const trimmed = line.trim();
           if (trimmed) changed.add(trimmed.replace(/\\/g, '/'));
         }
@@ -166,14 +199,14 @@ export async function getNonIsolatedChangedFiles(
     try {
       const diffRes = await runCommand(
         'git.exe',
-        ['-C', worktreePath, 'diff', '--name-only', `${baseCommit}...HEAD`],
+        ['-C', worktreePath, 'diff', '--name-only', '-z', `${baseCommit}...HEAD`],
         { timeoutMs: 8000 }
       );
       if (diffRes.code !== 0) {
         return { ok: false, files: [], error: 'could not list changed files' };
       }
       if (diffRes.stdout) {
-        for (const line of diffRes.stdout.split(/\r?\n/)) {
+        for (const line of diffRes.stdout.split('\0')) {
           const trimmed = line.trim();
           if (trimmed) changed.add(trimmed.replace(/\\/g, '/'));
         }

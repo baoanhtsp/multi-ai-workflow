@@ -43,4 +43,6 @@ export interface Handoff {
   baseline_error?: boolean;
   baseline_error_message?: string;
   lead_notified_at?: string;
+  lead_notified_outcome?: string;
+  write_scope?: string[];
 }
