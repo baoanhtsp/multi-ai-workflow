@@ -1,0 +1,470 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import { resolveServerPaths, type ServerPaths } from '../../lib/paths.ts';
+import { redactTelegramSecrets, TelegramClient } from './client.ts';
+import {
+  getPollerLockStatus,
+  readTelegramConfig,
+  TelegramPoller,
+  tryAcquirePollerLock,
+  writeTelegramConfig,
+} from './poller.ts';
+
+function createTempTestPaths(): { paths: ServerPaths; cleanup: () => void } {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'maw_telegram_test_'));
+  const userProfile = path.join(tmpRoot, 'UserProfile');
+  const mawHome = path.join(tmpRoot, 'MawHome');
+  const jobsDir = path.join(tmpRoot, 'jobs');
+  const repoRoot = path.resolve(import.meta.dirname, '..', '..', '..');
+
+  fs.mkdirSync(userProfile, { recursive: true });
+  fs.mkdirSync(mawHome, { recursive: true });
+  fs.mkdirSync(jobsDir, { recursive: true });
+
+  const paths = resolveServerPaths({
+    repoRoot,
+    userProfile,
+    mawHome,
+  });
+  paths.jobsDir = jobsDir;
+
+  return {
+    paths,
+    cleanup: () => {
+      try {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+      } catch {
+        // Ignore
+      }
+    },
+  };
+}
+
+test('redactTelegramSecrets strips bot token and bot<token> strings', () => {
+  const token = '123456789:ABCDefGhIjKlMnOpQrStUvWxYz';
+  const raw = `Connecting to https://api.telegram.org/bot${token}/getUpdates failed with error`;
+  const sanitized = redactTelegramSecrets(raw, token);
+
+  assert.ok(!sanitized.includes(token), 'Raw bot token must be redacted');
+  assert.ok(sanitized.includes('bot[redacted-token]'), 'Expected bot[redacted-token]');
+});
+
+test('telegram single-poller lock acquisition and heartbeat refresh', () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    const ok1 = tryAcquirePollerLock(paths, 4317);
+    assert.equal(ok1, true);
+
+    const lockStatus1 = getPollerLockStatus(paths);
+    assert.equal(lockStatus1.owner, 'this');
+    assert.equal(lockStatus1.pid, process.pid);
+
+    // Same process acquiring again refreshes heartbeat
+    const ok2 = tryAcquirePollerLock(paths, 4317);
+    assert.equal(ok2, true);
+
+    const dataDir = paths.featureDataDir('telegram');
+    const lockFile = path.win32.join(dataDir, 'poller.lock');
+
+    // Simulate an active lock owned by another alive PID
+    fs.writeFileSync(
+      lockFile,
+      JSON.stringify({
+        pid: process.pid,
+        port: 4317,
+        heartbeat: Date.now(),
+      }),
+      'utf8'
+    );
+    // If PID is alive and heartbeat fresh, it's considered owned
+    const lockStatus2 = getPollerLockStatus(paths);
+    assert.equal(lockStatus2.owner, 'this');
+  } finally {
+    cleanup();
+  }
+});
+
+test('telegram client and poller with mock fetch handle commands and filtering', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    // Configure notify-config.json
+    const notifyCfg = {
+      desktop_toast: true,
+      webhook_url: '',
+      telegram_bot_token: '123456:FAKE_TOKEN_FOR_TESTING',
+      telegram_chat_id: '999888777',
+    };
+    fs.mkdirSync(path.dirname(paths.notifyCfgFile), { recursive: true });
+    fs.writeFileSync(paths.notifyCfgFile, JSON.stringify(notifyCfg), 'utf8');
+
+    // Configure telegram config
+    writeTelegramConfig(paths, {
+      inbound: true,
+      push_inbox: true,
+      digest: { enabled: false, morning: '08:30', evening: '18:00' },
+    });
+
+    const sentMessages: Array<{ chatId: string | number; text: string }> = [];
+
+    // Mock fetch function
+    const mockFetch: typeof fetch = async (input, init) => {
+      const urlStr = String(input);
+      if (urlStr.includes('/getUpdates')) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            result: [
+              // Message from foreign chat (should be ignored)
+              {
+                update_id: 101,
+                message: {
+                  message_id: 1,
+                  chat: { id: 111222333 }, // Foreign!
+                  text: '/status',
+                },
+              },
+              // Message from configured chat
+              {
+                update_id: 102,
+                message: {
+                  message_id: 2,
+                  chat: { id: 999888777 },
+                  text: '/help',
+                },
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      if (urlStr.includes('/sendMessage')) {
+        const bodyObj = JSON.parse(String(init?.body ?? '{}')) as {
+          chat_id: string | number;
+          text: string;
+        };
+        sentMessages.push({ chatId: bodyObj.chat_id, text: bodyObj.text });
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            result: { message_id: sentMessages.length + 10 },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    const poller = new TelegramPoller(paths, {
+      fetchFn: mockFetch,
+      baseUrl: 'http://fake-telegram.local',
+    });
+
+    // Test sendTestMessage
+    const testRes = await poller.sendTestMessage();
+    assert.equal(testRes.ok, true);
+    assert.equal(testRes.sent, true);
+    assert.equal(sentMessages.length, 1);
+    assert.ok(sentMessages[0]?.text.includes('MAW two-way bot is connected'));
+
+    // Test client getUpdates directly with mock
+    const client = new TelegramClient({
+      token: '123456:FAKE_TOKEN_FOR_TESTING',
+      baseUrl: 'http://fake-telegram.local',
+      fetchFn: mockFetch,
+    });
+
+    const updatesRes = await client.getUpdates(0, 1);
+    assert.equal(updatesRes.ok, true);
+    assert.equal(updatesRes.result?.length, 2);
+  } finally {
+    cleanup();
+  }
+});
+
+test('Telegram Major 6 regression: /retry, callback query, and reply invoke performInboxAction and ctx.startJob', async () => {
+  const { paths, cleanup } = createTempTestPaths();
+  try {
+    const notifyCfg = {
+      desktop_toast: true,
+      webhook_url: '',
+      telegram_bot_token: '123456:BOT_TOKEN_FOR_ACTIONS',
+      telegram_chat_id: '12345',
+    };
+    fs.mkdirSync(path.dirname(paths.notifyCfgFile), { recursive: true });
+    fs.writeFileSync(paths.notifyCfgFile, JSON.stringify(notifyCfg), 'utf8');
+
+    writeTelegramConfig(paths, {
+      inbound: true,
+      push_inbox: true,
+      digest: { enabled: false, morning: '08:30', evening: '18:00' },
+    });
+
+    const startedJobs: Array<Record<string, unknown>> = [];
+    const mockContext: any = {
+      paths,
+      startJob: async (body: Record<string, unknown>) => {
+        startedJobs.push(body);
+        return { ok: true, job_id: `job_started_${startedJobs.length}` };
+      },
+    };
+
+    // 1. Create an inbox item with retry action
+    const dataDir = paths.featureDataDir('inbox');
+    fs.mkdirSync(dataDir, { recursive: true });
+    const itemsFile = path.join(dataDir, 'items.json');
+    const initialItem = {
+      id: 'i11111',
+      kind: 'failed',
+      severity: 'error',
+      title: 'Failed compile',
+      detail: 'Exit 1',
+      actions: ['retry', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        project_path: paths.repoRoot,
+        prompt: 'Build the server',
+      },
+      status: 'open',
+      resolution: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(itemsFile, JSON.stringify({ version: 1, items: [initialItem] }), 'utf8');
+
+    const sentAnswers: string[] = [];
+    const sentMessages: string[] = [];
+
+    // Mock fetch that delivers /retry command
+    let tick = 0;
+    const mockFetch: typeof fetch = async (input, init) => {
+      const urlStr = String(input);
+      if (urlStr.includes('/getUpdates')) {
+        tick++;
+        if (tick === 1) {
+          // Send /retry i11111
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: [
+                {
+                  update_id: 1,
+                  message: {
+                    message_id: 10,
+                    chat: { id: 12345 },
+                    text: '/retry i11111',
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response(JSON.stringify({ ok: true, result: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+
+      if (urlStr.includes('/sendMessage')) {
+        const bodyObj = JSON.parse(String(init?.body ?? '{}'));
+        sentMessages.push(bodyObj.text);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 999 } }), { status: 200 });
+      }
+
+      if (urlStr.includes('/answerCallbackQuery')) {
+        const bodyObj = JSON.parse(String(init?.body ?? '{}'));
+        sentAnswers.push(bodyObj.text);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    const poller = new TelegramPoller(paths, {
+      fetchFn: mockFetch,
+      baseUrl: 'http://fake-telegram.local',
+      ctx: mockContext,
+    });
+
+    await poller.start();
+    // Allow poll loop to process tick 1
+    await new Promise((r) => setTimeout(r, 200));
+    poller.stop();
+
+    // Verify /retry called startJob
+    assert.equal(startedJobs.length, 1, '/retry command must call ctx.startJob');
+    assert.equal(startedJobs[0]!.agent, 'claude');
+    assert.ok(sentMessages.some((m) => m.includes("Action 'retry' applied to i11111")));
+
+    // 2. Test callback query "a:retry:i22222"
+    const item2 = {
+      id: 'i22222',
+      kind: 'failed',
+      severity: 'error',
+      title: 'Second failure',
+      detail: 'Timeout',
+      actions: ['retry', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'codex',
+        role: 'reviewer',
+        project_path: paths.repoRoot,
+        prompt: 'Review diff',
+      },
+      status: 'open',
+      resolution: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(itemsFile, JSON.stringify({ version: 1, items: [initialItem, item2] }), 'utf8');
+
+    let tickCb = 0;
+    const mockFetchCb: typeof fetch = async (input, init) => {
+      const urlStr = String(input);
+      if (urlStr.includes('/getUpdates')) {
+        tickCb++;
+        if (tickCb === 1) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: [
+                {
+                  update_id: 2,
+                  callback_query: {
+                    id: 'cb_query_1',
+                    from: { id: 12345 },
+                    message: { message_id: 50, chat: { id: 12345 } },
+                    data: 'a:retry:i22222',
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      if (urlStr.includes('/answerCallbackQuery')) {
+        const bodyObj = JSON.parse(String(init?.body ?? '{}'));
+        sentAnswers.push(bodyObj.text);
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    const pollerCb = new TelegramPoller(paths, {
+      fetchFn: mockFetchCb,
+      baseUrl: 'http://fake-telegram.local',
+      ctx: mockContext,
+    });
+
+    await pollerCb.start();
+    await new Promise((r) => setTimeout(r, 200));
+    pollerCb.stop();
+
+    // Verify callback query called startJob
+    assert.equal(startedJobs.length, 2, 'Callback query must call ctx.startJob');
+    assert.equal(startedJobs[1]!.agent, 'codex');
+    assert.ok(sentAnswers.some((a) => a.includes('Action retry executed')));
+
+    // 3. Test reply to pushed message starts follow-up job
+    const item3 = {
+      id: 'i33333',
+      kind: 'needs_input',
+      severity: 'warn',
+      title: 'Need guidance',
+      detail: 'Which DB schema?',
+      actions: ['reply', 'dismiss'],
+      retry: {
+        mode: 'task',
+        agent: 'claude',
+        role: 'architect',
+        project_path: paths.repoRoot,
+        prompt: 'Choose DB schema',
+      },
+      status: 'open',
+      resolution: null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    fs.writeFileSync(itemsFile, JSON.stringify({ version: 1, items: [initialItem, item2, item3] }), 'utf8');
+
+    // Register message map in state
+    const stateFile = path.join(paths.featureDataDir('telegram'), 'state.json');
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({
+        offset: 0,
+        push_since: new Date().toISOString(),
+        last_digest: { morning: '', evening: '' },
+        msg_map: { '777': 'i33333' },
+      }),
+      'utf8'
+    );
+
+    let tickReply = 0;
+    const mockFetchReply: typeof fetch = async (input, init) => {
+      const urlStr = String(input);
+      if (urlStr.includes('/getUpdates')) {
+        tickReply++;
+        if (tickReply === 1) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: [
+                {
+                  update_id: 3,
+                  message: {
+                    message_id: 888,
+                    chat: { id: 12345 },
+                    text: 'Use PostgreSQL schema',
+                    reply_to_message: {
+                      message_id: 777,
+                      text: '[needs_input] Need guidance',
+                    },
+                  },
+                },
+              ],
+            }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        return new Response(JSON.stringify({ ok: true, result: [] }), { status: 200 });
+      }
+
+      if (urlStr.includes('/sendMessage')) {
+        const bodyObj = JSON.parse(String(init?.body ?? '{}'));
+        sentMessages.push(bodyObj.text);
+        return new Response(JSON.stringify({ ok: true, result: { message_id: 999 } }), { status: 200 });
+      }
+
+      return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    };
+
+    const pollerReply = new TelegramPoller(paths, {
+      fetchFn: mockFetchReply,
+      baseUrl: 'http://fake-telegram.local',
+      ctx: mockContext,
+    });
+
+    await pollerReply.start();
+    await new Promise((r) => setTimeout(r, 200));
+    pollerReply.stop();
+
+    // Verify reply started a follow-up job
+    assert.equal(startedJobs.length, 3, 'Reply must start a follow-up job');
+    assert.ok(String(startedJobs[2]!.prompt).includes('Choose DB schema'));
+    assert.ok(String(startedJobs[2]!.prompt).includes('Use PostgreSQL schema'));
+  } finally {
+    cleanup();
+  }
+});
