@@ -16,7 +16,7 @@
       'tm.enabled': 'Bật', 'tm.style': 'Cách làm việc', 'tm.st.persistent': 'Chat liên tục', 'tm.st.per_task': 'Theo từng nhiệm vụ', 'tm.st.new_chat_per_task': 'Chat mới cho mỗi nhiệm vụ',
       'tm.exec': 'Chạy với vai trò', 'tm.persona': 'Tính cách', 'tm.delegate': 'Được giao việc cho vai trò khác',
       'tm.resp': 'Trách nhiệm', 'tm.deleg': 'Giao việc & báo cáo', 'tm.output': 'Đầu ra', 'tm.perms': 'Quyền',
-      'tm.override': 'Ghi đè riêng cho vai trò (tuỳ chọn)', 'tm.inherit': '(theo thiết lập chung)',
+      'tm.override': 'Ghi đè riêng cho vai trò (tuỳ chọn)', 'tm.scopeMode': 'Quyền ghi của vai trò', 'tm.sm.inherit': 'Theo thiết lập chung', 'tm.sm.custom': 'Phạm vi riêng (glob)', 'tm.sm.readonly': 'Chỉ đọc (không được sửa tệp)', 'tm.inherit': '(theo thiết lập chung)',
       'tm.lib': 'Thư viện hồ sơ', 'tm.libLoad': 'Nạp từ thư viện…', 'tm.libSave': 'Lưu vai trò vào thư viện', 'tm.libSaved': 'Đã lưu hồ sơ "{n}".',
       'tm.suggest': 'Gợi ý từ bảng điểm', 'tm.suggested': 'Đã áp dụng gợi ý cho {n} vai trò.', 'tm.noSuggest': 'Chưa có bảng điểm (S4).',
       'tm.ready': 'Kiểm tra sẵn sàng', 'tm.export': 'Xuất', 'tm.import': 'Nhập', 'tm.saveTpl': 'Lưu thành mẫu', 'tm.updTpl': 'Cập nhật mẫu',
@@ -40,7 +40,7 @@
       'tm.enabled': 'On', 'tm.style': 'Working style', 'tm.st.persistent': 'Persistent chat', 'tm.st.per_task': 'Per task', 'tm.st.new_chat_per_task': 'New chat per task',
       'tm.exec': 'Run as role', 'tm.persona': 'Persona', 'tm.delegate': 'May delegate to other roles',
       'tm.resp': 'Responsibility', 'tm.deleg': 'Delegation & reporting', 'tm.output': 'Output', 'tm.perms': 'Permissions',
-      'tm.override': 'Per-role override (optional)', 'tm.inherit': '(shared setting)',
+      'tm.override': 'Per-role override (optional)', 'tm.scopeMode': 'Role write access', 'tm.sm.inherit': 'Shared setting', 'tm.sm.custom': 'Own scope (globs)', 'tm.sm.readonly': 'Read-only (no file changes)', 'tm.inherit': '(shared setting)',
       'tm.lib': 'Profile library', 'tm.libLoad': 'Load from library…', 'tm.libSave': 'Save role to library', 'tm.libSaved': 'Saved profile "{n}".',
       'tm.suggest': 'Suggest from scoreboard', 'tm.suggested': 'Applied the suggestion to {n} roles.', 'tm.noSuggest': 'No scoreboard yet (S4).',
       'tm.ready': 'Readiness check', 'tm.export': 'Export', 'tm.import': 'Import', 'tm.saveTpl': 'Save as template', 'tm.updTpl': 'Update template',
@@ -160,6 +160,7 @@
       function roleEditor(r) {
         const sh = T.team.shared, md = T.md[r.key] || {};
         const ov = r.override || {};
+        const scopeMode = !Array.isArray(ov.write_scope) ? 'inherit' : ov.write_scope.length ? 'custom' : 'readonly';
         const p = platforms().find(x => x.id === (ov.platform || sh.platform));
         return `
           <div class="tm-grid">
@@ -177,7 +178,8 @@
               <label class="ws-f"><span>${esc(t('tm.platform'))}</span><select data-o="platform">${platOpts(ov.platform || '', true)}</select></label>
               <label class="ws-f"><span>${esc(t('tm.model'))}</span><select data-o="model">${listOpts(p?.models, ov.model, true)}</select></label>
               <label class="ws-f"><span>${esc(t('tm.effort'))}</span><select data-o="effort" ${(p?.efforts || []).length ? '' : 'disabled'}>${listOpts(p?.efforts, ov.effort, true)}</select></label>
-              <label class="ws-f tm-span2"><span>${esc(t('tm.scope'))}</span><textarea class="mono" rows="2" data-o="write_scope" placeholder="${esc(t('tm.inherit'))}">${esc(ov.write_scope ? ov.write_scope.join('\n') : '')}</textarea></label>
+              <label class="ws-f"><span>${esc(t('tm.scopeMode'))}</span><select data-scope-mode>${['inherit', 'custom', 'readonly'].map(m => `<option value="${m}" ${m === scopeMode ? 'selected' : ''}>${esc(t('tm.sm.' + m))}</option>`).join('')}</select></label>
+              <label class="ws-f tm-span2 ${scopeMode === 'custom' ? '' : 'hidden'}"><span>${esc(t('tm.scope'))}</span><textarea class="mono" rows="2" data-o="write_scope">${esc(scopeMode === 'custom' ? ov.write_scope.join('\n') : '')}</textarea></label>
             </div>
           </details>
           <div class="row-wrap tm-ract">
@@ -213,8 +215,12 @@
         const ov = {};
         for (const el of qsa('[data-o]', body)) {
           const k = el.dataset.o;
-          if (k === 'write_scope') { if (el.value.trim()) ov.write_scope = lines(el.value); } else if (el.value.trim()) ov[k] = el.value.trim();
+          if (k === 'write_scope') continue;
+          if (el.value.trim()) ov[k] = el.value.trim();
         }
+        const mode = qs('[data-scope-mode]', body)?.value || 'inherit';
+        if (mode === 'readonly') ov.write_scope = [];
+        else if (mode === 'custom') { const sc = lines(qs('[data-o="write_scope"]', body)?.value); ov.write_scope = sc.length ? sc : ['**']; }
         r.override = ov;
         const keyEl = v('[data-r="key"]');
         const nk = keyEl ? keyEl.value.trim() : r.key;
@@ -231,7 +237,7 @@
           if (!tpl || !(await ws.confirmDlg(t('tm.cTplDel', { n: tpl.name }), { danger: true }))) return;
           try { await ws.post('team_template_delete', { id: tpl.id }); T.tplId = ''; await loadLib(); render(); } catch (e) { fail(e); }
         });
-        for (const el of qsa('[data-s="platform"], [data-o="platform"]', body)) el.onchange = () => { collect(); render(); };
+        for (const el of qsa('[data-s="platform"], [data-o="platform"], [data-scope-mode]', body)) el.onchange = () => { collect(); render(); };
         qsa('[data-role]', body).forEach(b => b.onclick = () => { collect(); T.sel = b.dataset.role; render(); });
         qs('[data-act="addrole"]', body).onclick = () => {
           collect();
