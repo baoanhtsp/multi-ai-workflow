@@ -1,4 +1,4 @@
-name: PowerShell Syntax & Installer CI
+﻿name: PowerShell Syntax & Installer CI
 
 on:
   push:
@@ -63,7 +63,9 @@ jobs:
               "claude/commands/antigravity.md",
               "codex/AGENTS.md",
               "codex/skills/multi-ai-leader/SKILL.md",
-              "codex/skills/multi-ai-leader/agents/openai.yaml"
+              "codex/skills/multi-ai-leader/agents/openai.yaml",
+              "dashboard/index.html",
+              "dashboard/api.php"
           )
 
           $missing = @()
@@ -102,3 +104,4 @@ jobs:
               }
               Write-Host "✅ Verified installed file: $target" -ForegroundColor Green
           }
+

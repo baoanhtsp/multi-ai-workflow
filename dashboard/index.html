@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="vi" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Multi-AI Mission Control</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'], mono: ['JetBrains Mono', 'Consolas', 'monospace'] },
+      colors: {
+        bg: '#090D16', card: '#111827', card2: '#1E293B',
+        ag: '#06B6D4', agb: '#3B82F6', cl: '#D97757', cla: '#F59E0B', cx: '#10B981'
+      }
+    }
+  }
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  body { background: #090D16; color: #e2e8f0; font-family: 'Inter', system-ui, sans-serif; }
+  body::before {
+    content: ''; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    background:
+      radial-gradient(900px 500px at 15% -10%, rgba(6,182,212,.14), transparent 60%),
+      radial-gradient(800px 500px at 90% 0%, rgba(217,119,87,.12), transparent 60%),
+      radial-gradient(800px 600px at 50% 110%, rgba(16,185,129,.10), transparent 60%),
+      linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px) 0 0 / 40px 40px,
+      linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px) 0 0 / 40px 40px;
+  }
+  .glass { background: linear-gradient(145deg, rgba(30,41,59,.65), rgba(17,24,39,.75)); backdrop-filter: blur(14px); border: 1px solid rgba(148,163,184,.14); border-radius: 1rem; box-shadow: 0 10px 40px -12px rgba(0,0,0,.6), inset 0 1px 0 rgba(255,255,255,.04); }
+  .glow-ag { box-shadow: 0 0 0 1px rgba(6,182,212,.35), 0 0 30px -6px rgba(6,182,212,.5); }
+  .glow-cl { box-shadow: 0 0 0 1px rgba(217,119,87,.4), 0 0 30px -6px rgba(217,119,87,.5); }
+  .glow-cx { box-shadow: 0 0 0 1px rgba(16,185,129,.4), 0 0 30px -6px rgba(16,185,129,.5); }
+  .scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scroll::-webkit-scrollbar-thumb { background: #334155; border-radius: 9px; }
+  .pulse-dot { animation: pulse 1.6s cubic-bezier(.4,0,.6,1) infinite; }
+  @keyframes flow { to { stroke-dashoffset: -24; } }
+  .flow { stroke-dasharray: 6 6; animation: flow 1.2s linear infinite; }
+  @keyframes floaty { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+  .node { animation: floaty 4s ease-in-out infinite; transition: transform .2s; cursor: pointer; }
+  .node:hover { filter: brightness(1.2); }
+  .btn { transition: all .15s; }
+  .btn:active { transform: scale(.97); }
+  select, input, textarea { background: rgba(9,13,22,.8); border: 1px solid #334155; border-radius: .6rem; color: #e2e8f0; }
+  select:focus, input:focus, textarea:focus { outline: none; border-color: #06B6D4; box-shadow: 0 0 0 3px rgba(6,182,212,.18); }
+  .toast { animation: slidein .25s ease-out; }
+  @keyframes slidein { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body class="min-h-screen antialiased">
+
+<!-- HEADER -->
+<header class="sticky top-0 z-40 border-b border-slate-700/40 bg-bg/80 backdrop-blur-xl">
+  <div class="max-w-[1500px] mx-auto px-4 sm:px-6 py-3 flex flex-wrap items-center gap-3">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-ag via-agb to-cl grid place-items-center glow-ag">
+        <i data-lucide="radar" class="w-5 h-5 text-white"></i>
+      </div>
+      <div>
+        <h1 class="font-extrabold tracking-tight text-lg leading-none">MULTI-AI <span class="text-transparent bg-clip-text bg-gradient-to-r from-ag to-cl">MISSION CONTROL</span></h1>
+        <p class="text-[11px] text-slate-400 mt-1">Trung tâm điều phối Claude · Antigravity · Codex</p>
+      </div>
+    </div>
+    <div class="flex-1"></div>
+    <div id="modeBadge" class="hidden px-2.5 py-1 rounded-full text-[11px] font-semibold bg-amber-500/15 text-amber-300 border border-amber-500/30 items-center gap-1.5">
+      <i data-lucide="flask-conical" class="w-3.5 h-3.5"></i> DEMO DATA
+    </div>
+    <div id="bridgeBadge" class="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-mono bg-slate-800/70 border border-slate-600/40">
+      <span class="w-2 h-2 rounded-full bg-slate-500" id="bridgeDot"></span>
+      <span id="bridgeText">Bridge: đang kiểm tra…</span>
+    </div>
+    <label class="flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+      <span>Auto-Refresh 10s</span>
+      <span class="relative inline-block w-10 h-5">
+        <input type="checkbox" id="autoToggle" class="peer sr-only" checked>
+        <span class="absolute inset-0 rounded-full bg-slate-700 peer-checked:bg-ag transition"></span>
+        <span class="absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition peer-checked:translate-x-5"></span>
+      </span>
+    </label>
+    <button id="refreshBtn" class="btn flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-semibold bg-ag/15 text-ag border border-ag/40 hover:bg-ag/25">
+      <i data-lucide="refresh-cw" class="w-3.5 h-3.5" id="refreshIcon"></i> Refresh Now
+    </button>
+  </div>
+</header>
+
+<main class="max-w-[1500px] mx-auto px-4 sm:px-6 py-6 space-y-6">
+
+  <!-- HERO TRIANGLE -->
+  <section class="glass p-5 sm:p-6 overflow-hidden">
+    <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+      <div>
+        <h2 class="font-bold text-base flex items-center gap-2"><i data-lucide="triangle" class="w-4 h-4 text-ag"></i> 3-Way Omni-Directional Orchestration</h2>
+        <p class="text-xs text-slate-400">Bất kỳ đỉnh nào cũng có thể làm Leader và ủy quyền cho 2 đỉnh còn lại.</p>
+      </div>
+      <div class="px-3 py-1.5 rounded-full text-xs font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5">
+        <i data-lucide="zap" class="w-3.5 h-3.5"></i> ~80% Claude Tokens Saved
+      </div>
+    </div>
+    <div class="grid lg:grid-cols-5 gap-4 items-center">
+      <div class="lg:col-span-3">
+        <svg viewBox="0 0 640 380" class="w-full h-auto max-h-[380px]">
+          <defs>
+            <linearGradient id="gAC" x1="0" x2="1"><stop offset="0" stop-color="#06B6D4"/><stop offset="1" stop-color="#D97757"/></linearGradient>
+            <linearGradient id="gCX" x1="0" x2="1"><stop offset="0" stop-color="#D97757"/><stop offset="1" stop-color="#10B981"/></linearGradient>
+            <linearGradient id="gXA" x1="0" x2="1"><stop offset="0" stop-color="#10B981"/><stop offset="1" stop-color="#06B6D4"/></linearGradient>
+          </defs>
+          <!-- vertices: Claude top, Antigravity bottom-left, Codex bottom-right -->
+          <g fill="none" stroke-width="2.5" opacity=".9">
+            <line x1="320" y1="80" x2="120" y2="300" stroke="url(#gAC)" class="flow"/>
+            <line x1="320" y1="80" x2="520" y2="300" stroke="url(#gCX)" class="flow"/>
+            <line x1="120" y1="300" x2="520" y2="300" stroke="url(#gXA)" class="flow"/>
+          </g>
+          <g id="triCenter">
+            <circle cx="320" cy="225" r="46" fill="#0b1220" stroke="#334155"/>
+            <text x="320" y="221" text-anchor="middle" fill="#94a3b8" font-size="10" font-family="Inter">TOTAL CALLS</text>
+            <text id="triTotal" x="320" y="244" text-anchor="middle" fill="#fff" font-size="22" font-weight="800" font-family="Inter">0</text>
+          </g>
+          <!-- Claude -->
+          <g class="node" data-mode="claude" onclick="pickMode('claude')">
+            <circle cx="320" cy="80" r="52" fill="#1a1210" stroke="#D97757" stroke-width="2.5"/>
+            <circle cx="320" cy="80" r="62" fill="none" stroke="#D97757" opacity=".25"/>
+            <text x="320" y="76" text-anchor="middle" fill="#F59E0B" font-size="15" font-weight="800" font-family="Inter">CLAUDE</text>
+            <text id="triClVer" x="320" y="94" text-anchor="middle" fill="#D97757" font-size="11" font-family="JetBrains Mono">v—</text>
+            <text x="320" y="20" text-anchor="middle" fill="#cbd5e1" font-size="11" font-family="JetBrains Mono">/antigravity</text>
+          </g>
+          <!-- Antigravity -->
+          <g class="node" style="animation-delay:-1.3s" data-mode="antigravity" onclick="pickMode('antigravity')">
+            <circle cx="120" cy="300" r="52" fill="#0a1620" stroke="#06B6D4" stroke-width="2.5"/>
+            <circle cx="120" cy="300" r="62" fill="none" stroke="#06B6D4" opacity=".25"/>
+            <text x="120" y="296" text-anchor="middle" fill="#06B6D4" font-size="13" font-weight="800" font-family="Inter">ANTIGRAVITY</text>
+            <text id="triAgVer" x="120" y="313" text-anchor="middle" fill="#3B82F6" font-size="10" font-family="JetBrains Mono">—</text>
+            <text x="120" y="376" text-anchor="middle" fill="#cbd5e1" font-size="11" font-family="JetBrains Mono">/claude-leader</text>
+          </g>
+          <!-- Codex -->
+          <g class="node" style="animation-delay:-2.6s" data-mode="codex" onclick="pickMode('codex')">
+            <circle cx="520" cy="300" r="52" fill="#0a1713" stroke="#10B981" stroke-width="2.5"/>
+            <circle cx="520" cy="300" r="62" fill="none" stroke="#10B981" opacity=".25"/>
+            <text x="520" y="296" text-anchor="middle" fill="#10B981" font-size="15" font-weight="800" font-family="Inter">CODEX</text>
+            <text id="triCxVer" x="520" y="313" text-anchor="middle" fill="#34d399" font-size="11" font-family="JetBrains Mono">v—</text>
+            <text x="520" y="376" text-anchor="middle" fill="#cbd5e1" font-size="11" font-family="JetBrains Mono">$multi-ai-leader</text>
+          </g>
+        </svg>
+      </div>
+      <div class="lg:col-span-2 space-y-3" id="toolCards"></div>
+    </div>
+  </section>
+
+  <!-- KPI -->
+  <section class="grid grid-cols-2 xl:grid-cols-4 gap-4" id="kpiRow"></section>
+
+  <!-- DISPATCHER -->
+  <section class="glass p-5 sm:p-6">
+    <div class="flex items-center gap-2 mb-4">
+      <i data-lucide="terminal-square" class="w-5 h-5 text-cla"></i>
+      <h2 class="font-bold text-base">Command Dispatcher &amp; SPEC.md Generator</h2>
+    </div>
+    <div class="grid lg:grid-cols-2 gap-6">
+      <!-- left -->
+      <div class="space-y-4">
+        <div>
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Dự án (Project) trong C:\laragon\www</label>
+          <div class="flex gap-2 mt-1.5">
+            <select id="projectSel" class="flex-1 px-3 py-2 text-sm"></select>
+            <button id="initSpecBtn" class="btn flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold bg-cx/15 text-cx border border-cx/40 hover:bg-cx/25 whitespace-nowrap">
+              <i data-lucide="file-plus-2" class="w-4 h-4"></i> Init SPEC.md
+            </button>
+          </div>
+          <div id="projMeta" class="flex flex-wrap gap-2 mt-2 text-[11px]"></div>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Orchestration Mode</label>
+          <div class="grid grid-cols-4 gap-2 mt-1.5" id="modeBtns"></div>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Role</label>
+          <select id="roleSel" class="w-full px-3 py-2 text-sm mt-1.5"></select>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">Prompt / Mô tả tác vụ</label>
+          <textarea id="promptTxt" rows="5" class="w-full px-3 py-2 text-sm mt-1.5 scroll resize-y" placeholder="Ví dụ: Đọc SPEC.md và triển khai phần Backend + chạy test…"></textarea>
+          <div class="text-[11px] text-slate-500 text-right mt-1"><span id="charCnt">0</span> ký tự</div>
+        </div>
+      </div>
+      <!-- right -->
+      <div class="space-y-4 flex flex-col">
+        <div class="flex items-center justify-between">
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider">PowerShell Command Preview</label>
+          <span id="cmdState" class="text-[11px] text-slate-500"></span>
+        </div>
+        <pre id="cmdOut" class="flex-1 min-h-[180px] max-h-[300px] overflow-auto scroll p-4 rounded-xl bg-black/50 border border-slate-700/60 text-[12px] font-mono text-emerald-300 whitespace-pre-wrap break-all">Nhấn "Generate Command" để tạo lệnh…</pre>
+        <div class="flex flex-wrap gap-2">
+          <button id="genBtn" class="btn flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-cl to-cla text-black hover:brightness-110">
+            <i data-lucide="wand-2" class="w-4 h-4"></i> Generate Command
+          </button>
+          <button id="copyBtn" class="btn flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-slate-700/60 border border-slate-500/40 hover:bg-slate-700">
+            <i data-lucide="copy" class="w-4 h-4"></i> Copy PowerShell
+          </button>
+          <button id="sendBtn" class="btn flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold bg-gradient-to-r from-ag to-agb text-white hover:brightness-110">
+            <i data-lucide="send" class="w-4 h-4"></i> Send Directly to Antigravity IDE
+          </button>
+        </div>
+        <p class="text-[11px] text-slate-500">"Send Directly" chỉ hoạt động với mode <span class="font-mono text-ag">antigravity</span> — gửi tác vụ vào cửa sổ Antigravity đang mở (<span class="font-mono">-NoWait</span>).</p>
+        <pre id="dispOut" class="hidden max-h-32 overflow-auto scroll p-3 rounded-lg bg-slate-900/80 border border-slate-700/60 text-[11px] font-mono text-slate-300 whitespace-pre-wrap"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- SESSIONS + AUDIT -->
+  <section class="grid xl:grid-cols-5 gap-6">
+    <div class="glass p-5 xl:col-span-2">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="activity" class="w-5 h-5 text-ag"></i>
+        <h2 class="font-bold text-base">Antigravity Sessions</h2>
+        <span id="sessCount" class="ml-auto text-[11px] text-slate-400"></span>
+      </div>
+      <div id="sessList" class="space-y-3 max-h-[460px] overflow-y-auto scroll pr-1"></div>
+    </div>
+    <div class="glass p-5 xl:col-span-3">
+      <div class="flex items-center gap-2 mb-3">
+        <i data-lucide="scroll-text" class="w-5 h-5 text-cla"></i>
+        <h2 class="font-bold text-base">Audit Log <span class="text-slate-500 font-mono text-xs">multi-ai-audit.jsonl</span></h2>
+        <span id="auditCount" class="ml-auto text-[11px] text-slate-400"></span>
+      </div>
+      <div class="overflow-auto scroll max-h-[460px] rounded-lg">
+        <table class="w-full text-xs">
+          <thead class="sticky top-0 bg-card2 text-slate-400 uppercase text-[10px] tracking-wider">
+            <tr>
+              <th class="text-left p-2.5">Timestamp</th><th class="text-left p-2.5">Tool</th><th class="text-left p-2.5">Role</th>
+              <th class="text-left p-2.5">Model</th><th class="text-right p-2.5">Chars</th><th class="text-center p-2.5">Score</th><th class="text-left p-2.5">Verdict</th>
+            </tr>
+          </thead>
+          <tbody id="auditBody" class="divide-y divide-slate-700/40"></tbody>
+        </table>
+      </div>
+      <div id="breakdown" class="grid sm:grid-cols-2 gap-4 mt-4"></div>
+    </div>
+  </section>
+
+  <footer class="text-center text-[11px] text-slate-500 pb-6">
+    <span id="lastUpdate">—</span> · Multi-AI Mission Control · Frontend by Claude Sonnet
+  </footer>
+</main>
+
+<div id="toasts" class="fixed bottom-5 right-5 z-50 space-y-2"></div>
+
+<script>
+const API = 'api.php';
+const IS_FILE = location.protocol === 'file:';
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = n => Number(n || 0).toLocaleString('en-US');
+
+const ROLES = {
+  antigravity: ['send-latest', 'architect', 'frontend', 'reviewer', 'ui-tweak'],
+  claude: ['architect', 'frontend', 'reviewer', 'ui-tweak'],
+  codex: ['reviewer', 'architect', 'frontend', 'ui-tweak'],
+  council: ['architect', 'reviewer', 'frontend', 'ui-tweak']
+};
+const MODES = {
+  antigravity: { label: 'Antigravity', icon: 'rocket', c: 'text-ag border-ag/50 bg-ag/10' },
+  claude: { label: 'Claude', icon: 'brain-circuit', c: 'text-cl border-cl/50 bg-cl/10' },
+  codex: { label: 'Codex', icon: 'code-2', c: 'text-cx border-cx/50 bg-cx/10' },
+  council: { label: 'Council', icon: 'users', c: 'text-violet-300 border-violet-400/50 bg-violet-400/10' }
+};
+
+let state = { data: null, mode: 'antigravity', timer: null, demo: false };
+
+function demoData() {
+  const now = new Date();
+  const iso = d => d.toISOString();
+  return {
+    ok: true, timestamp: iso(now), user_profile: 'C:\\Users\\Admin',
+    bridge: { online: true, ls_address: 'localhost:59570', csrf_masked: '80b15d0a...abf6', ls_version: 'hub-2.26.0', updated_at: iso(now) },
+    tools: {
+      antigravity: { installed: true, model: 'Gemini 4 Argon (High)', command: '/claude-leader' },
+      claude: { installed: true, version: '2.1.308', models: ['Opus 4.6', 'Sonnet 4.6', 'Haiku 4.5'], command: '/antigravity' },
+      codex: { installed: true, version: '0.163.0', model: 'gpt-6-sol (high)', command: '$multi-ai-leader' }
+    },
+    conversations: [
+      { id: '3e164ce1-ef65-434c-ad58-d276a32b3c85', is_active: true, updated_at: '2026-10-24 16:03:32', step_count: 48, last_status: 'DONE', last_preview: 'Đã tích hợp xong Đỉnh thứ 3 — Codex orchestrator và các kiểm tra CI…' },
+      { id: '9a1b77f0-2c4e-41aa-b6de-0f5d3c8a1e42', is_active: false, updated_at: '2026-10-24 14:20:11', step_count: 21, last_status: 'RUNNING', last_preview: 'Đang viết unit test cho api.php?action=status…' },
+      { id: 'c7d2e8b4-5f19-4d3a-8a60-91b2e4f7c0d5', is_active: false, updated_at: '2026-10-23 22:47:05', step_count: 9, last_status: 'DONE', last_preview: 'Hoàn tất refactor invoke-antigravity.ps1 với auto-wait.' }
+    ],
+    projects: [
+      { name: 'multi-ai-workflow', path: 'C:\\laragon\\www\\multi-ai-workflow', has_git: true, has_spec: true, has_gemini_md: true },
+      { name: 'shop-demo', path: 'C:\\laragon\\www\\shop-demo', has_git: true, has_spec: false, has_gemini_md: false },
+      { name: 'landing-page', path: 'C:\\laragon\\www\\landing-page', has_git: false, has_spec: false, has_gemini_md: false }
+    ],
+    audit: {
+      total_calls: 4, total_prompt_chars: 9850, estimated_tokens_saved: 60000,
+      by_tool: { claude: 3, codex: 1 },
+      by_role: { architect: 1, frontend: 1, reviewer: 1, 'ui-tweak': 0, 'review-diff': 1 },
+      verdicts: { APPROVED: 1, CHANGES_REQUESTED: 0, COMPLETED: 3 },
+      recent_logs: [
+        { Timestamp: '2026-10-24T16:05:00+07:00', Tool: 'claude', Role: 'frontend', Model: 'sonnet', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 2450, Score: '', Verdict: 'COMPLETED' },
+        { Timestamp: '2026-10-24T15:40:12+07:00', Tool: 'codex', Role: 'review-diff', Model: 'gpt-6-sol', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 1800, Score: '9/10', Verdict: 'APPROVED' },
+        { Timestamp: '2026-10-24T15:10:03+07:00', Tool: 'claude', Role: 'reviewer', Model: 'opus', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 3100, Score: '7/10', Verdict: 'CHANGES_REQUESTED' },
+        { Timestamp: '2026-10-24T14:02:44+07:00', Tool: 'claude', Role: 'architect', Model: 'opus', WorkDir: 'C:\\laragon\\www\\multi-ai-workflow', PromptChars: 2500, Score: '', Verdict: 'COMPLETED' }
+      ]
+    }
+  };
+}
+
+function toast(msg, type = 'info') {
+  const col = { info: 'border-ag/50 text-ag', ok: 'border-emerald-400/50 text-emerald-300', err: 'border-red-400/50 text-red-300', warn: 'border-amber-400/50 text-amber-300' }[type];
+  const el = document.createElement('div');
+  el.className = `toast glass px-4 py-2.5 text-xs font-medium border ${col} max-w-sm`;
+  el.textContent = msg;
+  $('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 3800);
+}
+
+async function api(action, body) {
+  if (IS_FILE) throw new Error('file://');
+  const opt = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {};
+  const r = await fetch(`${API}?action=${action}`, opt);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+
+async function load(manual) {
+  const icon = $('refreshIcon');
+  icon.classList.add('spin');
+  try {
+    state.data = await api('status');
+    state.demo = false;
+  } catch (e) {
+    state.data = demoData();
+    state.demo = true;
+    if (manual || !state.warned) toast(IS_FILE ? 'Mở qua file:// — dùng demo data. Hãy chạy qua Laragon để xem live.' : 'Không kết nối được api.php — dùng demo data.', 'warn');
+    state.warned = true;
+  }
+  icon.classList.remove('spin');
+  render();
+}
+
+function badge(text, cls) { return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold border ${cls}">${esc(text)}</span>`; }
+function toolBadge(t) {
+  const k = String(t).toLowerCase();
+  const c = k.includes('claude') ? 'text-cl bg-cl/10 border-cl/40' : k.includes('codex') ? 'text-cx bg-cx/10 border-cx/40' : 'text-ag bg-ag/10 border-ag/40';
+  return badge(t, c);
+}
+function verdictBadge(v) {
+  const c = v === 'APPROVED' ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40'
+    : v === 'CHANGES_REQUESTED' ? 'text-red-300 bg-red-500/10 border-red-500/40'
+    : 'text-sky-300 bg-sky-500/10 border-sky-500/40';
+  return badge(v || '—', c);
+}
+function statusBadge(s) {
+  const u = String(s || '').toUpperCase();
+  const c = u === 'DONE' ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40'
+    : u === 'RUNNING' ? 'text-amber-300 bg-amber-500/10 border-amber-500/40'
+    : 'text-slate-300 bg-slate-500/10 border-slate-500/40';
+  return badge(u || 'UNKNOWN', c);
+}
+
+function render() {
+  const d = state.data;
+  if (!d) return;
+  $('modeBadge').classList.toggle('hidden', !state.demo);
+  $('modeBadge').classList.toggle('flex', state.demo);
+
+  // bridge
+  const b = d.bridge || {};
+  $('bridgeDot').className = 'w-2 h-2 rounded-full pulse-dot ' + (b.online ? 'bg-emerald-400' : 'bg-red-500');
+  $('bridgeText').textContent = b.online ? `Bridge ONLINE · ${b.ls_address}` : 'Bridge OFFLINE';
+  $('bridgeBadge').title = `LS ${b.ls_version || '—'} · CSRF ${b.csrf_masked || '—'} · ${b.updated_at || ''}`;
+
+  // triangle
+  const t = d.tools || {};
+  $('triClVer').textContent = 'v' + (t.claude?.version || '—');
+  $('triAgVer').textContent = b.ls_version || 'Gemini';
+  $('triCxVer').textContent = 'v' + (t.codex?.version || '—');
+  const a = d.audit || {};
+  $('triTotal').textContent = fmt(a.total_calls);
+
+  const tc = (name, cls, glow, icon, cmd, line1, line2, inst) => `
+    <div class="rounded-xl p-3.5 bg-card/70 ${glow} flex items-start gap-3">
+      <div class="w-10 h-10 rounded-lg grid place-items-center ${cls}"><i data-lucide="${icon}" class="w-5 h-5"></i></div>
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2"><span class="font-bold text-sm">${name}</span>
+          ${inst ? badge('INSTALLED', 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40') : badge('MISSING', 'text-red-300 bg-red-500/10 border-red-500/40')}</div>
+        <div class="font-mono text-xs text-slate-300 mt-1">${esc(cmd)}</div>
+        <div class="text-[11px] text-slate-400 mt-0.5 truncate">${esc(line1)}</div>
+        <div class="text-[11px] text-slate-500 truncate">${esc(line2)}</div>
+      </div>
+    </div>`;
+  $('toolCards').innerHTML =
+    tc('Antigravity', 'bg-ag/15 text-ag', 'glow-ag', 'rocket', t.antigravity?.command, t.antigravity?.model, 'Backend / Core · LS ' + (b.ls_version || '—'), t.antigravity?.installed) +
+    tc('Claude Code', 'bg-cl/15 text-cl', 'glow-cl', 'brain-circuit', t.claude?.command, (t.claude?.models || []).join(' · '), 'CLI v' + (t.claude?.version || '—'), t.claude?.installed) +
+    tc('OpenAI Codex', 'bg-cx/15 text-cx', 'glow-cx', 'code-2', t.codex?.command, t.codex?.model, 'CLI v' + (t.codex?.version || '—'), t.codex?.installed);
+
+  // KPI
+  const v = a.verdicts || {};
+  const graded = (v.APPROVED || 0) + (v.CHANGES_REQUESTED || 0);
+  const rate = graded ? Math.round((v.APPROVED || 0) / graded * 100) : 0;
+  const activeSess = (d.conversations || []).filter(c => c.is_active).length;
+  const kpi = (label, val, sub, icon, col) => `
+    <div class="glass p-4 relative overflow-hidden">
+      <div class="absolute -right-4 -top-4 w-20 h-20 rounded-full opacity-20 blur-2xl" style="background:${col}"></div>
+      <div class="flex items-center justify-between"><span class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold">${label}</span>
+        <i data-lucide="${icon}" class="w-4 h-4" style="color:${col}"></i></div>
+      <div class="text-3xl font-extrabold mt-2 tracking-tight">${val}</div>
+      <div class="text-[11px] text-slate-500 mt-1">${sub}</div>
+    </div>`;
+  $('kpiRow').innerHTML =
+    kpi('Total AI Calls', fmt(a.total_calls), `${fmt(a.total_prompt_chars)} prompt chars`, 'phone-call', '#F59E0B') +
+    kpi('Est. Tokens Saved', fmt(a.estimated_tokens_saved), 'Nhờ ủy quyền cho Antigravity / Codex', 'piggy-bank', '#10B981') +
+    kpi('Approval Rate', rate + '%', `${v.APPROVED || 0} APPROVED · ${v.CHANGES_REQUESTED || 0} CHANGES_REQUESTED`, 'badge-check', '#06B6D4') +
+    kpi('Active Sessions', activeSess, `${(d.conversations || []).length} conversations gần đây`, 'radio-tower', '#3B82F6');
+
+  renderProjects();
+
+  // sessions
+  const cv = d.conversations || [];
+  $('sessCount').textContent = `${cv.length} phiên`;
+  $('sessList').innerHTML = cv.length ? cv.map(c => `
+    <div class="rounded-xl p-3.5 bg-card/70 border ${c.is_active ? 'border-ag/50 glow-ag' : 'border-slate-700/50'}">
+      <div class="flex items-center gap-2">
+        ${c.is_active ? '<span class="w-2 h-2 rounded-full bg-ag pulse-dot"></span>' : '<span class="w-2 h-2 rounded-full bg-slate-600"></span>'}
+        <span class="font-mono text-[11px] text-slate-300" title="${esc(c.id)}">${esc(String(c.id).slice(0, 8))}…${esc(String(c.id).slice(-4))}</span>
+        <span class="ml-auto">${statusBadge(c.last_status)}</span>
+      </div>
+      <p class="text-xs text-slate-300 mt-2 line-clamp-2">${esc(c.last_preview || '(không có preview)')}</p>
+      <div class="flex items-center gap-3 text-[11px] text-slate-500 mt-2">
+        <span class="flex items-center gap-1"><i data-lucide="footprints" class="w-3 h-3"></i> ${fmt(c.step_count)} steps</span>
+        <span class="flex items-center gap-1"><i data-lucide="clock" class="w-3 h-3"></i> ${esc(c.updated_at)}</span>
+      </div>
+    </div>`).join('') : '<p class="text-xs text-slate-500 text-center py-8">Chưa có phiên Antigravity nào.</p>';
+
+  // audit
+  const logs = a.recent_logs || [];
+  $('auditCount').textContent = `${logs.length} bản ghi gần nhất`;
+  $('auditBody').innerHTML = logs.length ? logs.map(l => {
+    const sc = l.Score ? `<span class="font-bold ${parseInt(l.Score) >= 8 ? 'text-emerald-300' : parseInt(l.Score) >= 6 ? 'text-amber-300' : 'text-red-300'}">${esc(l.Score)}</span>` : '<span class="text-slate-600">—</span>';
+    return `<tr class="hover:bg-slate-800/40">
+      <td class="p-2.5 font-mono text-slate-400 whitespace-nowrap" title="${esc(l.WorkDir)}">${esc(String(l.Timestamp).replace('T', ' ').slice(0, 19))}</td>
+      <td class="p-2.5">${toolBadge(l.Tool)}</td>
+      <td class="p-2.5 text-slate-300">${esc(l.Role)}</td>
+      <td class="p-2.5 font-mono text-slate-400">${esc(l.Model)}</td>
+      <td class="p-2.5 text-right font-mono">${fmt(l.PromptChars)}</td>
+      <td class="p-2.5 text-center">${sc}</td>
+      <td class="p-2.5">${verdictBadge(l.Verdict)}</td></tr>`;
+  }).join('') : '<tr><td colspan="7" class="p-8 text-center text-slate-500">Chưa có bản ghi audit.</td></tr>';
+
+  // breakdown bars
+  const bars = (title, obj, col) => {
+    const entries = Object.entries(obj || {});
+    const max = Math.max(1, ...entries.map(e => e[1]));
+    return `<div><h3 class="text-[11px] uppercase tracking-wider text-slate-400 font-semibold mb-2">${title}</h3>` +
+      (entries.map(([k, n]) => `<div class="flex items-center gap-2 mb-1.5 text-[11px]"><span class="w-28 truncate text-slate-300">${esc(k)}</span>
+        <div class="flex-1 h-2 rounded-full bg-slate-800 overflow-hidden"><div class="h-full rounded-full" style="width:${n / max * 100}%;background:${col}"></div></div>
+        <span class="w-6 text-right font-mono text-slate-400">${n}</span></div>`).join('') || '<p class="text-xs text-slate-600">—</p>') + '</div>';
+  };
+  $('breakdown').innerHTML = bars('Calls by Role', a.by_role, 'linear-gradient(90deg,#D97757,#F59E0B)') + bars('Calls by Tool', a.by_tool, 'linear-gradient(90deg,#06B6D4,#10B981)');
+
+  $('lastUpdate').textContent = 'Cập nhật: ' + new Date().toLocaleTimeString('vi-VN') + (state.demo ? ' (demo)' : '');
+  lucide.createIcons();
+}
+
+function renderProjects() {
+  const sel = $('projectSel');
+  const prev = sel.value;
+  const ps = state.data.projects || [];
+  sel.innerHTML = ps.map(p => `<option value="${esc(p.path)}" data-name="${esc(p.name)}">${esc(p.name)}</option>`).join('');
+  if (prev && ps.some(p => p.path === prev)) sel.value = prev;
+  projMeta();
+}
+function projMeta() {
+  const p = (state.data.projects || []).find(x => x.path === $('projectSel').value);
+  if (!p) { $('projMeta').innerHTML = ''; return; }
+  const f = (ok, l) => badge(l, ok ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/40' : 'text-slate-400 bg-slate-500/10 border-slate-500/30');
+  $('projMeta').innerHTML = f(p.has_git, '.git') + f(p.has_spec, 'SPEC.md') + f(p.has_gemini_md, 'GEMINI.md') + `<span class="font-mono text-slate-500 truncate">${esc(p.path)}</span>`;
+}
+
+function renderModes() {
+  $('modeBtns').innerHTML = Object.entries(MODES).map(([k, m]) => `
+    <button data-m="${k}" class="btn flex flex-col items-center gap-1 py-2.5 rounded-lg border text-[11px] font-bold ${state.mode === k ? m.c + ' ring-1 ring-current' : 'border-slate-700 text-slate-400 hover:border-slate-500'}">
+      <i data-lucide="${m.icon}" class="w-4 h-4"></i>${m.label}</button>`).join('');
+  document.querySelectorAll('#modeBtns button').forEach(b => b.onclick = () => pickMode(b.dataset.m));
+  $('roleSel').innerHTML = ROLES[state.mode].map(r => `<option>${r}</option>`).join('');
+  lucide.createIcons();
+}
+function pickMode(m) { state.mode = m; renderModes(); }
+
+function payload(exec) {
+  return {
+    mode: state.mode, role: $('roleSel').value,
+    project_path: $('projectSel').value, prompt: $('promptTxt').value.trim(),
+    execute_antigravity: !!exec
+  };
+}
+
+function localCommand(p) {
+  const base = 'C:\\Users\\Admin\\.gemini\\config\\skills\\claude-leader\\scripts';
+  const q = s => `"${String(s).replace(/"/g, '`"')}"`;
+  if (p.mode === 'antigravity')
+    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${base}\\invoke-antigravity.ps1" -Action send-latest -WorkDir ${q(p.project_path)} -Title "Task from Dashboard" -Prompt ${q(p.prompt)}`;
+  if (p.mode === 'codex')
+    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${base}\\invoke-codex.ps1" -Role ${p.role === 'reviewer' ? 'review-diff' : p.role} -WorkDir ${q(p.project_path)} -Prompt ${q(p.prompt)}`;
+  if (p.mode === 'claude')
+    return `powershell -NoProfile -ExecutionPolicy Bypass -File "${base}\\invoke-claude.ps1" -Role ${p.role} -WorkDir ${q(p.project_path)} -Prompt ${q(p.prompt)}`;
+  return `# Council: chạy lần lượt Claude (architect) → Antigravity (backend) → Codex (review-diff)\n` +
+    localCommand({ ...p, mode: 'claude', role: 'architect' }) + '\n' +
+    localCommand({ ...p, mode: 'antigravity' }) + '\n' +
+    localCommand({ ...p, mode: 'codex', role: 'review-diff' });
+}
+
+async function generate(exec) {
+  const p = payload(exec);
+  if (!p.project_path) { toast('Hãy chọn project trước.', 'warn'); return null; }
+  if (!p.prompt) { toast('Prompt đang trống.', 'warn'); return null; }
+  try {
+    const r = await api('dispatch', p);
+    if (!r.ok) throw new Error(r.error || r.message || 'dispatch failed');
+    $('cmdOut').textContent = r.command;
+    $('cmdState').textContent = r.dispatched ? '✔ đã dispatch' : 'chỉ tạo lệnh';
+    if (exec || r.output) { $('dispOut').classList.remove('hidden'); $('dispOut').textContent = r.output || '(không có output)'; }
+    return r;
+  } catch (e) {
+    if (exec) { toast('Không thể gửi trực tiếp (backend không khả dụng).', 'err'); return null; }
+    $('cmdOut').textContent = localCommand(p);
+    $('cmdState').textContent = 'offline · lệnh dựng cục bộ';
+    return { ok: true, command: $('cmdOut').textContent, dispatched: false };
+  }
+}
+
+$('genBtn').onclick = async () => { const r = await generate(false); if (r) toast('Đã tạo lệnh PowerShell.', 'ok'); };
+$('copyBtn').onclick = async () => {
+  let txt = $('cmdOut').textContent;
+  if (!txt || txt.startsWith('Nhấn')) { const r = await generate(false); if (!r) return; txt = r.command; }
+  try { await navigator.clipboard.writeText(txt); }
+  catch { const ta = document.createElement('textarea'); ta.value = txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+  toast('Đã copy lệnh PowerShell!', 'ok');
+};
+$('sendBtn').onclick = async () => {
+  if (state.mode !== 'antigravity') { pickMode('antigravity'); toast('Đã chuyển sang mode antigravity.', 'info'); }
+  if (!$('promptTxt').value.trim()) { toast('Prompt đang trống.', 'warn'); return; }
+  const r = await generate(true);
+  if (r) { r.dispatched ? toast('Đã gửi tác vụ tới Antigravity IDE!', 'ok') : toast('Backend tạo lệnh nhưng chưa dispatch.', 'warn'); setTimeout(() => load(), 1500); }
+};
+$('initSpecBtn').onclick = async () => {
+  const sel = $('projectSel');
+  if (!sel.value) return toast('Chưa chọn project.', 'warn');
+  const name = sel.selectedOptions[0].dataset.name;
+  try {
+    const r = await api('init_spec', { project_path: sel.value, project_name: name });
+    r.ok ? toast(r.created ? `Đã tạo SPEC.md cho ${name}` : (r.message || 'SPEC.md đã tồn tại.'), r.created ? 'ok' : 'info') : toast(r.error || r.message || 'Lỗi init_spec', 'err');
+    load();
+  } catch (e) {
+    toast('[Demo] Giả lập tạo SPEC.md cho ' + name, 'warn');
+    const p = state.data.projects.find(x => x.path === sel.value); if (p) { p.has_spec = true; projMeta(); }
+  }
+};
+$('projectSel').onchange = projMeta;
+$('promptTxt').oninput = e => $('charCnt').textContent = e.target.value.length;
+$('refreshBtn').onclick = () => load(true);
+$('autoToggle').onchange = setAuto;
+
+function setAuto() {
+  clearInterval(state.timer);
+  if ($('autoToggle').checked) state.timer = setInterval(() => load(), 10000);
+}
+
+renderModes();
+setAuto();
+load();
+</script>
+</body>
+</html>

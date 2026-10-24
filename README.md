@@ -1,4 +1,4 @@
-# 🚀 Multi-AI Coding Workflow: Antigravity (Gemini 4 Argon) + Claude Code + OpenAI Codex CLI
+﻿# 🚀 Multi-AI Coding Workflow: Antigravity (Gemini 4 Argon) + Claude Code + OpenAI Codex CLI
 
 [![CI Status](https://github.com/baoanhtsp/multi-ai-workflow/actions/workflows/ci.yml/badge.svg)](https://github.com/baoanhtsp/multi-ai-workflow/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -152,6 +152,9 @@ multi-ai-workflow/
 ├── README.md                                              # Tài liệu hướng dẫn toàn diện
 ├── install.ps1                                            # Script cài đặt tự động 1-click
 ├── doctor.ps1                                             # Công cụ chẩn đoán hệ thống & thống kê Audit Log
+├── dashboard/
+│   ├── index.html                                         # Giao diện Web Mission Control (100% do Claude Sonnet thiết kế)
+│   └── api.php                                            # Backend Telemetry & Command Dispatch API (8.5/10 APPROVED)
 ├── templates/
 │   └── SPEC.template.md                                   # Mẫu hợp đồng SPEC.md chuẩn Spec-Driven Development
 ├── antigravity/
@@ -178,3 +181,4 @@ multi-ai-workflow/
             └── agents/
                 └── openai.yaml                            # Cấu hình hiển thị trên Codex Desktop App
 ```
+
