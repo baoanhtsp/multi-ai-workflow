@@ -587,6 +587,25 @@ test('regression Item 7: computeDirtySignature changes on tracked edit, hashes u
         fs.rmSync(nonGitDir, { recursive: true, force: true });
       } catch {}
     }
+
+    // 4. Fail-closed with unique nonce when untracked file read throws error
+    const origReadFileSync = fs.readFileSync;
+    try {
+      (fs as any).readFileSync = (p: any, ...args: any[]) => {
+        if (typeof p === 'string' && p.includes('untracked.txt')) {
+          throw new Error('EACCES: permission denied');
+        }
+        return origReadFileSync(p, ...args);
+      };
+      const unreadableNonce1 = computeDirtySignature(dir, uInfo2.porcelainLines);
+      const unreadableNonce2 = computeDirtySignature(dir, uInfo2.porcelainLines);
+
+      assert.ok(unreadableNonce1.startsWith('nonce_'), 'read error on untracked file must return unique nonce');
+      assert.ok(unreadableNonce2.startsWith('nonce_'), 'read error on untracked file must return unique nonce');
+      assert.notEqual(unreadableNonce1, unreadableNonce2, 'consecutive read errors must produce unique nonces');
+    } finally {
+      fs.readFileSync = origReadFileSync;
+    }
   } finally {
     cleanup();
   }

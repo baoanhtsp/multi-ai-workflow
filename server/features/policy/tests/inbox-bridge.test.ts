@@ -709,3 +709,224 @@ export function onInboxResolved() { return () => {}; }
     cleanup();
   }
 });
+
+test('regression Item 3 (Follow-up): failed and gave_up recovery items offer retry with rebuilt run body, or [open, dismiss] if un-rebuildable', async () => {
+  const { paths, tmp, ctx, startedJobs, cleanup } = createTempEnv();
+  try {
+    resetInboxBridgeForTest();
+
+    const mockInboxFile = path.win32.join(tmp, 'mock-inbox-item3.ts');
+    const mockInboxCode = `
+export const pushedCalls = [];
+let resolvedListener = null;
+
+export function addInboxItem(paths, input, options) {
+  pushedCalls.push({ paths, input, options });
+  const item = {
+    id: 's3_' + Math.random().toString(36).slice(2, 8),
+    ...input,
+    status: 'open',
+    resolution: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  return { item, created: true };
+}
+
+export function onInboxResolved(listener) {
+  resolvedListener = listener;
+  return () => { resolvedListener = null; };
+}
+
+export async function triggerResolve(item) {
+  if (resolvedListener) return await resolvedListener(item);
+  return false;
+}
+`;
+    fs.writeFileSync(mockInboxFile, mockInboxCode, 'utf8');
+    setInboxModulePathForTest(mockInboxFile);
+
+    const fallbackDir = paths.featureDataDir('fallback');
+    fs.mkdirSync(fallbackDir, { recursive: true });
+
+    // Item A: status 'failed' with rebuildable source job
+    const recFailed = {
+      id: 'rec_failed_1',
+      root_job_id: 'job_src_failed',
+      source_job_id: 'job_src_failed',
+      kind: 'fallback',
+      agent: 'claude',
+      role: 'backend',
+      fallback_agent: 'codex',
+      attempt: 1,
+      status: 'failed',
+      next_at: null,
+      reason: 'Job failed with error',
+      created_at: new Date().toISOString(),
+      new_job_id: null,
+      error: 'Process crashed',
+    };
+
+    // Item B: status 'gave_up' WITHOUT source job files (un-rebuildable)
+    const recGaveUp = {
+      id: 'rec_gave_up_2',
+      root_job_id: 'job_src_missing',
+      source_job_id: 'job_src_missing',
+      kind: 'fallback',
+      agent: 'claude',
+      role: 'backend',
+      fallback_agent: 'codex',
+      attempt: 3,
+      status: 'gave_up',
+      next_at: null,
+      reason: 'Max attempts reached',
+      created_at: new Date().toISOString(),
+      new_job_id: null,
+      error: 'Max retries',
+    };
+
+    fs.writeFileSync(
+      path.win32.join(fallbackDir, 'recovery.json'),
+      JSON.stringify({ processed_jobs: [], items: [recFailed, recGaveUp] }),
+      'utf8'
+    );
+
+    // Write source job files for recFailed ONLY
+    fs.writeFileSync(
+      path.win32.join(paths.jobsDir, 'job_src_failed.json'),
+      JSON.stringify({ job_id: 'job_src_failed', command: 'run.ps1', agent: 'claude', role: 'backend' }),
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.win32.join(paths.jobsDir, 'job_src_failed.prompt.txt'),
+      'Execute task prompt',
+      'utf8'
+    );
+
+    await syncAttentionToInbox(ctx, true);
+
+    const mockMod = await import(`file:///${mockInboxFile.replace(/\\/g, '/')}`);
+
+    // Verify recFailed item: offers 'retry' with rebuilt body
+    const pushFailed = mockMod.pushedCalls.find((c: any) => c.input.ref?.recovery_id === 'rec_failed_1');
+    assert.ok(pushFailed);
+    assert.deepEqual(pushFailed.input.actions, ['retry', 'dismiss']);
+    assert.ok(pushFailed.input.retry, 'Must include retry body');
+    assert.equal(pushFailed.input.retry.agent, 'codex');
+
+    // Verify recGaveUp item: un-rebuildable -> offers [open, dismiss]
+    const pushGaveUp = mockMod.pushedCalls.find((c: any) => c.input.ref?.recovery_id === 'rec_gave_up_2');
+    assert.ok(pushGaveUp);
+    assert.deepEqual(pushGaveUp.input.actions, ['open', 'dismiss']);
+    assert.equal(pushGaveUp.input.retry, undefined);
+
+    // Test listener: S3 fires retry resolution for recFailed item
+    const jobsBefore = startedJobs.length;
+    const handled = await mockMod.triggerResolve({
+      id: 's3_item_failed',
+      kind: 'failed',
+      source: 's4',
+      ref: pushFailed.input.ref,
+      status: 'open',
+      resolution: {
+        action: 'retry',
+        by: 'ui',
+        at: new Date().toISOString(),
+        job_id: 's3_new_job_777',
+      },
+    });
+
+    assert.equal(handled, true);
+    assert.equal(startedJobs.length, jobsBefore, 'Listener must not spawn second job');
+
+    const updatedRecovery = JSON.parse(
+      fs.readFileSync(path.win32.join(fallbackDir, 'recovery.json'), 'utf8')
+    );
+    const updatedRec = updatedRecovery.items.find((i: any) => i.id === 'rec_failed_1');
+    assert.equal(updatedRec.status, 'started');
+    assert.equal(updatedRec.new_job_id, 's3_new_job_777');
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression Item 4 (Follow-up): reconciliation keeps mapping in inbox-pushed.json if updateInboxItemStatus is missing or throws', async () => {
+  const { paths, tmp, ctx, cleanup } = createTempEnv();
+  try {
+    resetInboxBridgeForTest();
+
+    const mockInboxFile = path.win32.join(tmp, 'mock-inbox-item4.ts');
+    const mockInboxCode = `
+export const pushedCalls = [];
+export const config = { shouldThrow: true };
+
+export function addInboxItem(paths, input, options) {
+  pushedCalls.push({ paths, input, options });
+  const item = {
+    id: 's3_item_' + Math.random().toString(36).slice(2, 8),
+    ...input,
+    status: 'open',
+    resolution: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  return { item, created: true };
+}
+
+export function updateInboxItemStatus(paths, id, status, resolution) {
+  if (config.shouldThrow) {
+    throw new Error('S3 store disk write failure');
+  }
+  return { id, status, resolution };
+}
+
+export function onInboxResolved() { return () => {}; }
+`;
+    fs.writeFileSync(mockInboxFile, mockInboxCode, 'utf8');
+    setInboxModulePathForTest(mockInboxFile);
+
+    // 1. Create a budget block
+    const budgetDir = paths.featureDataDir('budget');
+    fs.mkdirSync(budgetDir, { recursive: true });
+    const blockEntry = {
+      ts: new Date().toISOString(),
+      kind: 'day_block',
+      scope: 'day',
+      agent: 'claude',
+      reason: 'Budget cap reached',
+    };
+    const blocksFile = path.win32.join(budgetDir, 'blocks.jsonl');
+    fs.writeFileSync(blocksFile, JSON.stringify(blockEntry) + '\n', 'utf8');
+
+    // 2. Initial sync pushes item
+    await syncAttentionToInbox(ctx, true);
+
+    const mockMod = await import(`file:///${mockInboxFile.replace(/\\/g, '/')}`);
+    const s3Id = mockMod.pushedCalls[0].input.dedupe_key;
+    const policyDir = paths.featureDataDir('policy');
+    const pushedFile = path.win32.join(policyDir, 'inbox-pushed.json');
+    let pushedData = JSON.parse(fs.readFileSync(pushedFile, 'utf8'));
+    assert.ok(pushedData[s3Id]);
+
+    // 3. Remove attention item
+    fs.writeFileSync(blocksFile, '', 'utf8');
+
+    // 4. Sync while updateInboxItemStatus throws
+    mockMod.config.shouldThrow = true;
+    await syncAttentionToInbox(ctx, true);
+
+    // MUST keep mapping in inbox-pushed.json because update failed!
+    pushedData = JSON.parse(fs.readFileSync(pushedFile, 'utf8'));
+    assert.ok(pushedData[s3Id], 'Mapping must be retained when status update throws');
+
+    // 5. Next sync when update succeeds
+    mockMod.config.shouldThrow = false;
+    await syncAttentionToInbox(ctx, true);
+
+    // NOW it must be removed
+    pushedData = JSON.parse(fs.readFileSync(pushedFile, 'utf8'));
+    assert.equal(pushedData[s3Id], undefined, 'Mapping must be removed once status update succeeds');
+  } finally {
+    cleanup();
+  }
+});

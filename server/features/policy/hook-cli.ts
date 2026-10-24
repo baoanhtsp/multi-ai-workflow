@@ -7,7 +7,9 @@ import { loadAgentRegistry } from '../../lib/registry.ts';
 import { detectRegistryAgents } from '../../lib/versions.ts';
 import {
   computeCheckCommandSha,
+  computeDirtySignature,
   computeGate,
+  createCheckRunResult,
   getGitInfo,
   getProjectChecksSha256,
   isProjectChecksTrusted,
@@ -1112,22 +1114,13 @@ async function main(): Promise<void> {
           }
           const config = val.config;
           const gitInfo = getGitInfo(workdir);
+          const dirtySig = computeDirtySignature(workdir, gitInfo.porcelainLines);
           const results: CheckRunResult[] = [];
 
           // Run each check synchronously
           for (const check of config.checks) {
             const res = await runCheckProcess(check, workdir);
-            results.push({
-              id: check.id,
-              label: check.label || check.id,
-              state: res.state,
-              exit_code: res.exit_code,
-              duration_ms: res.duration_ms,
-              output_tail: res.output_tail,
-              at: new Date().toISOString(),
-              head: gitInfo.head,
-              command_sha: check.command_sha || computeCheckCommandSha(check),
-            });
+            results.push(createCheckRunResult(check, res, gitInfo, dirtySig));
           }
 
           // Evaluate gate (skip spec_guard and review as per design 3.4)

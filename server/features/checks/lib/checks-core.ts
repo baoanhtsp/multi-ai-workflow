@@ -50,6 +50,32 @@ export interface CheckRunResult {
   command_sha?: string;
 }
 
+export function createCheckRunResult(
+  check: CheckItem,
+  res: {
+    state: 'pass' | 'fail' | 'warn' | 'skip' | 'running' | 'untrusted' | 'timeout';
+    exit_code?: number | null;
+    duration_ms?: number;
+    output_tail?: string;
+  },
+  gitInfo: { head: string },
+  dirtySig: string,
+  at?: string
+): CheckRunResult {
+  return {
+    id: check.id,
+    label: check.label || check.id,
+    state: res.state,
+    exit_code: res.exit_code ?? 0,
+    duration_ms: res.duration_ms ?? 0,
+    output_tail: res.output_tail ?? '',
+    at: at || new Date().toISOString(),
+    head: gitInfo.head,
+    dirty_signature: dirtySig,
+    command_sha: check.command_sha || computeCheckCommandSha(check),
+  };
+}
+
 export interface GateItem {
   id: string;
   label: string;
@@ -982,13 +1008,15 @@ export function computeDirtySignature(
             const contentHash = crypto.createHash('sha1').update(content).digest('hex');
             hasher.update(`\n${u}:content:${contentHash}`);
           } else {
+            // Files > 2 MB keep size+mtime (accepted trade-off to avoid large file I/O overhead)
             hasher.update(`\n${u}:${stat.size}:${stat.mtimeMs}`);
           }
         } else {
           hasher.update(`\n${u}:${stat.size}:${stat.mtimeMs}`);
         }
       } catch {
-        hasher.update(`\n${u}:missing`);
+        // Any read error of an untracked file fails closed with a unique nonce
+        return `nonce_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
       }
     }
   }

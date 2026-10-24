@@ -251,7 +251,12 @@ export async function handleInboxResolved(item: InboxItem): Promise<boolean> {
         }
 
         if (targetRec) {
-          if (targetRec.status === 'waiting' || targetRec.status === 'suggested') {
+          if (
+            targetRec.status === 'waiting' ||
+            targetRec.status === 'suggested' ||
+            targetRec.status === 'gave_up' ||
+            targetRec.status === 'failed'
+          ) {
             targetRec.status = 'started';
             targetRec.new_job_id = newJobId;
             writeJsonAtomic(recFile, recData);
@@ -265,7 +270,7 @@ export async function handleInboxResolved(item: InboxItem): Promise<boolean> {
               },
             });
           } else {
-            // no-op if no longer waiting/suggested; log info audit
+            // no-op if no longer waiting/suggested/gave_up/failed; log info audit
             appendJsonl(path.win32.join(fallbackDir, 'audit.jsonl'), {
               ts: new Date().toISOString(),
               action: 'inbox_retry_ignored',
@@ -334,20 +339,26 @@ export async function syncAttentionToInbox(ctx: MawFeatureContext, force = false
   const currentAttIdSet = new Set(attentionItems.map((it) => it.id));
   let changed = false;
 
-  // N3: Reconcile the inbox: close S3 items whose S4 attention item is gone
+  // N3 & Item 4: Reconcile the inbox: close S3 items whose S4 attention item is gone
+  // Only remove from inbox-pushed.json if update succeeded; keep mapping if missing or throws
   for (const [attId, entry] of Object.entries(pushedMap)) {
     if (!currentAttIdSet.has(attId)) {
       if (typeof inbox.updateInboxItemStatus === 'function') {
         try {
-          inbox.updateInboxItemStatus(ctx.paths, entry.s3_id, 'done', {
+          const res = inbox.updateInboxItemStatus(ctx.paths, entry.s3_id, 'done', {
             action: 'done',
             by: 's4',
             at: new Date().toISOString(),
           });
-        } catch {}
+          if (res) {
+            delete pushedMap[attId];
+            changed = true;
+          }
+        } catch {
+          // Keep mapping in pushedMap when update throws, retry on next sync
+        }
       }
-      delete pushedMap[attId];
-      changed = true;
+      // If updateInboxItemStatus is missing, keep mapping in pushedMap
     }
   }
 
@@ -393,19 +404,27 @@ export async function syncAttentionToInbox(ctx: MawFeatureContext, force = false
       actions = ['dismiss'];
     }
 
+    let recId: string | undefined;
     const recAction = item.actions?.find((a) => a.action === 'recovery_apply');
-    const recId = (recAction?.body as any)?.id;
+    if (recAction && (recAction.body as any)?.id) {
+      recId = (recAction.body as any).id;
+    } else if (item.source === 'fallback' && item.id.startsWith('att_rec_')) {
+      recId = item.id.slice('att_rec_'.length);
+    }
     const aprAction = item.actions?.find((a) => a.action === 'policy_approve');
     const aprId = (aprAction?.body as any)?.id;
 
-    // N1: Rebuild run body for recovery/fallback items so S3 can run it on retry
+    // N1 & Item 3: Rebuild run body for recovery/fallback items so S3 can run it on retry
     let retryBody: Record<string, unknown> | null = null;
-    if (recId) {
-      const fallbackDir = ctx.paths.featureDataDir('fallback');
-      const recFile = path.win32.join(fallbackDir, 'recovery.json');
+    const fallbackDir = ctx.paths.featureDataDir('fallback');
+    const recFile = path.win32.join(fallbackDir, 'recovery.json');
+    if (recId || (item.source === 'fallback' && item.job_id)) {
       const recData = readJsonSafe<RecoveryData>(recFile, { processed_jobs: [], items: [] }).data;
-      const recItem = recData.items.find((r) => r.id === recId);
+      const recItem = recId
+        ? recData.items.find((r) => r.id === recId)
+        : recData.items.find((r) => r.source_job_id === item.job_id);
       if (recItem) {
+        recId = recItem.id;
         const sourceMetaFile = path.win32.join(ctx.paths.jobsDir, `${recItem.source_job_id}.json`);
         const promptFile = path.win32.join(ctx.paths.jobsDir, `${recItem.source_job_id}.prompt.txt`);
         let meta: Record<string, unknown> = {};

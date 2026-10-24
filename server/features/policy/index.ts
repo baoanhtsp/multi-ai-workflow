@@ -229,6 +229,14 @@ export function collectAttentionItems(ctx: MawFeatureContext): AttentionItem[] {
           title: `Recovery gave up on job ${rec.source_job_id}`,
           detail: rec.reason,
           job_id: rec.source_job_id,
+          actions: [
+            {
+              id: 'apply',
+              label: 'Retry',
+              action: 'recovery_apply',
+              body: { id: rec.id },
+            },
+          ],
         });
       } else if (rec.status === 'failed') {
         items.push({
@@ -240,6 +248,14 @@ export function collectAttentionItems(ctx: MawFeatureContext): AttentionItem[] {
           title: `Recovery failed for job ${rec.source_job_id}`,
           detail: rec.error || 'Failed to start recovery job',
           job_id: rec.source_job_id,
+          actions: [
+            {
+              id: 'apply',
+              label: 'Retry',
+              action: 'recovery_apply',
+              body: { id: rec.id },
+            },
+          ],
         });
       }
     }

@@ -15,6 +15,7 @@ import {
   computeCheckCommandSha,
   computeDirtySignature,
   computeGate,
+  createCheckRunResult,
   createDefaultChecksConfig,
   detectChecks,
   getGitInfo,
@@ -265,18 +266,7 @@ export const feature: MawFeature = {
             if (runInfo.cancelled) break;
 
             const runIdx = results.findIndex((r) => r.id === check.id);
-            const runningEntry: CheckRunResult = {
-              id: check.id,
-              label: check.label || check.id,
-              state: 'running',
-              exit_code: 0,
-              duration_ms: 0,
-              output_tail: '',
-              at: new Date().toISOString(),
-              head: gitInfo.head,
-              dirty_signature: dirtySig,
-              command_sha: check.command_sha || computeCheckCommandSha(check),
-            };
+            const runningEntry = createCheckRunResult(check, { state: 'running' }, gitInfo, dirtySig);
             if (runIdx >= 0) results[runIdx] = runningEntry;
             else results.push(runningEntry);
             saveStoredResults(ctx.paths, projectPath, results);
@@ -288,18 +278,7 @@ export const feature: MawFeature = {
             // Item 11: If cancelled while check was executing, do not save finished result
             if (runInfo.cancelled) break;
 
-            const finishedEntry: CheckRunResult = {
-              id: check.id,
-              label: check.label || check.id,
-              state: res.state,
-              exit_code: res.exit_code,
-              duration_ms: res.duration_ms,
-              output_tail: res.output_tail,
-              at: new Date().toISOString(),
-              head: gitInfo.head,
-              dirty_signature: dirtySig,
-              command_sha: check.command_sha || computeCheckCommandSha(check),
-            };
+            const finishedEntry = createCheckRunResult(check, res, gitInfo, dirtySig);
 
             const finalIdx = results.findIndex((r) => r.id === check.id);
             if (finalIdx >= 0) results[finalIdx] = finishedEntry;

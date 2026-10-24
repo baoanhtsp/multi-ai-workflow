@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { resolveServerPaths } from '../../../lib/paths.ts';
+import { computeGate, getStoredResults } from '../../checks/lib/checks-core.ts';
 import { writeJsonAtomic } from '../lib/s4-core.ts';
 
 function createTempEnv() {
@@ -400,6 +401,77 @@ test('regression Item 12: hook-cli job-start retries recovery.json lookup when j
     assert.equal(res.exitCode, 0);
     assert.equal(res.parsed.block, false);
     assert.equal(res.parsed.env?.MAW_TEAM_RUN_ID, 'root_job_abc');
+  } finally {
+    cleanup();
+  }
+});
+
+test('regression Item 1 (Follow-up): hook-cli before-review on temp git repo with passing check does not block and leaves check pass (not stale)', async () => {
+  const { paths, tmp, cleanup } = createTempEnv();
+  try {
+    const gitDir = path.win32.join(tmp, 'git_check_proj');
+    fs.mkdirSync(gitDir, { recursive: true });
+
+    // Initialize git repo and make initial commit
+    execFileSync('git', ['init'], { cwd: gitDir, windowsHide: true });
+    execFileSync('git', ['config', 'user.name', 'Test User'], { cwd: gitDir, windowsHide: true });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: gitDir, windowsHide: true });
+    const dummyFile = path.win32.join(gitDir, 'file.txt');
+    fs.writeFileSync(dummyFile, 'hello\n', 'utf8');
+    execFileSync('git', ['add', 'file.txt'], { cwd: gitDir, windowsHide: true });
+    execFileSync('git', ['commit', '-m', 'initial commit'], { cwd: gitDir, windowsHide: true });
+
+    // Create .maw/checks.json with passing check
+    const mawDir = path.win32.join(gitDir, '.maw');
+    fs.mkdirSync(mawDir, { recursive: true });
+    const checksConfig = {
+      version: 1,
+      checks: [
+        {
+          id: 'test_pass',
+          label: 'Test Pass',
+          command: [process.execPath, '-e', 'console.log("SUCCESS"); process.exit(0);'],
+          required: true,
+        },
+      ],
+      spec_guard: false,
+      min_review_score: 0,
+      todo_max: 10,
+    };
+    const content = JSON.stringify(checksConfig);
+    fs.writeFileSync(path.win32.join(mawDir, 'checks.json'), content, 'utf8');
+
+    // Trust it
+    const sha256 = crypto.createHash('sha256').update(content).digest('hex');
+    const trustedFile = path.win32.join(paths.featureDataDir('checks'), 'trusted.json');
+    writeJsonAtomic(trustedFile, { [gitDir.toLowerCase()]: sha256 });
+
+    // Run hook-cli before-review
+    const res = await runHookCli(
+      'before-review',
+      JSON.stringify({ project: gitDir }),
+      { MAW_HOME: paths.mawHome, USERPROFILE: paths.userProfile }
+    );
+
+    assert.equal(res.exitCode, 0);
+    assert.equal(res.parsed.block, false, `before-review must not block, reason: ${res.parsed.reason}`);
+    assert.ok(res.parsed.lines.some((l: string) => l.includes('test gate green')));
+
+    // Verify stored results: must have state pass and valid dirty_signature / command_sha, NOT stale!
+    const projectResults = getStoredResults(paths, gitDir);
+    assert.ok(Array.isArray(projectResults) && projectResults.length > 0);
+    const passResult = projectResults.find((r: any) => r.id === 'test_pass');
+    assert.ok(passResult);
+    assert.equal(passResult.state, 'pass');
+    assert.ok(passResult.dirty_signature, 'dirty_signature must be stored');
+    assert.ok(passResult.command_sha, 'command_sha must be stored');
+
+    // Gate evaluation must be green, not stale!
+    const gate = await computeGate(paths, gitDir, checksConfig as any, projectResults, true, true);
+    assert.equal(gate.green, true, 'gate must evaluate to green without staleness');
+    const item = gate.items.find((it) => it.id === 'test_pass');
+    assert.ok(item);
+    assert.equal(item.state, 'pass', 'item state must be pass, not stale');
   } finally {
     cleanup();
   }
