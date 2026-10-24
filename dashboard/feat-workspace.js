@@ -259,17 +259,11 @@
   for (const p of window.MAW_WS_PANELS || []) M.ws.addPanel(p);
   window.MAW_WS_PANELS = { push: p => M.ws.addPanel(p) };
 
-  // ---------- view ----------
-  M.addView({
-    id: 'workspace',
-    title: () => t('ws.view'),
-    render(el) { S.el = el; buildSkeleton(el); },
-    onShow() { fitHeight(); refreshState(); refreshConv(); schedule(0); },
-  });
 
   // The page header wraps to two or three rows on narrow screens; the view fills what is left.
   function fitHeight() { const top = document.querySelector('.topbar'); if (S.el && top) S.el.style.setProperty('--ws-top', top.offsetHeight + 'px'); }
   window.addEventListener('resize', () => { if (visible()) fitHeight(); });
+  if (window.ResizeObserver) { const top = document.querySelector('.topbar'); if (top) new ResizeObserver(() => fitHeight()).observe(top); }
 
   function buildSkeleton(el) {
     el.classList.add('ws-root');
@@ -377,6 +371,8 @@
       S.loadErr = '';
       if (S.selAgent && !agentById(S.selAgent)) { S.selAgent = ''; S.conv = null; S.convs = []; }
       if (!S.selAgent && S.agents.length) { await selectAgent(S.agents[0].id, true); return; }
+      // First load with an agent remembered from last time: load its conversations once.
+      if (S.selAgent && S.convsFor !== S.selAgent) { await selectAgent(S.selAgent, true); return; }
     } catch (e) {
       S.loadErr = errMsg(e);
       if (!quiet) console.error('[workspace]', e);
@@ -386,8 +382,9 @@
 
   async function loadConvs() {
     if (!S.selAgent) { S.convs = []; return; }
+    S.convsFor = S.selAgent;
     const d = await get('chat_list', { agent_id: S.selAgent });
-    S.convs = (d.conversations || []).filter(c => c.kind !== 'handoff' || c.id === S.selConv);
+    S.convs = d.conversations || [];
   }
   async function refreshConv() {
     if (!S.selConv) return;
@@ -852,7 +849,7 @@
     const a = curAgent();
     if (!a) { box.innerHTML = ''; return; }
     box.innerHTML = S.convs.map(c => `<div class="ws-ctab ${c.id === S.selConv ? 'is-sel' : ''}" role="tab" aria-selected="${c.id === S.selConv}">
-        <button type="button" class="ws-ctab-b" data-conv="${esc(c.id)}" title="${esc(c.title)}">${c.active_job_id ? '<span class="ws-dot ws-thinking"></span>' : ''}${esc(clip(c.title || '…', 24))}</button>
+        <button type="button" class="ws-ctab-b" data-conv="${esc(c.id)}" title="${esc(c.title)}">${c.active_job_id ? '<span class="ws-dot ws-thinking"></span>' : ''}${c.kind === 'handoff' ? '<span class="ws-hk" aria-hidden="true">⇄</span>' : ''}${esc(clip(c.title || '…', 24))}</button>
         <button type="button" class="ws-ctab-x" data-convmenu="${esc(c.id)}" aria-label="⋯">⋯</button></div>`).join('')
       + `<button type="button" class="btn btn-sm ws-ctab-new" id="wsNewConv" title="${esc(t('ws.newConv'))}" aria-label="${esc(t('ws.newConv'))}">+</button>`;
     qsa('[data-conv]', box).forEach(b => b.onclick = () => openConversation(b.dataset.conv));
@@ -1285,6 +1282,14 @@
       } }],
     });
   }
+
+  // ---------- view (registered last: addView() renders synchronously) ----------
+  M.addView({
+    id: 'workspace',
+    title: () => t('ws.view'),
+    render(el) { S.el = el; buildSkeleton(el); },
+    onShow() { fitHeight(); refreshState(); refreshConv(); schedule(0); },
+  });
 
   // Lets feat-teams.js / feat-palette.js start once the workspace exists.
   const q = window.MAW_WS_READY || [];
