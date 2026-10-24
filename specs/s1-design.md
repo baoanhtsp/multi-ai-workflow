@@ -251,7 +251,7 @@ Responses: `{ ok, output }` (stdout+stderr tail, 4000 chars) plus the parsed dat
 ## 5b. C1 — Cleanup of dashboard-made branches, worktrees and checkpoints (feature `worktrees`, file `server/features/worktrees/cleanup.ts`)
 
 ### 5b.1 Settings
-`featureDataDir('worktrees')/cleanup-config.json` (defaults in brackets), read/written by `GET cleanup_config` / `POST cleanup_config { …partial }` (integers, validated ranges):
+`featureDataDir('worktrees')/cleanup-config.json` (defaults in brackets), read by `GET cleanup_config`, written by `POST cleanup_config_save { …partial }` (integers, validated ranges):
 - `keep_after_merge_days` [0] (0–90): 0 = `worktree_merge` removes the worktree + deletes `maw/<name>` right away (today's behaviour). N > 0 = keep both; the record gets `remove_after = merged.at + N days` and the sweep removes them later. The merge body's `remove` still overrides per call; the UI checkbox defaults to `keep_after_merge_days === 0`.
 - `stale_branch_days` [14] (1–365): unmerged `maw/*` older than this is a (risky) candidate.
 - `trash_days` [30] (1–365): age after which `refs/maw/trash/*` backups are purged.
