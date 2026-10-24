@@ -16,34 +16,40 @@ When the user asks you to act as **Leader / Tech Lead** or coordinate with **Ant
 
 ## 2. How to Control & Delegate Tasks to Antigravity (`invoke-antigravity.ps1`)
 
-You can directly command Antigravity on this machine via PowerShell using `C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1` (which wraps `C:\Users\Admin\.gemini\antigravity\bin\agentapi.bat`):
+You can directly command Antigravity on this machine via PowerShell using `C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1` (which features a **Zero-Config Live Self-Healing Bridge** around `agentapi.bat`):
 
 ### A. List active Antigravity conversations:
 ```powershell
 powershell -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1" -Action list-active
 ```
 
-### B. Send a Backend task or review feedback to the currently open Antigravity conversation:
+### B. Send a Backend task or review feedback to Antigravity and wait for completion (`-WorkDir` & `-Wait`):
 ```powershell
 powershell -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1" `
   -Action send-latest `
+  -WorkDir "C:\laragon\www\<project>" `
   -Title "Task from Claude Leader" `
-  -Prompt "Hãy thực hiện phần Backend tại C:\laragon\www\<project> theo SPEC.md: ..."
+  -Prompt "Hãy thực hiện phần Backend tại C:\laragon\www\<project> theo SPEC.md: ..." `
+  -Wait
 ```
+*(Tip: `-WorkDir` automatically targets the Antigravity window open for that specific project folder; `-Wait` waits until Antigravity finishes its turn and returns Antigravity's complete untruncated response from `transcript_full.jsonl` directly in one command, instead of manually polling `-Action status` in a separate loop! You can also pass `-PromptFile "<path>"` instead of `-Prompt` to send a long prompt from a file.)*
 
 ### C. Spawn a brand-new Antigravity conversation for a task:
 ```powershell
 powershell -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1" `
   -Action new `
+  -WorkDir "C:\laragon\www\<project>" `
   -Model pro `
   -Title "Backend Implementation" `
-  -Prompt "Thư mục dự án: C:\laragon\www\<project>. Hãy đọc SPEC.md và viết toàn bộ phần Backend + chạy test."
+  -Prompt "Thư mục dự án: C:\laragon\www\<project>. Hãy đọc SPEC.md và viết toàn bộ phần Backend + chạy test." `
+  -Wait
 ```
 
-### D. Check Antigravity's progress & read its latest response:
+### D. Check Antigravity's progress & read its full untruncated response manually (if not using `-Wait`):
 ```powershell
 powershell -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-antigravity.ps1" `
   -Action status `
+  -WorkDir "C:\laragon\www\<project>" `
   -ConversationId "<optional_conversation_id>"
 ```
 

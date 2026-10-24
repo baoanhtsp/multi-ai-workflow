@@ -33,14 +33,32 @@ description: >-
 
 ### A. Calling Claude Code ([invoke-claude.ps1](./scripts/invoke-claude.ps1))
 
+> **Tip**: Pass `-IncludeGitDiff` or `-PromptFile "<path>"` when sending code/diffs so PowerShell does not interpolate `$variables` in PHP/JS/Bash snippets.
+
 ```powershell
+# 1. Standard architecture / frontend delegation:
 & "$env:USERPROFILE\.gemini\config\skills\claude-leader\scripts\invoke-claude.ps1" `
   -Role "<architect|frontend|reviewer|ui-tweak>" `
   -WorkDir "<project_path>" `
   -Prompt "<compact_prompt_with_precollected_context>"
+
+# 2. Safe Code Review with automatic git diff piping (avoids PowerShell $ variable interpolation):
+& "$env:USERPROFILE\.gemini\config\skills\claude-leader\scripts\invoke-claude.ps1" `
+  -Role "reviewer" `
+  -WorkDir "<project_path>" `
+  -IncludeGitDiff `
+  -Prompt "Review Backend changes against SPEC.md and score X/10."
+
+# 3. Passing a large prompt from a file:
+& "$env:USERPROFILE\.gemini\config\skills\claude-leader\scripts\invoke-claude.ps1" `
+  -Role "architect" `
+  -WorkDir "<project_path>" `
+  -PromptFile "<path_to_prompt_file>"
 ```
 
 ### B. Calling OpenAI Codex CLI ([invoke-codex.ps1](./scripts/invoke-codex.ps1))
+
+> Supports `-PromptFile "<path>"` and `-IncludeGitDiff` for `critic` and `coder` roles to safely pipe diffs and long prompts via stdin.
 
 ```powershell
 # 1. Review uncommitted git diff or a specific commit:
@@ -49,13 +67,14 @@ description: >-
   -WorkDir "<project_path>" `
   -CommitSha "<optional_sha>"
 
-# 2. Read-only architectural or security critique:
+# 2. Read-only architectural or security critique (supports -IncludeGitDiff and -PromptFile):
 & "$env:USERPROFILE\.gemini\config\skills\claude-leader\scripts\invoke-codex.ps1" `
   -Role "critic" `
   -WorkDir "<project_path>" `
+  -IncludeGitDiff `
   -Prompt "<compact_prompt_with_code_or_spec>"
 
-# 3. Write code or tests (optionally in an isolated Git worktree):
+# 3. Write code or tests (optionally in an isolated Git worktree, supports -PromptFile):
 & "$env:USERPROFILE\.gemini\config\skills\claude-leader\scripts\invoke-codex.ps1" `
   -Role "coder" `
   -WorkDir "<project_path>" `
@@ -74,5 +93,5 @@ description: >-
    - **100% Frontend**: Claude (`invoke-claude.ps1 -Role frontend` or `ui-tweak`) implements all UI/Frontend files.
 3. **Bounded Review Loop (Max 2 Rounds)**:
    - Run automated tests first.
-   - Submit `git diff` + test logs to Claude (`invoke-claude.ps1 -Role reviewer`) and/or Codex (`invoke-codex.ps1 -Role review-diff` / `critic`).
+   - Submit `git diff` + test logs to Claude (`invoke-claude.ps1 -Role reviewer -IncludeGitDiff`) and/or Codex (`invoke-codex.ps1 -Role review-diff` / `critic`).
    - Fix all blocking findings until `APPROVED`, then merge branches and `git commit`.
