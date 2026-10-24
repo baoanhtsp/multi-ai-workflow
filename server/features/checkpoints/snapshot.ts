@@ -1,9 +1,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { appendAuditEntry } from '../../lib/audit.ts';
 import { getTempDir, isDirectorySafe, isFileSafe } from '../../lib/paths.ts';
-import { runCommand, type RunCommandOptions } from '../../lib/proc.ts';
+import { runCommand, type RunCommandOptions, type RunCommandResult } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 
 export interface CheckpointStats {
@@ -27,6 +28,7 @@ export interface CheckpointRecord {
   round: number | null;
   workdir: string;
   created_at: string;
+  created_at_unix: number;
   head_moved: boolean;
   stats: CheckpointStats | null;
   [key: string]: unknown;
@@ -54,11 +56,29 @@ export interface DiffResult {
 
 export const REF_REGEX = /^(?!.*\.\.)(?!.*\/\/)(?!.*@\{)[A-Za-z0-9][A-Za-z0-9._\/-]{0,99}$/;
 export const COMMIT_ID_REGEX = /^[0-9a-f]{7,40}$/;
+export const FULL_HEX_SHA_REGEX = /^[0-9a-f]{40}$/;
 export const REMOTE_NAME_REGEX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export const JOB_ID_REGEX = /^job_[A-Za-z0-9_]{1,80}$/;
 export const JOB_KEY_REGEX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
 export const CHECKPOINT_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}\/\d{4}$/;
 export const WORKTREE_NAME_REGEX = /^[a-z0-9][a-z0-9._-]{0,47}$/;
+
+// C9: Module-level stats cache (prevSha..curSha => CheckpointStats), capped at 5000 entries
+const statsCache = new Map<string, CheckpointStats>();
+
+function getCachedStats(prevCommit: string, curCommit: string): CheckpointStats | undefined {
+  return statsCache.get(`${prevCommit}..${curCommit}`);
+}
+
+function setCachedStats(prevCommit: string, curCommit: string, stats: CheckpointStats): void {
+  if (statsCache.size >= 5000) {
+    const keys = Array.from(statsCache.keys()).slice(0, 1000);
+    for (const k of keys) {
+      statsCache.delete(k);
+    }
+  }
+  statsCache.set(`${prevCommit}..${curCommit}`, stats);
+}
 
 export function assertNotOption(val: string, label: string): void {
   if (val.startsWith('-')) {
@@ -110,6 +130,61 @@ export async function gitRun(
   }
 
   return res;
+}
+
+export function gitRunWithStdin(
+  args: readonly string[],
+  stdinData: Buffer | string,
+  options: {
+    cwd: string;
+    timeoutMs?: number;
+    env?: NodeJS.ProcessEnv;
+  }
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const mergedEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      GIT_TERMINAL_PROMPT: '0',
+      GIT_OPTIONAL_LOCKS: '0',
+      ...options.env,
+    };
+
+    const child = spawn('git', [...args], {
+      cwd: options.cwd,
+      env: mergedEnv,
+      shell: false,
+      windowsHide: true,
+    });
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+
+    const timeout = setTimeout(() => {
+      try {
+        child.kill();
+      } catch {}
+      resolve({
+        code: 124,
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        stderr: Buffer.concat(stderrChunks).toString('utf8') + '\nTimed out',
+      });
+    }, options.timeoutMs ?? 30000);
+
+    child.stdout.on('data', (d: Buffer) => stdoutChunks.push(d));
+    child.stderr.on('data', (d: Buffer) => stderrChunks.push(d));
+
+    child.on('close', (code) => {
+      clearTimeout(timeout);
+      resolve({
+        code: typeof code === 'number' ? code : 1,
+        stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+        stderr: Buffer.concat(stderrChunks).toString('utf8'),
+      });
+    });
+
+    child.stdin.write(stdinData);
+    child.stdin.end();
+  });
 }
 
 export async function resolveGitTopLevel(projectPath: string): Promise<string> {
@@ -214,21 +289,23 @@ export function validateRelativePath(relPath: string): string {
 
 /**
  * Creates a standalone git tree capturing the whole working tree without touching HEAD or real index.
+ * C6: Always operates at repository top-level.
  */
 export async function snapshotTree(cwd: string): Promise<string> {
+  const top = await resolveGitTopLevel(cwd);
   const tempDir = getTempDir();
   const rand = crypto.randomBytes(6).toString('hex');
   const tmpIndex = path.win32.join(tempDir, `maw-cp-${rand}.idx`);
 
   try {
     const gitPathRes = await gitRun(['rev-parse', '--git-path', 'index'], {
-      cwd,
+      cwd: top,
       allowFailure: true,
     });
     if (gitPathRes.code === 0 && gitPathRes.stdout.trim()) {
       let realIdx = gitPathRes.stdout.trim();
       if (!path.win32.isAbsolute(realIdx)) {
-        realIdx = path.win32.join(cwd, realIdx);
+        realIdx = path.win32.join(top, realIdx);
       }
       if (isFileSafe(realIdx)) {
         try {
@@ -240,12 +317,12 @@ export async function snapshotTree(cwd: string): Promise<string> {
     }
 
     await gitRun(['add', '-A', '--', '.'], {
-      cwd,
+      cwd: top,
       env: { GIT_INDEX_FILE: tmpIndex },
     });
 
     const writeRes = await gitRun(['write-tree'], {
-      cwd,
+      cwd: top,
       env: { GIT_INDEX_FILE: tmpIndex },
     });
 
@@ -315,436 +392,67 @@ export function parseCheckpointCommitMessage(rawMessage: string): CheckpointComm
 }
 
 export function formatCheckpointCommitMessage(meta: CheckpointCommitMetadata): string {
+  // C7: Sanitize label, agent, role to prevent trailer forgery
+  const cleanLabel = meta.label.replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 200);
+  const cleanAgent = /^[a-z0-9-]{0,32}$/.test(meta.agent) ? meta.agent : '';
+  const cleanRole = /^[a-z0-9-]{0,32}$/.test(meta.role) ? meta.role : '';
   const roundStr = meta.round !== null && meta.round !== undefined ? String(meta.round) : '';
+
   return [
-    `maw checkpoint: ${meta.label}`,
+    `maw checkpoint: ${cleanLabel}`,
     '',
     `MAW-Event: ${meta.event}`,
     `MAW-Job: ${meta.jobKey}`,
-    `MAW-Agent: ${meta.agent}`,
-    `MAW-Role: ${meta.role}`,
+    `MAW-Agent: ${cleanAgent}`,
+    `MAW-Role: ${cleanRole}`,
     `MAW-Round: ${roundStr}`,
     `MAW-Workdir: ${meta.workdir}`,
   ].join('\n');
 }
 
-export async function createCheckpoint(
+/**
+ * C1 & W10: Single unified diff parser for snapshots, worktrees, and git actions.
+ * Dropping -M eliminates "old => new" rename ambiguities.
+ */
+export async function diffRevisions(
   cwd: string,
-  options: {
-    jobKey: string;
-    event?: string;
-    label?: string;
-    agent?: string;
-    role?: string;
-    round?: number | null;
-    retention?: number;
-    configRetention?: number;
-  }
-): Promise<{ ok: true; checkpoint: CheckpointRecord; created: boolean }> {
-  await resolveGitTopLevel(cwd);
-
-  const jobKey = validateJobKey(options.jobKey);
-  const event = options.event ?? 'manual';
-  const label = options.label ?? `checkpoint for ${jobKey}`;
-  const agent = options.agent ?? '';
-  const role = options.role ?? '';
-  const round = options.round ?? null;
-  const normCwd = normalizeWorkdir(cwd);
-
-  const currentHeadRes = await gitRun(['rev-parse', '--verify', '-q', 'HEAD'], {
-    cwd,
-    allowFailure: true,
-  });
-  const currentHead = currentHeadRes.code === 0 ? currentHeadRes.stdout.trim() : null;
-
-  const tree = await snapshotTree(cwd);
-
-  const refPrefix = `refs/maw/checkpoints/${jobKey}/`;
-  const listRefsRes = await gitRun(
-    ['for-each-ref', '--format=%(refname)', refPrefix],
-    { cwd, allowFailure: true }
-  );
-
-  let maxN = 0;
-  let newestRef: string | null = null;
-  if (listRefsRes.code === 0 && listRefsRes.stdout.trim()) {
-    const lines = listRefsRes.stdout.trim().split(/\r?\n/).filter((l) => l.trim().length > 0);
-    for (const r of lines) {
-      const match = r.match(/\/(\d{4})$/);
-      if (match) {
-        const num = Number.parseInt(match[1]!, 10);
-        if (num > maxN) {
-          maxN = num;
-          newestRef = r;
-        }
-      }
-    }
-  }
-
-  // Dedup: if newest checkpoint of the same job key has the same tree, return it without creating
-  if (newestRef) {
-    const treeRes = await gitRun(['rev-parse', `${newestRef}^{tree}`], {
-      cwd,
-      allowFailure: true,
-    });
-    if (treeRes.code === 0 && treeRes.stdout.trim() === tree) {
-      const commitRes = await gitRun(['rev-parse', newestRef], { cwd, allowFailure: true });
-      const commitSha = commitRes.code === 0 ? commitRes.stdout.trim() : '';
-      const existingId = `${jobKey}/${String(maxN).padStart(4, '0')}`;
-      const msgRes = await gitRun(['log', '-1', '--format=%B', newestRef], { cwd, allowFailure: true });
-      const meta = parseCheckpointCommitMessage(msgRes.stdout);
-
-      const parentRes = await gitRun(['rev-parse', '--verify', '-q', `${commitSha}^@`], {
-        cwd,
-        allowFailure: true,
-      });
-      const parent = parentRes.code === 0 && parentRes.stdout.trim() ? parentRes.stdout.trim().split(/\s+/)[0]! : null;
-
-      const dateRes = await gitRun(['log', '-1', '--format=%aI', newestRef], { cwd, allowFailure: true });
-      const createdAt = dateRes.code === 0 && dateRes.stdout.trim() ? dateRes.stdout.trim() : new Date().toISOString();
-
-      const existingRecord: CheckpointRecord = {
-        id: existingId,
-        job_key: jobKey,
-        n: maxN,
-        commit: commitSha,
-        tree,
-        parent,
-        event: meta.event || event,
-        label: meta.label || label,
-        agent: meta.agent || agent,
-        role: meta.role || role,
-        round: meta.round ?? round,
-        workdir: meta.workdir || normCwd,
-        created_at: createdAt,
-        head_moved: parent !== currentHead,
-        stats: null,
-      };
-
-      return {
-        ok: true,
-        checkpoint: existingRecord,
-        created: false,
-      };
-    }
-  }
-
-  const nextN = maxN + 1;
-  const nStr = String(nextN).padStart(4, '0');
-  const newRef = `${refPrefix}${nStr}`;
-  const newId = `${jobKey}/${nStr}`;
-
-  const metaContent = formatCheckpointCommitMessage({
-    label,
-    event,
-    jobKey,
-    agent,
-    role,
-    round,
-    workdir: normCwd,
-  });
-
-  const tempDir = getTempDir();
-  const msgFile = path.win32.join(tempDir, `maw-msg-${crypto.randomBytes(6).toString('hex')}.txt`);
-  fs.writeFileSync(msgFile, metaContent, 'utf8');
-
-  let commitSha = '';
-  try {
-    const nowIso = new Date().toISOString();
-    const commitArgs: string[] = ['commit-tree', tree];
-    if (currentHead) {
-      commitArgs.push('-p', currentHead);
-    }
-    commitArgs.push('-F', msgFile);
-
-    const commitRes = await gitRun(commitArgs, {
-      cwd,
-      env: {
-        GIT_AUTHOR_NAME: 'MAW Checkpoint',
-        GIT_AUTHOR_EMAIL: 'maw@localhost',
-        GIT_COMMITTER_NAME: 'MAW Checkpoint',
-        GIT_COMMITTER_EMAIL: 'maw@localhost',
-        GIT_AUTHOR_DATE: nowIso,
-        GIT_COMMITTER_DATE: nowIso,
-      },
-    });
-
-    commitSha = commitRes.stdout.trim();
-  } finally {
-    try {
-      if (fs.existsSync(msgFile)) {
-        fs.unlinkSync(msgFile);
-      }
-    } catch {
-      // Ignore msgFile cleanup error
-    }
-  }
-
-  await gitRun(['update-ref', newRef, commitSha], { cwd });
-
-  // Retention pruning for this workdir
-  const retention = Math.min(
-    500,
-    Math.max(5, options.retention ?? options.configRetention ?? 50)
-  );
-
-  await pruneCheckpoints(cwd, normCwd, retention);
-
-  const createdAt = new Date().toISOString();
-  const checkpointRecord: CheckpointRecord = {
-    id: newId,
-    job_key: jobKey,
-    n: nextN,
-    commit: commitSha,
-    tree,
-    parent: currentHead,
-    event,
-    label,
-    agent,
-    role,
-    round,
-    workdir: normCwd,
-    created_at: createdAt,
-    head_moved: false,
-    stats: null,
-  };
-
-  return {
-    ok: true,
-    checkpoint: checkpointRecord,
-    created: true,
-  };
-}
-
-export async function pruneCheckpoints(
-  cwd: string,
-  normalizedWorkdir: string,
-  retention: number
-): Promise<number> {
-  const listRes = await gitRun(
-    [
-      'for-each-ref',
-      '--format=%(refname)%00%(objectname)%00%(authordate:iso-strict)%00%(contents)%00@@MAW_END@@%0a',
-      'refs/maw/checkpoints/',
-    ],
-    { cwd, allowFailure: true }
-  );
-
-  if (listRes.code !== 0 || !listRes.stdout.trim()) {
-    return 0;
-  }
-
-  const entries: Array<{ ref: string; commit: string; date: string; workdir: string }> = [];
-  const rawEntries = listRes.stdout.split('\0@@MAW_END@@\n').map((s) => s.replace(/^\n+/, ''));
-  for (const raw of rawEntries) {
-    if (!raw.trim()) continue;
-    const parts = raw.split('\0');
-    if (parts.length < 4) continue;
-    const ref = parts[0]!.trim();
-    const commit = parts[1]!.trim();
-    const date = parts[2]!.trim();
-    const contents = parts.slice(3).join('\0');
-    const meta = parseCheckpointCommitMessage(contents);
-    const itemWorkdir = normalizeWorkdir(meta.workdir);
-    if (itemWorkdir === normalizedWorkdir) {
-      entries.push({ ref, commit, date, workdir: itemWorkdir });
-    }
-  }
-
-  // Sort newest first by date/ref
-  entries.sort((a, b) => b.date.localeCompare(a.date));
-
-  let deletedCount = 0;
-  if (entries.length > retention) {
-    const toDelete = entries.slice(retention);
-    for (const item of toDelete) {
-      await gitRun(['update-ref', '-d', item.ref], { cwd, allowFailure: true });
-      deletedCount++;
-    }
-  }
-
-  return deletedCount;
-}
-
-export async function listCheckpoints(
-  cwd: string,
+  fromRev: string,
+  toRev: string,
   options?: {
-    jobId?: string;
-    limit?: number;
-    retention?: number;
+    cached?: boolean;
+    subPath?: string;
   }
-): Promise<{ head: string | null; checkpoints: CheckpointRecord[] }> {
-  await resolveGitTopLevel(cwd);
-
-  const normCwd = normalizeWorkdir(cwd);
-  const headRes = await gitRun(['rev-parse', '--verify', '-q', 'HEAD'], {
-    cwd,
-    allowFailure: true,
-  });
-  const currentHead = headRes.code === 0 ? headRes.stdout.trim() : null;
-
-  const jobFilter = options?.jobId ? options.jobId.trim() : '';
-  const refPattern = jobFilter
-    ? `refs/maw/checkpoints/${jobFilter}/`
-    : 'refs/maw/checkpoints/';
-
-  const listRes = await gitRun(
-    [
-      'for-each-ref',
-      '--format=%(refname)%00%(objectname)%00%(tree)%00%(parent)%00%(authordate:iso-strict)%00%(contents)%00@@MAW_END@@%0a',
-      refPattern,
-    ],
-    { cwd, allowFailure: true }
-  );
-
-  if (listRes.code !== 0 || !listRes.stdout.trim()) {
-    return { head: currentHead, checkpoints: [] };
-  }
-
-  const rawEntries = listRes.stdout.split('\0@@MAW_END@@\n').map((s) => s.replace(/^\n+/, ''));
-  const matchedRecords: Array<{
-    id: string;
-    job_key: string;
-    n: number;
-    commit: string;
-    tree: string;
-    parent: string | null;
-    event: string;
-    label: string;
-    agent: string;
-    role: string;
-    round: number | null;
-    workdir: string;
-    created_at: string;
-    head_moved: boolean;
-  }> = [];
-
-  for (const raw of rawEntries) {
-    if (!raw.trim()) continue;
-    const parts = raw.split('\0');
-    if (parts.length < 6) {
-      continue;
-    }
-    const ref = parts[0]!.trim();
-    const commit = parts[1]!.trim();
-    const tree = parts[2]!.trim();
-    const rawParent = parts[3]!.trim();
-    const parent = rawParent ? rawParent.split(/\s+/)[0]! : null;
-    const date = parts[4]!.trim();
-    const contents = parts.slice(5).join('\0');
-
-    const match = ref.match(/^refs\/maw\/checkpoints\/([^\/]+)\/(\d{4})$/);
-    if (!match) {
-      continue;
-    }
-    const itemJobKey = match[1]!;
-    const itemN = Number.parseInt(match[2]!, 10);
-    const id = `${itemJobKey}/${match[2]!}`;
-
-    const meta = parseCheckpointCommitMessage(contents);
-    const itemWorkdir = normalizeWorkdir(meta.workdir);
-    if (itemWorkdir !== normCwd) {
-      continue;
-    }
-
-    matchedRecords.push({
-      id,
-      job_key: itemJobKey,
-      n: itemN,
-      commit,
-      tree,
-      parent,
-      event: meta.event,
-      label: meta.label,
-      agent: meta.agent,
-      role: meta.role,
-      round: meta.round,
-      workdir: itemWorkdir,
-      created_at: date,
-      head_moved: parent !== currentHead,
-    });
-  }
-
-  // Sort chronological ascending first to compute diff stats vs older checkpoint of same workdir
-  matchedRecords.sort((a, b) => a.created_at.localeCompare(b.created_at));
-
-  const resultWithStats: CheckpointRecord[] = [];
-  for (let i = 0; i < matchedRecords.length; i++) {
-    const cur = matchedRecords[i]!;
-    let stats: CheckpointStats | null = null;
-
-    if (i > 0) {
-      const prev = matchedRecords[i - 1]!;
-      const diffStatRes = await gitRun(
-        ['diff', '--numstat', prev.commit, cur.commit],
-        { cwd, allowFailure: true }
-      );
-      if (diffStatRes.code === 0) {
-        let files = 0;
-        let adds = 0;
-        let dels = 0;
-        for (const line of diffStatRes.stdout.split(/\r?\n/)) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          const [a, d] = trimmed.split(/\s+/);
-          files++;
-          if (a && a !== '-') adds += Number.parseInt(a, 10) || 0;
-          if (d && d !== '-') dels += Number.parseInt(d, 10) || 0;
-        }
-        stats = { files, additions: adds, deletions: dels };
-      }
-    }
-
-    resultWithStats.push({
-      ...cur,
-      stats,
-    });
-  }
-
-  // Return newest first
-  resultWithStats.reverse();
-
-  const maxLimit = Math.min(500, Math.max(1, options?.limit ?? 200));
-  return {
-    head: currentHead,
-    checkpoints: resultWithStats.slice(0, maxLimit),
-  };
-}
-
-export async function diffTrees(
-  cwd: string,
-  from: string,
-  to: string,
-  subPath?: string
 ): Promise<DiffResult> {
-  await resolveGitTopLevel(cwd);
+  assertNotOption(fromRev, 'from');
+  assertNotOption(toRev, 'to');
 
-  let fromTarget = from.trim();
-  let toTarget = to.trim();
+  const rawArgs = ['diff', '--raw'];
+  const numstatArgs = ['diff', '--numstat'];
+  const patchArgs = ['diff'];
 
-  if (CHECKPOINT_ID_REGEX.test(fromTarget)) {
-    fromTarget = `refs/maw/checkpoints/${fromTarget}`;
+  if (options?.cached) {
+    rawArgs.push('--cached');
+    numstatArgs.push('--cached');
+    patchArgs.push('--cached');
   }
 
-  let toIsWorktree = false;
-  let worktreeTree: string | null = null;
-  if (toTarget === 'WORKTREE' || toTarget === '') {
-    toIsWorktree = true;
-    worktreeTree = await snapshotTree(cwd);
-    toTarget = worktreeTree;
-  } else if (CHECKPOINT_ID_REGEX.test(toTarget)) {
-    toTarget = `refs/maw/checkpoints/${toTarget}`;
+  if (fromRev) {
+    rawArgs.push(fromRev);
+    numstatArgs.push(fromRev);
+    patchArgs.push(fromRev);
   }
 
-  const rawArgs = ['diff', '--raw', '-M', fromTarget, toTarget];
-  const numstatArgs = ['diff', '--numstat', '-M', fromTarget, toTarget];
-  const patchArgs = ['diff', fromTarget, toTarget];
+  if (toRev && toRev !== 'WORKTREE') {
+    rawArgs.push(toRev);
+    numstatArgs.push(toRev);
+    patchArgs.push(toRev);
+  }
 
-  if (subPath) {
-    const validPath = validateRelativePath(subPath);
-    rawArgs.push('--', validPath);
-    numstatArgs.push('--', validPath);
-    patchArgs.push('--', validPath);
+  if (options?.subPath) {
+    const validSubPath = validateRelativePath(options.subPath);
+    rawArgs.push('--', validSubPath);
+    numstatArgs.push('--', validSubPath);
+    patchArgs.push('--', validSubPath);
   }
 
   const rawRes = await gitRun(rawArgs, { cwd });
@@ -791,9 +499,7 @@ export async function diffTrees(
         deletions: num.deletions,
         binary: num.binary,
       });
-      if (files.length >= 2000) {
-        break;
-      }
+      if (files.length >= 2000) break;
     }
   }
 
@@ -808,14 +514,526 @@ export async function diffTrees(
 
   return {
     ok: true,
-    from,
-    to: toIsWorktree ? 'WORKTREE' : to,
+    from: fromRev,
+    to: toRev,
     files,
     patch,
     truncated,
   };
 }
 
+/**
+ * C1 Security: Validates from and to revisions in diffTrees.
+ * Rejects options like --output=... with 400.
+ */
+export async function diffTrees(
+  cwd: string,
+  from: string,
+  to: string,
+  subPath?: string
+): Promise<DiffResult> {
+  const top = await resolveGitTopLevel(cwd);
+
+  const fromRaw = String(from ?? '').trim();
+  assertNotOption(fromRaw, 'from');
+
+  let fromTarget: string;
+  if (CHECKPOINT_ID_REGEX.test(fromRaw)) {
+    fromTarget = `refs/maw/checkpoints/${fromRaw}`;
+  } else if (FULL_HEX_SHA_REGEX.test(fromRaw)) {
+    fromTarget = fromRaw;
+  } else {
+    throw new ApiValidationError(
+      `Invalid 'from' revision '${fromRaw}'. Must be a checkpoint id or 40-hex sha.`,
+      400
+    );
+  }
+
+  const toRaw = String(to ?? 'WORKTREE').trim() || 'WORKTREE';
+  assertNotOption(toRaw, 'to');
+
+  let toTarget: string;
+  let toIsWorktree = false;
+
+  if (toRaw === 'WORKTREE') {
+    toIsWorktree = true;
+    toTarget = await snapshotTree(top);
+  } else if (CHECKPOINT_ID_REGEX.test(toRaw)) {
+    toTarget = `refs/maw/checkpoints/${toRaw}`;
+  } else if (FULL_HEX_SHA_REGEX.test(toRaw)) {
+    toTarget = toRaw;
+  } else {
+    throw new ApiValidationError(
+      `Invalid 'to' revision '${toRaw}'. Must be 'WORKTREE', a checkpoint id, or 40-hex sha.`,
+      400
+    );
+  }
+
+  const res = await diffRevisions(top, fromTarget, toTarget, { subPath });
+  return {
+    ...res,
+    from,
+    to: toIsWorktree ? 'WORKTREE' : to,
+  };
+}
+
+/**
+ * C3: Concurrency-safe createCheckpoint using expected old sha of 40 zeros.
+ */
+export async function createCheckpoint(
+  cwd: string,
+  options: {
+    jobKey: string;
+    event?: string;
+    label?: string;
+    agent?: string;
+    role?: string;
+    round?: number | null;
+    retention?: number;
+    configRetention?: number;
+  }
+): Promise<{ ok: true; checkpoint: CheckpointRecord; created: boolean }> {
+  // C6: Work at repo top level
+  const top = await resolveGitTopLevel(cwd);
+
+  const jobKey = validateJobKey(options.jobKey);
+  const event = options.event ?? 'manual';
+  const label = options.label ?? `checkpoint for ${jobKey}`;
+  const agent = options.agent ?? '';
+  const role = options.role ?? '';
+  const round = options.round ?? null;
+  const normTop = normalizeWorkdir(top);
+
+  const currentHeadRes = await gitRun(['rev-parse', '--verify', '-q', 'HEAD'], {
+    cwd: top,
+    allowFailure: true,
+  });
+  const currentHead = currentHeadRes.code === 0 ? currentHeadRes.stdout.trim() : null;
+
+  const tree = await snapshotTree(top);
+
+  const refPrefix = `refs/maw/checkpoints/${jobKey}/`;
+
+  // Dedup: check if the latest checkpoint of this jobKey already has the same tree
+  const listRefsRes = await gitRun(
+    ['for-each-ref', '--format=%(refname)%00%(objectname)%00%(creatordate:unix)', refPrefix],
+    { cwd: top, allowFailure: true }
+  );
+
+  let maxN = 0;
+  let newestRef: string | null = null;
+  if (listRefsRes.code === 0 && listRefsRes.stdout.trim()) {
+    const lines = listRefsRes.stdout.trim().split(/\r?\n/).filter((l) => l.trim().length > 0);
+    for (const line of lines) {
+      const parts = line.split('\0');
+      const r = parts[0]!.trim();
+      const match = r.match(/\/(\d{4})$/);
+      if (match) {
+        const num = Number.parseInt(match[1]!, 10);
+        if (num > maxN) {
+          maxN = num;
+          newestRef = r;
+        }
+      }
+    }
+  }
+
+  if (newestRef) {
+    const treeRes = await gitRun(['rev-parse', `${newestRef}^{tree}`], {
+      cwd: top,
+      allowFailure: true,
+    });
+    if (treeRes.code === 0 && treeRes.stdout.trim() === tree) {
+      const commitRes = await gitRun(['rev-parse', newestRef], { cwd: top, allowFailure: true });
+      const commitSha = commitRes.code === 0 ? commitRes.stdout.trim() : '';
+      const existingId = `${jobKey}/${String(maxN).padStart(4, '0')}`;
+      const msgRes = await gitRun(['log', '-1', '--format=%B', newestRef], { cwd: top, allowFailure: true });
+      const meta = parseCheckpointCommitMessage(msgRes.stdout);
+
+      const parentRes = await gitRun(['rev-parse', '--verify', '-q', `${commitSha}^@`], {
+        cwd: top,
+        allowFailure: true,
+      });
+      const parent = parentRes.code === 0 && parentRes.stdout.trim() ? parentRes.stdout.trim().split(/\s+/)[0]! : null;
+
+      const dateRes = await gitRun(['log', '-1', '--format=%ct', newestRef], { cwd: top, allowFailure: true });
+      const unixSec = dateRes.code === 0 && dateRes.stdout.trim() ? Number.parseInt(dateRes.stdout.trim(), 10) : Math.floor(Date.now() / 1000);
+      const createdAt = new Date(unixSec * 1000).toISOString();
+
+      const existingRecord: CheckpointRecord = {
+        id: existingId,
+        job_key: jobKey,
+        n: maxN,
+        commit: commitSha,
+        tree,
+        parent,
+        event: meta.event || event,
+        label: meta.label || label,
+        agent: meta.agent || agent,
+        role: meta.role || role,
+        round: meta.round ?? round,
+        workdir: meta.workdir || normTop,
+        created_at: createdAt,
+        created_at_unix: unixSec,
+        head_moved: parent !== currentHead,
+        stats: null,
+      };
+
+      return {
+        ok: true,
+        checkpoint: existingRecord,
+        created: false,
+      };
+    }
+  }
+
+  const metaContent = formatCheckpointCommitMessage({
+    label,
+    event,
+    jobKey,
+    agent,
+    role,
+    round,
+    workdir: normTop,
+  });
+
+  const tempDir = getTempDir();
+  const msgFile = path.win32.join(tempDir, `maw-msg-${crypto.randomBytes(6).toString('hex')}.txt`);
+  fs.writeFileSync(msgFile, metaContent, 'utf8');
+
+  let commitSha = '';
+  try {
+    const nowIso = new Date().toISOString();
+    const commitArgs: string[] = ['commit-tree', tree];
+    if (currentHead) {
+      commitArgs.push('-p', currentHead);
+    }
+    commitArgs.push('-F', msgFile);
+
+    const commitRes = await gitRun(commitArgs, {
+      cwd: top,
+      env: {
+        GIT_AUTHOR_NAME: 'MAW Checkpoint',
+        GIT_AUTHOR_EMAIL: 'maw@localhost',
+        GIT_COMMITTER_NAME: 'MAW Checkpoint',
+        GIT_COMMITTER_EMAIL: 'maw@localhost',
+        GIT_AUTHOR_DATE: nowIso,
+        GIT_COMMITTER_DATE: nowIso,
+      },
+    });
+
+    commitSha = commitRes.stdout.trim();
+  } finally {
+    try {
+      if (fs.existsSync(msgFile)) {
+        fs.unlinkSync(msgFile);
+      }
+    } catch {}
+  }
+
+  // C3: Race guard on update-ref: expected old value of 40 zeros ensures ref must not exist yet!
+  const ZERO_SHA = '0000000000000000000000000000000000000000';
+  let createdN = 0;
+  let createdRef = '';
+  let updatedSuccessfully = false;
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    // Re-check highest N in case of parallel writers
+    const checkRefsRes = await gitRun(
+      ['for-each-ref', '--format=%(refname)', refPrefix],
+      { cwd: top, allowFailure: true }
+    );
+    let curMax = 0;
+    if (checkRefsRes.code === 0 && checkRefsRes.stdout.trim()) {
+      for (const line of checkRefsRes.stdout.split(/\r?\n/)) {
+        const match = line.trim().match(/\/(\d{4})$/);
+        if (match) {
+          const num = Number.parseInt(match[1]!, 10);
+          if (num > curMax) curMax = num;
+        }
+      }
+    }
+
+    createdN = curMax + 1;
+    const nStr = String(createdN).padStart(4, '0');
+    createdRef = `${refPrefix}${nStr}`;
+
+    const upRes = await gitRun(
+      ['update-ref', createdRef, commitSha, ZERO_SHA],
+      { cwd: top, allowFailure: true }
+    );
+    if (upRes.code === 0) {
+      updatedSuccessfully = true;
+      break;
+    }
+  }
+
+  if (!updatedSuccessfully) {
+    throw new ApiValidationError(
+      `Failed to create checkpoint after 5 attempts due to concurrent updates on ${jobKey}.`,
+      500
+    );
+  }
+
+  const retention = Math.min(
+    500,
+    Math.max(5, options.retention ?? options.configRetention ?? 50)
+  );
+  await pruneCheckpoints(top, normTop, retention);
+
+  const unixNow = Math.floor(Date.now() / 1000);
+  const checkpointRecord: CheckpointRecord = {
+    id: `${jobKey}/${String(createdN).padStart(4, '0')}`,
+    job_key: jobKey,
+    n: createdN,
+    commit: commitSha,
+    tree,
+    parent: currentHead,
+    event,
+    label,
+    agent,
+    role,
+    round,
+    workdir: normTop,
+    created_at: new Date().toISOString(),
+    created_at_unix: unixNow,
+    head_moved: false,
+    stats: null,
+  };
+
+  return {
+    ok: true,
+    checkpoint: checkpointRecord,
+    created: true,
+  };
+}
+
+/**
+ * C2: Prunes checkpoints using creatordate:unix integer comparison.
+ */
+export async function pruneCheckpoints(
+  cwd: string,
+  normalizedWorkdir: string,
+  retention: number
+): Promise<number> {
+  const top = await resolveGitTopLevel(cwd);
+  const listRes = await gitRun(
+    [
+      'for-each-ref',
+      '--format=%(refname)%00%(objectname)%00%(creatordate:unix)%00%(contents)%00@@MAW_END@@%0a',
+      'refs/maw/checkpoints/',
+    ],
+    { cwd: top, allowFailure: true }
+  );
+
+  if (listRes.code !== 0 || !listRes.stdout.trim()) {
+    return 0;
+  }
+
+  const entries: Array<{ ref: string; commit: string; unix: number; n: number; workdir: string }> = [];
+  const rawEntries = listRes.stdout.split('\0@@MAW_END@@\n').map((s) => s.replace(/^\n+/, ''));
+
+  for (const raw of rawEntries) {
+    if (!raw.trim()) continue;
+    const parts = raw.split('\0');
+    if (parts.length < 4) continue;
+    const ref = parts[0]!.trim();
+    const commit = parts[1]!.trim();
+    const unix = Number.parseInt(parts[2]!.trim(), 10) || 0;
+    const contents = parts.slice(3).join('\0');
+    const meta = parseCheckpointCommitMessage(contents);
+    const itemWorkdir = normalizeWorkdir(meta.workdir);
+
+    const match = ref.match(/\/(\d{4})$/);
+    const n = match ? Number.parseInt(match[1]!, 10) : 0;
+
+    if (itemWorkdir === normalizedWorkdir) {
+      entries.push({ ref, commit, unix, n, workdir: itemWorkdir });
+    }
+  }
+
+  // C2: Sort newest first by unix timestamp, tie-break by n
+  entries.sort((a, b) => (b.unix !== a.unix ? b.unix - a.unix : b.n - a.n));
+
+  let deletedCount = 0;
+  if (entries.length > retention) {
+    const toDelete = entries.slice(retention);
+    for (const item of toDelete) {
+      await gitRun(['update-ref', '-d', item.ref], { cwd: top, allowFailure: true });
+      deletedCount++;
+    }
+  }
+
+  return deletedCount;
+}
+
+/**
+ * C2, C6, C8, C9: Lists checkpoints using unix timestamps, C6 top-level cwd, and C9 stats caching.
+ */
+export async function listCheckpoints(
+  cwd: string,
+  options?: {
+    jobId?: string;
+    limit?: number;
+    retention?: number;
+  }
+): Promise<{ head: string | null; checkpoints: CheckpointRecord[] }> {
+  const top = await resolveGitTopLevel(cwd);
+  const normTop = normalizeWorkdir(top);
+
+  const headRes = await gitRun(['rev-parse', '--verify', '-q', 'HEAD'], {
+    cwd: top,
+    allowFailure: true,
+  });
+  const currentHead = headRes.code === 0 ? headRes.stdout.trim() : null;
+
+  let refPattern = 'refs/maw/checkpoints/';
+  if (options?.jobId) {
+    const validJobKey = validateJobKey(options.jobId);
+    refPattern = `refs/maw/checkpoints/${validJobKey}/`;
+  }
+
+  const listRes = await gitRun(
+    [
+      'for-each-ref',
+      '--format=%(refname)%00%(objectname)%00%(tree)%00%(parent)%00%(creatordate:unix)%00%(contents)%00@@MAW_END@@%0a',
+      refPattern,
+    ],
+    { cwd: top, allowFailure: true }
+  );
+
+  if (listRes.code !== 0 || !listRes.stdout.trim()) {
+    return { head: currentHead, checkpoints: [] };
+  }
+
+  const rawEntries = listRes.stdout.split('\0@@MAW_END@@\n').map((s) => s.replace(/^\n+/, ''));
+  const matchedRecords: Array<{
+    id: string;
+    job_key: string;
+    n: number;
+    commit: string;
+    tree: string;
+    parent: string | null;
+    event: string;
+    label: string;
+    agent: string;
+    role: string;
+    round: number | null;
+    workdir: string;
+    created_at: string;
+    created_at_unix: number;
+    head_moved: boolean;
+  }> = [];
+
+  for (const raw of rawEntries) {
+    if (!raw.trim()) continue;
+    const parts = raw.split('\0');
+    if (parts.length < 6) continue;
+    const ref = parts[0]!.trim();
+    const commit = parts[1]!.trim();
+    const tree = parts[2]!.trim();
+    const rawParent = parts[3]!.trim();
+    const parent = rawParent ? rawParent.split(/\s+/)[0]! : null;
+    const unixSec = Number.parseInt(parts[4]!.trim(), 10) || 0;
+    const contents = parts.slice(5).join('\0');
+
+    const match = ref.match(/^refs\/maw\/checkpoints\/([^\/]+)\/(\d{4})$/);
+    if (!match) continue;
+    const itemJobKey = match[1]!;
+    const itemN = Number.parseInt(match[2]!, 10);
+    const id = `${itemJobKey}/${match[2]!}`;
+
+    const meta = parseCheckpointCommitMessage(contents);
+    const itemWorkdir = normalizeWorkdir(meta.workdir);
+    if (itemWorkdir !== normTop) {
+      continue;
+    }
+
+    matchedRecords.push({
+      id,
+      job_key: itemJobKey,
+      n: itemN,
+      commit,
+      tree,
+      parent,
+      event: meta.event,
+      label: meta.label,
+      agent: meta.agent,
+      role: meta.role,
+      round: meta.round,
+      workdir: itemWorkdir,
+      created_at: new Date(unixSec * 1000).toISOString(),
+      created_at_unix: unixSec,
+      head_moved: parent !== currentHead,
+    });
+  }
+
+  // C2: Sort chronological ascending by unix timestamp, tie-break by n
+  matchedRecords.sort((a, b) =>
+    a.created_at_unix !== b.created_at_unix ? a.created_at_unix - b.created_at_unix : a.n - b.n
+  );
+
+  // C9: Map older checkpoint for each item (in chronological order)
+  const prevCommitMap = new Map<string, string | null>();
+  for (let i = 0; i < matchedRecords.length; i++) {
+    prevCommitMap.set(matchedRecords[i]!.commit, i > 0 ? matchedRecords[i - 1]!.commit : null);
+  }
+
+  // Sort newest first
+  matchedRecords.reverse();
+
+  const maxLimit = Math.min(500, Math.max(1, options?.limit ?? 200));
+  const page = matchedRecords.slice(0, maxLimit);
+
+  // C9: Compute stats ONLY for the returned page, using cache
+  const resultWithStats: CheckpointRecord[] = [];
+  for (const cur of page) {
+    let stats: CheckpointStats | null = null;
+    const prevCommit = prevCommitMap.get(cur.commit);
+
+    if (prevCommit) {
+      const cached = getCachedStats(prevCommit, cur.commit);
+      if (cached) {
+        stats = cached;
+      } else {
+        const diffStatRes = await gitRun(
+          ['diff', '--numstat', prevCommit, cur.commit],
+          { cwd: top, allowFailure: true }
+        );
+        if (diffStatRes.code === 0) {
+          let files = 0;
+          let adds = 0;
+          let dels = 0;
+          for (const line of diffStatRes.stdout.split(/\r?\n/)) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            const [a, d] = trimmed.split(/\s+/);
+            files++;
+            if (a && a !== '-') adds += Number.parseInt(a, 10) || 0;
+            if (d && d !== '-') dels += Number.parseInt(d, 10) || 0;
+          }
+          stats = { files, additions: adds, deletions: dels };
+          setCachedStats(prevCommit, cur.commit, stats);
+        }
+      }
+    }
+
+    resultWithStats.push({
+      ...cur,
+      stats,
+    });
+  }
+
+  return {
+    head: currentHead,
+    checkpoints: resultWithStats,
+  };
+}
+
+/**
+ * C5: Real delta restore using git checkout-index -f -z --stdin.
+ * Writes only modified/added files, preserving mtime of unchanged files.
+ */
 export async function restoreTree(
   cwd: string,
   checkpointId: string,
@@ -836,26 +1054,26 @@ export async function restoreTree(
     throw new ApiValidationError('Confirmation required.', 400);
   }
 
-  await resolveGitTopLevel(cwd);
+  const top = await resolveGitTopLevel(cwd);
   const validatedId = validateCheckpointId(checkpointId);
   const targetRef = `refs/maw/checkpoints/${validatedId}`;
 
-  const targetRes = await gitRun(['rev-parse', '--verify', targetRef], { cwd, allowFailure: true });
+  const targetRes = await gitRun(['rev-parse', '--verify', targetRef], { cwd: top, allowFailure: true });
   if (targetRes.code !== 0) {
     throw new ApiValidationError(`Checkpoint '${validatedId}' not found.`, 404);
   }
   const targetCommit = targetRes.stdout.trim();
 
   // Safety checkpoint first so restore can be undone
-  const safetyRes = await createCheckpoint(cwd, {
+  const safetyRes = await createCheckpoint(top, {
     jobKey: 'safety',
     event: 'safety',
     label: `before restore to ${validatedId}`,
   });
   const safetyCheckpointId = safetyRes.checkpoint.id;
 
-  const currentTree = await snapshotTree(cwd);
-  const targetTreeRes = await gitRun(['rev-parse', `${targetCommit}^{tree}`], { cwd });
+  const currentTree = await snapshotTree(top);
+  const targetTreeRes = await gitRun(['rev-parse', `${targetCommit}^{tree}`], { cwd: top });
   const targetTree = targetTreeRes.stdout.trim();
 
   // Audit entry for destructive action
@@ -863,11 +1081,31 @@ export async function restoreTree(
     Timestamp: new Date().toISOString(),
     Tool: 'maw-s1',
     Action: 'checkpoint_restore',
-    Project: cwd,
+    Project: top,
     Detail: `Restored checkpoint ${validatedId} (safety: ${safetyCheckpointId})`,
   };
   appendAuditEntry(options.auditFile, auditEntry);
   appendAuditEntry(options.checkpointsAuditFile, auditEntry);
+
+  // C5: Files to write = AMT from currentTree to targetTree
+  const writeRes = await gitRun(
+    ['diff-tree', '-r', '-z', '--no-renames', '--name-only', '--diff-filter=AMT', currentTree, targetTree],
+    { cwd: top, allowFailure: true }
+  );
+  const filesToWrite = writeRes.stdout
+    .split('\0')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  // C5: Files to delete = D from currentTree to targetTree
+  const deleteRes = await gitRun(
+    ['diff-tree', '-r', '-z', '--no-renames', '--name-only', '--diff-filter=D', currentTree, targetTree],
+    { cwd: top, allowFailure: true }
+  );
+  const filesToDelete = deleteRes.stdout
+    .split('\0')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
 
   const tempDir = getTempDir();
   const rand = crypto.randomBytes(6).toString('hex');
@@ -877,52 +1115,38 @@ export async function restoreTree(
   let filesDeleted = 0;
 
   try {
-    await gitRun(['read-tree', targetTree], {
-      cwd,
-      env: { GIT_INDEX_FILE: tmpIndex },
-    });
+    if (filesToWrite.length > 0) {
+      await gitRun(['read-tree', targetTree], {
+        cwd: top,
+        env: { GIT_INDEX_FILE: tmpIndex },
+      });
 
-    await gitRun(['checkout-index', '-a', '-f'], {
-      cwd,
-      env: { GIT_INDEX_FILE: tmpIndex },
-    });
+      // Write only the changed files via -z --stdin
+      const stdinData = filesToWrite.join('\0') + '\0';
+      await gitRunWithStdin(['checkout-index', '-f', '-z', '--stdin'], stdinData, {
+        cwd: top,
+        env: { GIT_INDEX_FILE: tmpIndex },
+      });
 
-    // Count files in target tree
-    const lsTargetRes = await gitRun(['ls-tree', '-r', '--name-only', targetTree], {
-      cwd,
-      allowFailure: true,
-    });
-    if (lsTargetRes.code === 0 && lsTargetRes.stdout.trim()) {
-      filesWritten = lsTargetRes.stdout.trim().split(/\r?\n/).filter((l) => l.trim().length > 0).length;
+      filesWritten = filesToWrite.length;
     }
 
-    // Delete files that exist in current but not in target
-    // diff-tree -r --name-only --diff-filter=A <target> <current> gives files present in current but absent in target
-    const addedFilesRes = await gitRun(
-      ['diff-tree', '-r', '--name-only', '--diff-filter=A', targetTree, currentTree],
-      { cwd, allowFailure: true }
-    );
+    for (const rel of filesToDelete) {
+      const full = path.win32.join(top, rel);
+      if (isFileSafe(full)) {
+        try {
+          fs.unlinkSync(full);
+          filesDeleted++;
+        } catch {}
 
-    if (addedFilesRes.code === 0 && addedFilesRes.stdout.trim()) {
-      const addedList = addedFilesRes.stdout.trim().split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
-      for (const rel of addedList) {
-        const full = path.win32.join(cwd, rel);
-        if (isFileSafe(full)) {
+        // Remove empty directories up to top
+        let dir = path.dirname(full);
+        while (dir.toLowerCase() !== top.toLowerCase() && isDirectorySafe(dir)) {
           try {
-            fs.unlinkSync(full);
-            filesDeleted++;
+            fs.rmdirSync(dir);
+            dir = path.dirname(dir);
           } catch {
-            // Ignore file unlink failure
-          }
-          // Remove empty parent directories up to cwd
-          let dir = path.dirname(full);
-          while (dir.toLowerCase() !== cwd.toLowerCase() && isDirectorySafe(dir)) {
-            try {
-              fs.rmdirSync(dir);
-              dir = path.dirname(dir);
-            } catch {
-              break;
-            }
+            break;
           }
         }
       }
@@ -932,19 +1156,16 @@ export async function restoreTree(
       if (fs.existsSync(tmpIndex)) {
         fs.unlinkSync(tmpIndex);
       }
-    } catch {
-      // Ignore tmpIndex cleanup error
-    }
+    } catch {}
   }
 
-  const checkpointMetaRes = await gitRun(['log', '-1', '--format=%B', targetRef], { cwd, allowFailure: true });
   const targetParentRes = await gitRun(['rev-parse', '--verify', '-q', `${targetCommit}^@`], {
-    cwd,
+    cwd: top,
     allowFailure: true,
   });
   const targetParent = targetParentRes.code === 0 && targetParentRes.stdout.trim() ? targetParentRes.stdout.trim().split(/\s+/)[0]! : null;
 
-  const currentHeadRes = await gitRun(['rev-parse', '--verify', '-q', 'HEAD'], { cwd, allowFailure: true });
+  const currentHeadRes = await gitRun(['rev-parse', '--verify', '-q', 'HEAD'], { cwd: top, allowFailure: true });
   const currentHead = currentHeadRes.code === 0 ? currentHeadRes.stdout.trim() : null;
 
   return {

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { appendAuditEntry } from '../../lib/audit.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
-import { isFileSafe } from '../../lib/paths.ts';
+import { getTempDir, isFileSafe } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { createCheckpoint, gitRun, snapshotTree } from '../checkpoints/snapshot.ts';
@@ -44,13 +44,14 @@ export async function handleWorktreeMerge(
       throw new ApiValidationError(`Worktree '${id}' is not active (status: ${record.status}).`, 409);
     }
 
+    let jobMeta: Record<string, unknown> | null = null;
     // Check if associated job is still RUNNING
     if (record.job_id) {
       const metaFile = path.win32.join(ctx.paths.jobsDir, `${record.job_id}.json`);
       if (isFileSafe(metaFile)) {
         try {
-          const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { status?: string };
-          if (meta && meta.status === 'RUNNING') {
+          jobMeta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as Record<string, unknown>;
+          if (jobMeta && jobMeta.status === 'RUNNING') {
             throw new ApiValidationError('Job is still running.', 409);
           }
         } catch (err) {
@@ -92,10 +93,16 @@ export async function handleWorktreeMerge(
       }
     }
 
-    // SPEC Guard verification on the branch diff
+    // SPEC Guard verification on the branch diff (W5)
     let specGuardResult: Record<string, unknown> | null = null;
     const specFile = path.win32.join(repoPath, 'SPEC.md');
-    const owner = String(body.owner ?? record.owner ?? '').trim();
+    // Fallback order: owner = body.owner || record.owner || jobMeta?.agent || ''
+    const owner = String(
+      body.owner ??
+        record.owner ??
+        (jobMeta && typeof jobMeta.agent === 'string' ? jobMeta.agent : '') ??
+        ''
+    ).trim();
 
     if (isFileSafe(specFile) && owner) {
       const tipRes = await gitRun(['rev-parse', 'HEAD'], { cwd: wtPath });
@@ -124,12 +131,18 @@ export async function handleWorktreeMerge(
           { cwd: wtPath, timeoutMs: 120000 }
         );
 
-        if (sgRes.stdout.trim()) {
+        const outLines = sgRes.stdout.split(/\r?\n/).filter((l) => l.trim().startsWith('{'));
+        const lastJsonLine = outLines.length > 0 ? outLines[outLines.length - 1]! : '';
+        if (lastJsonLine) {
           try {
-            specGuardResult = JSON.parse(sgRes.stdout.trim()) as Record<string, unknown>;
+            specGuardResult = JSON.parse(lastJsonLine) as Record<string, unknown>;
           } catch {
-            // Non-JSON output
+            const tail = (sgRes.stderr || sgRes.stdout).trim().slice(-400);
+            specGuardResult = { error: tail || 'Failed to parse SPEC Guard JSON output.' };
           }
+        } else {
+          const tail = (sgRes.stderr || sgRes.stdout).trim().slice(-400);
+          specGuardResult = { error: tail || 'SPEC Guard produced no JSON output.' };
         }
 
         if (specGuardResult && specGuardResult.verdict === 'FAIL' && body.force !== true) {
@@ -175,8 +188,13 @@ export async function handleWorktreeMerge(
       label: `before merge of maw/${record.id}`,
     });
 
+    // Message sanitization (W5): cap at 300 chars, strip control characters
+    let rawMsg = String(body.message ?? '').replace(/[\x00-\x1f\x7f]/g, ' ').trim();
+    if (rawMsg.length > 300) {
+      rawMsg = rawMsg.slice(0, 300);
+    }
     const mergeMsg =
-      String(body.message ?? '').trim() ||
+      rawMsg ||
       `Merge maw/${record.id} (${record.origin}${record.job_id ? ' ' + record.job_id : ''})`;
 
     if (strategy === 'merge') {
@@ -277,27 +295,41 @@ export async function handleWorktreeMerge(
     record.updated_at = new Date().toISOString();
 
     const removeWorktree = body.remove !== false;
+    let removed = false;
+    let removeError: string | undefined = undefined;
+
     if (removeWorktree) {
-      await gitRun(['worktree', 'remove', '--force', wtPath], {
+      const rmRes = await gitRun(['worktree', 'remove', '--force', wtPath], {
         cwd: repoPath,
         allowFailure: true,
       });
-      await gitRun(['branch', '-D', record.branch], {
-        cwd: repoPath,
-        allowFailure: true,
-      });
-      await gitRun(['worktree', 'prune'], { cwd: repoPath, allowFailure: true });
+      if (rmRes.code === 0) {
+        removed = true;
+        await gitRun(['branch', '-D', record.branch], {
+          cwd: repoPath,
+          allowFailure: true,
+        });
+        await gitRun(['worktree', 'prune'], { cwd: repoPath, allowFailure: true });
+      } else {
+        // W6: report removed: false and remove_error
+        removed = false;
+        removeError = rmRes.stderr.trim().slice(0, 400);
+      }
     }
 
     await saveWorktreesStore(dataDir, store);
 
-    return {
+    const resp: Record<string, unknown> = {
       ok: true,
       merged: true,
       commit: mergeCommit,
       spec_guard: specGuardResult,
-      removed: removeWorktree,
+      removed,
     };
+    if (removeError) {
+      resp.remove_error = removeError;
+    }
+    return resp;
   });
 }
 
@@ -319,6 +351,15 @@ export async function handleWorktreeFixConflicts(
     throw new ApiValidationError('Agent is required for fixing conflicts.', 400);
   }
 
+  // W7: Validate agent against registry for capabilities.write
+  const targetAgent = (ctx.registry?.agents ?? []).find((a) => a.id === agent);
+  if (!targetAgent || !targetAgent.capabilities?.write) {
+    throw new ApiValidationError(
+      `Agent '${agent}' is not enabled or does not have write capability.`,
+      400
+    );
+  }
+
   const model = body.model ? String(body.model).trim() : undefined;
   const dataDir = ctx.paths.featureDataDir('worktrees');
 
@@ -332,10 +373,25 @@ export async function handleWorktreeFixConflicts(
       throw new ApiValidationError(`Worktree '${id}' is not active.`, 409);
     }
 
+    // W7: Refuse with 409 if record's job is RUNNING
+    if (record.job_id) {
+      const metaFile = path.win32.join(ctx.paths.jobsDir, `${record.job_id}.json`);
+      if (isFileSafe(metaFile)) {
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { status?: string };
+          if (meta && meta.status === 'RUNNING') {
+            throw new ApiValidationError('Job is still running.', 409);
+          }
+        } catch (err) {
+          if (err instanceof ApiValidationError) throw err;
+        }
+      }
+    }
+
     const wtPath = record.worktree_path;
 
     // In worktree: git merge --no-commit <base>
-    await gitRun(['merge', '--no-commit', record.base], {
+    const mergeRes = await gitRun(['merge', '--no-commit', record.base], {
       cwd: wtPath,
       allowFailure: true,
     });
@@ -345,6 +401,20 @@ export async function handleWorktreeFixConflicts(
       allowFailure: true,
     });
     const conflicts = confRes.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+
+    // W7: If exit code is 0 and conflicts are empty, commit and return resolved
+    if (mergeRes.code === 0 && conflicts.length === 0) {
+      const stagedCheck = await gitRun(['diff', '--cached', '--name-only'], { cwd: wtPath });
+      if (stagedCheck.stdout.trim() !== '') {
+        await gitRun(['commit', '--no-edit'], { cwd: wtPath, allowFailure: true });
+      }
+      return {
+        ok: true,
+        job_id: null,
+        conflicts: [],
+        resolved: true,
+      };
+    }
 
     const prompt = [
       `Resolve git merge conflicts between branch '${record.branch}' and '${record.base}'.`,
@@ -399,6 +469,29 @@ export async function handleWorktreeDiscard(
       throw new ApiValidationError(`Worktree '${id}' not found.`, 404);
     }
 
+    // W8: Refuse with 409 if status is already merged or discarded
+    if (record.status === 'merged' || record.status === 'discarded') {
+      throw new ApiValidationError(
+        `Worktree '${id}' is already ${record.status}.`,
+        409
+      );
+    }
+
+    // W8: Refuse with 409 if job is RUNNING
+    if (record.job_id) {
+      const metaFile = path.win32.join(ctx.paths.jobsDir, `${record.job_id}.json`);
+      if (isFileSafe(metaFile)) {
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { status?: string };
+          if (meta && meta.status === 'RUNNING') {
+            throw new ApiValidationError('Job is still running.', 409);
+          }
+        } catch (err) {
+          if (err instanceof ApiValidationError) throw err;
+        }
+      }
+    }
+
     const wtPath = record.worktree_path;
     const repoPath = record.project_path;
 
@@ -415,18 +508,42 @@ export async function handleWorktreeDiscard(
 
     const keptRef = `refs/maw/discarded/${record.id}`;
 
-    // Snapshot commit of worktree before deletion
+    // W8: Plain snapshot commit of worktree before deletion. Do NOT create refs under refs/maw/checkpoints/*
     if (fs.existsSync(wtPath)) {
       try {
-        const snapRes = await createCheckpoint(wtPath, {
-          jobKey: 'discarded',
-          event: 'safety',
-          label: `before discard of maw/${record.id}`,
-        });
-        await gitRun(['update-ref', keptRef, snapRes.checkpoint.commit], {
-          cwd: repoPath,
+        const treeSha = await snapshotTree(wtPath);
+        const headRes = await gitRun(['rev-parse', '--verify', '-q', 'HEAD'], {
+          cwd: wtPath,
           allowFailure: true,
         });
+        const parentSha = headRes.code === 0 && headRes.stdout.trim() ? headRes.stdout.trim() : null;
+
+        const tempDir = getTempDir();
+        const msgFile = path.win32.join(tempDir, `maw-discard-msg-${Date.now()}.txt`);
+        fs.writeFileSync(msgFile, `maw discarded worktree: ${record.id}\n`, 'utf8');
+
+        const commitArgs = parentSha
+          ? ['commit-tree', treeSha, '-p', parentSha, '-F', msgFile]
+          : ['commit-tree', treeSha, '-F', msgFile];
+
+        const commitRes = await gitRun(commitArgs, {
+          cwd: repoPath,
+          env: {
+            GIT_AUTHOR_NAME: 'MAW Discard',
+            GIT_AUTHOR_EMAIL: 'maw@localhost',
+            GIT_COMMITTER_NAME: 'MAW Discard',
+            GIT_COMMITTER_EMAIL: 'maw@localhost',
+          },
+        });
+
+        try {
+          fs.unlinkSync(msgFile);
+        } catch {}
+
+        if (commitRes.code === 0 && commitRes.stdout.trim()) {
+          const discardCommitSha = commitRes.stdout.trim();
+          await gitRun(['update-ref', keptRef, discardCommitSha], { cwd: repoPath });
+        }
       } catch {
         // Fallback: rev-parse HEAD
         const headRes = await gitRun(['rev-parse', 'HEAD'], { cwd: wtPath, allowFailure: true });

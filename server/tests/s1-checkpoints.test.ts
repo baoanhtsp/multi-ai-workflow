@@ -348,3 +348,98 @@ test('S1 Checkpoints: route checkpoint_rollback_target retrieves first checkpoin
     cleanupTestEnv(env);
   }
 });
+
+test('S1 Checkpoints: option injection rejected on checkpoint_diff (from=--output=...)', async () => {
+  const env = await setupTestEnv();
+  try {
+    const handler = feature.routes.checkpoint_diff!.handler;
+    const req = makeMockRequest(
+      env.ctx,
+      `http://127.0.0.1/api?action=checkpoint_diff&project_path=${encodeURIComponent(env.repoDir)}&from=--output=injected.txt`
+    );
+    await assert.rejects(
+      async () => await handler(req, req),
+      (err: unknown) => err instanceof ApiValidationError && err.statusCode === 400
+    );
+    assert.ok(!fs.existsSync(path.win32.join(env.repoDir, 'injected.txt')));
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Checkpoints: delta restore preserves mtime of unchanged files', async () => {
+  const env = await setupTestEnv();
+  try {
+    // Create baseline with two files
+    fs.writeFileSync(path.win32.join(env.repoDir, 'file1.txt'), 'content 1\n', 'utf8');
+    fs.writeFileSync(path.win32.join(env.repoDir, 'file2.txt'), 'content 2\n', 'utf8');
+    const cpRes = await createCheckpoint(env.repoDir, {
+      jobKey: 'job_delta',
+      label: 'baseline',
+    });
+
+    const mtime1Before = fs.statSync(path.win32.join(env.repoDir, 'file1.txt')).mtimeMs;
+
+    // Small delay to ensure timestamp difference if modified
+    await new Promise((r) => setTimeout(r, 60));
+
+    // Modify file2 and add file3
+    fs.writeFileSync(path.win32.join(env.repoDir, 'file2.txt'), 'content 2 modified\n', 'utf8');
+    fs.writeFileSync(path.win32.join(env.repoDir, 'file3_added.txt'), 'new file\n', 'utf8');
+
+    const restoreRes = await restoreTree(env.repoDir, cpRes.checkpoint.id, {
+      confirm: true,
+      auditFile: env.paths.auditFile,
+      checkpointsAuditFile: path.win32.join(env.mawHome, 'audit.jsonl'),
+    });
+
+    assert.equal(restoreRes.ok, true);
+    assert.equal(restoreRes.files_written, 1, 'Only file2 should be written');
+    assert.equal(restoreRes.files_deleted, 1, 'Only file3_added should be deleted');
+
+    const mtime1After = fs.statSync(path.win32.join(env.repoDir, 'file1.txt')).mtimeMs;
+    assert.equal(mtime1After, mtime1Before, 'Unchanged file1 mtime must be preserved');
+    assert.ok(!fs.existsSync(path.win32.join(env.repoDir, 'file3_added.txt')));
+  } finally {
+    cleanupTestEnv(env);
+  }
+});
+
+test('S1 Checkpoints: 3 concurrent createCheckpoint calls allocate distinct sequential refs (0001, 0002, 0003)', async () => {
+  const env = await setupTestEnv();
+  try {
+    // We create 3 distinct states by having different trees or running createCheckpoint sequentially or concurrently
+    // Testing C3 concurrency retry loop
+    const results = await Promise.all([
+      createCheckpoint(env.repoDir, {
+        jobKey: 'job_concurrent',
+        label: 'first call',
+      }),
+      (async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        fs.writeFileSync(path.win32.join(env.repoDir, 'file1.txt'), 'mod a\n', 'utf8');
+        return await createCheckpoint(env.repoDir, {
+          jobKey: 'job_concurrent',
+          label: 'second call',
+        });
+      })(),
+      (async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        fs.writeFileSync(path.win32.join(env.repoDir, 'file1.txt'), 'mod b\n', 'utf8');
+        return await createCheckpoint(env.repoDir, {
+          jobKey: 'job_concurrent',
+          label: 'third call',
+        });
+      })(),
+    ]);
+
+    const ids = results.map((r) => r.checkpoint.id);
+    assert.equal(ids.length, 3);
+    assert.equal(new Set(ids).size, 3, 'All 3 checkpoint ids must be distinct');
+    assert.ok(ids.includes('job_concurrent/0001'));
+    assert.ok(ids.includes('job_concurrent/0002'));
+    assert.ok(ids.includes('job_concurrent/0003'));
+  } finally {
+    cleanupTestEnv(env);
+  }
+});

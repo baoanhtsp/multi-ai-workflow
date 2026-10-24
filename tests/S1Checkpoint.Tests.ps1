@@ -2,8 +2,10 @@
 
 BeforeAll {
     $script:scriptsDir = Join-Path $PSScriptRoot "..\antigravity\skills\claude-leader\scripts"
+    $script:commonPath = Join-Path $script:scriptsDir "lib\maw-common.ps1"
     $script:libPath = Join-Path $script:scriptsDir "hooks\_shared\10-checkpoint-lib.ps1"
     $script:hooksPath = Join-Path $script:scriptsDir "lib\maw-hooks.ps1"
+    . $script:commonPath
     . $script:libPath
     . $script:hooksPath
 }

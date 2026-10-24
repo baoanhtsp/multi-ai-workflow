@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { handleCancelJob } from '../../actions/jobs.ts';
 import { appendAuditEntry } from '../../lib/audit.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
 import { isDirectorySafe, isFileSafe, resolveProjectPath } from '../../lib/paths.ts';
@@ -9,7 +10,9 @@ import { ApiValidationError } from '../../lib/validate.ts';
 import { gitRun, snapshotTree } from '../checkpoints/snapshot.ts';
 import { createWorktreeRecord } from './isolate.ts';
 import { handleWorktreeDiscard, handleWorktreeMerge } from './merge.ts';
-import { loadWorktreesStore, saveWorktreesStore, withStoreLock } from './store.ts';
+import { loadWorktreesStore, withStoreLock } from './store.ts';
+
+export const BESTOF_ID_REGEX = /^bo\d{14}[0-9a-f]{2}$/i;
 
 export interface BestOfCheck {
   name: string;
@@ -63,8 +66,9 @@ export interface BestOfRun {
 }
 
 const runLocks = new Map<string, Promise<void>>();
+const activeCheckRuns = new Set<string>();
 
-async function withRunLock<T>(runId: string, fn: () => Promise<T>): Promise<T> {
+export async function withRunLock<T>(runId: string, fn: () => Promise<T>): Promise<T> {
   const current = runLocks.get(runId) ?? Promise.resolve();
   let release: () => void = () => {};
   const next = new Promise<void>((resolve) => {
@@ -123,6 +127,50 @@ export function generateBestOfId(): string {
   return `bo${ts}${hex}`;
 }
 
+export function computeCandidateCost(
+  auditFile: string,
+  agent: string,
+  startedAt: string,
+  finishedAt?: string
+): number | null {
+  if (!isFileSafe(auditFile)) return null;
+  try {
+    const startMs = new Date(startedAt).getTime();
+    const endMs = finishedAt ? new Date(finishedAt).getTime() : Date.now();
+    const raw = fs.readFileSync(auditFile, 'utf8');
+    let total = 0;
+    let found = false;
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        const row = JSON.parse(trimmed) as {
+          Timestamp?: string;
+          Tool?: string;
+          CostUsd?: number;
+        };
+        if (row && row.Timestamp && row.Tool) {
+          const tMs = new Date(row.Timestamp).getTime();
+          if (
+            tMs >= startMs - 2000 &&
+            tMs <= endMs + 2000 &&
+            row.Tool.toLowerCase() === agent.toLowerCase()
+          ) {
+            const cost = Number(row.CostUsd);
+            if (Number.isFinite(cost)) {
+              total += cost;
+              found = true;
+            }
+          }
+        }
+      } catch {}
+    }
+    return found ? Math.round(total * 10000) / 10000 : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): Promise<BestOfRun> {
   if (run.state === 'done' || run.state === 'picked' || run.state === 'cancelled') {
     return run;
@@ -142,14 +190,20 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
               status?: string;
               finished_at?: string;
               started_ts?: number;
-              exit_code?: number;
             };
             if (meta.status && meta.status !== 'RUNNING') {
               c.job_status = meta.status;
               c.finished_at = meta.finished_at || new Date().toISOString();
-              const startedSec = meta.started_ts || Math.floor(new Date(c.started_at).getTime() / 1000);
+              const startedSec =
+                meta.started_ts || Math.floor(new Date(c.started_at).getTime() / 1000);
               const finishedSec = Math.floor(new Date(c.finished_at).getTime() / 1000);
               c.duration_s = Math.max(0, finishedSec - startedSec);
+              c.cost_usd = computeCandidateCost(
+                ctx.paths.auditFile,
+                c.agent,
+                c.started_at,
+                c.finished_at
+              );
             } else {
               allFinished = false;
             }
@@ -163,14 +217,15 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
     }
 
     if (allFinished) {
-      // Calculate diff for each candidate
+      // Calculate diff for each candidate using snapshotTree (N3)
       const store = await loadWorktreesStore(dataDir);
       for (const c of run.candidates) {
         const wtRec = store.worktrees.find((w) => w.id === c.worktree_id);
         if (wtRec && fs.existsSync(wtRec.worktree_path)) {
           try {
+            const currentTree = await snapshotTree(wtRec.worktree_path);
             const numstatRes = await gitRun(
-              ['diff', '--numstat', wtRec.base_commit, 'HEAD'],
+              ['diff', '--numstat', wtRec.base_commit, currentTree],
               { cwd: wtRec.worktree_path, allowFailure: true }
             );
             if (numstatRes.code === 0) {
@@ -207,7 +262,7 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
     const needTests = run.judge === 'tests' || run.judge === 'both';
     const needCouncil = run.judge === 'council' || run.judge === 'both';
 
-    // 2a. Tests
+    // 2a. Tests in background promise (N2)
     if (needTests) {
       for (const c of run.candidates) {
         if (!c.tests) {
@@ -237,114 +292,170 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
             if (checks.length === 0) {
               c.tests = { status: 'none', results: [] };
             } else {
-              const testResults: Array<{
-                name: string;
-                exit_code: number | null;
-                duration_s: number;
-                tail: string;
-              }> = [];
+              c.tests = { status: 'running', results: [] };
+              const runKey = `${run.id}_${c.i}`;
+              if (!activeCheckRuns.has(runKey)) {
+                activeCheckRuns.add(runKey);
+                const wtPath = wtRec.worktree_path;
+                const candidateIndex = c.i;
+                const runId = run.id;
 
-              let allPassed = true;
-              let hadError = false;
+                (async () => {
+                  try {
+                    const testResults: Array<{
+                      name: string;
+                      exit_code: number | null;
+                      duration_s: number;
+                      tail: string;
+                    }> = [];
 
-              for (const chk of checks) {
-                const chkName = String(chk.name || 'check');
-                const timeoutMs = (chk.timeout_s ?? 600) * 1000;
-                let commandArgs: string[] = [];
-                let program = '';
+                    let allPassed = true;
+                    let hadError = false;
 
-                if (Array.isArray(chk.command)) {
-                  commandArgs = chk.command.map(String);
-                } else if (typeof chk.command === 'string') {
-                  commandArgs = chk.command.split(/\s+/).filter(Boolean);
-                }
+                    for (const chk of checks) {
+                      const chkName = String(chk.name || 'check');
+                      const timeoutMs = (chk.timeout_s ?? 600) * 1000;
+                      let commandArgs: string[] = [];
+                      let program = '';
 
-                if (commandArgs.length === 0) continue;
-                program = commandArgs[0]!;
-                const restArgs = commandArgs.slice(1);
+                      if (Array.isArray(chk.command)) {
+                        commandArgs = chk.command.map(String);
+                      } else if (typeof chk.command === 'string') {
+                        commandArgs = chk.command.split(/\s+/).filter(Boolean);
+                      }
 
-                const startTime = Date.now();
-                let exitCode: number | null = 1;
-                let stdout = '';
-                let stderr = '';
+                      if (commandArgs.length === 0) continue;
+                      program = commandArgs[0]!;
+                      const restArgs = commandArgs.slice(1);
 
-                if (/\.(cmd|bat)$/i.test(program) || program.toLowerCase() === 'npm') {
-                  const safeArgRegex = /^[A-Za-z0-9_./:=@+-]+$/;
-                  if (!restArgs.every((a) => safeArgRegex.test(a))) {
-                    hadError = true;
-                    testResults.push({
-                      name: chkName,
-                      exit_code: null,
-                      duration_s: 0,
-                      tail: 'Disallowed argument characters in cmd execution.',
+                      const startTime = Date.now();
+                      let exitCode: number | null = 1;
+                      let stdout = '';
+                      let stderr = '';
+
+                      if (/\.(cmd|bat)$/i.test(program) || program.toLowerCase() === 'npm') {
+                        const safeArgRegex = /^[A-Za-z0-9_./:=@+-]+$/;
+                        if (!restArgs.every((a) => safeArgRegex.test(a))) {
+                          hadError = true;
+                          testResults.push({
+                            name: chkName,
+                            exit_code: null,
+                            duration_s: 0,
+                            tail: 'Disallowed argument characters in cmd execution.',
+                          });
+                          continue;
+                        }
+                        const cmdRes = await runCommand(
+                          'cmd.exe',
+                          ['/d', '/s', '/c', program, ...restArgs],
+                          { cwd: wtPath, timeoutMs }
+                        );
+                        exitCode = cmdRes.code;
+                        stdout = cmdRes.stdout;
+                        stderr = cmdRes.stderr;
+                      } else {
+                        const procRes = await runCommand(program, restArgs, {
+                          cwd: wtPath,
+                          timeoutMs,
+                        });
+                        exitCode = procRes.code;
+                        stdout = procRes.stdout;
+                        stderr = procRes.stderr;
+                      }
+
+                      const dur = Math.round((Date.now() - startTime) / 1000);
+                      const tail = `${stdout}\n${stderr}`.trim().slice(-1000);
+                      testResults.push({
+                        name: chkName,
+                        exit_code: exitCode,
+                        duration_s: dur,
+                        tail,
+                      });
+
+                      if (exitCode !== 0) {
+                        allPassed = false;
+                      }
+                    }
+
+                    const status = hadError ? 'error' : allPassed ? 'pass' : 'fail';
+
+                    await withRunLock(runId, async () => {
+                      const freshRun = loadBestOfRun(dataDir, runId);
+                      if (freshRun) {
+                        const targetCand = freshRun.candidates.find(
+                          (cand) => cand.i === candidateIndex
+                        );
+                        if (targetCand) {
+                          targetCand.tests = {
+                            status,
+                            results: testResults,
+                          };
+                          saveBestOfRun(dataDir, freshRun);
+                        }
+                      }
                     });
-                    continue;
+                  } finally {
+                    activeCheckRuns.delete(runKey);
                   }
-                  const cmdRes = await runCommand(
-                    'cmd.exe',
-                    ['/d', '/s', '/c', program, ...restArgs],
-                    { cwd: wtRec.worktree_path, timeoutMs }
-                  );
-                  exitCode = cmdRes.code;
-                  stdout = cmdRes.stdout;
-                  stderr = cmdRes.stderr;
-                } else {
-                  const procRes = await runCommand(program, restArgs, {
-                    cwd: wtRec.worktree_path,
-                    timeoutMs,
-                  });
-                  exitCode = procRes.code;
-                  stdout = procRes.stdout;
-                  stderr = procRes.stderr;
-                }
-
-                const dur = Math.round((Date.now() - startTime) / 1000);
-                const tail = `${stdout}\n${stderr}`.trim().slice(-1000);
-                testResults.push({
-                  name: chkName,
-                  exit_code: exitCode,
-                  duration_s: dur,
-                  tail,
-                });
-
-                if (exitCode !== 0) {
-                  allPassed = false;
-                }
+                })();
               }
-
-              c.tests = {
-                status: hadError ? 'error' : allPassed ? 'pass' : 'fail',
-                results: testResults,
-              };
             }
           }
         }
       }
+
+      if (run.candidates.some((c) => c.tests?.status === 'running')) {
+        saveBestOfRun(dataDir, run);
+        return run;
+      }
     }
 
-    // 2b. Council
+    // 2b. Council (N3, N4)
     if (needCouncil) {
       let councilJobsFinished = true;
       for (const c of run.candidates) {
         if (!c.council) {
           const wtRec = store.worktrees.find((w) => w.id === c.worktree_id);
           if (wtRec && fs.existsSync(wtRec.worktree_path)) {
-            // Start council job
+            // N3: git reset --soft <base_commit> before council job if candidate made commits
+            const countRes = await gitRun(
+              ['rev-list', '--count', `${wtRec.base_commit}..HEAD`],
+              { cwd: wtRec.worktree_path, allowFailure: true }
+            );
+            const commitCount = Number.parseInt(countRes.stdout.trim(), 10) || 0;
+            if (commitCount > 0) {
+              await gitRun(['reset', '--soft', wtRec.base_commit], {
+                cwd: wtRec.worktree_path,
+                allowFailure: true,
+              });
+            }
+
+            // N4: Wrap startJob in try/catch
             const councilPrompt = `Best-of-N candidate ${c.i} for: ${run.prompt}`;
-            const cJob = await ctx.startJob({
-              mode: 'council',
-              project_path: wtRec.worktree_path,
-              reviewers: run.reviewers,
-              prompt: councilPrompt,
-            });
-            c.council = {
-              job_id: String(cJob.job_id ?? ''),
-              status: 'RUNNING',
-              verdicts: {},
-              score: null,
-              approved: null,
-            };
-            councilJobsFinished = false;
+            try {
+              const cJob = await ctx.startJob({
+                mode: 'council',
+                project_path: wtRec.worktree_path,
+                reviewers: run.reviewers,
+                prompt: councilPrompt,
+              });
+              c.council = {
+                job_id: String(cJob.job_id ?? ''),
+                status: 'RUNNING',
+                verdicts: {},
+                score: null,
+                approved: null,
+              };
+              councilJobsFinished = false;
+            } catch (err) {
+              c.council = {
+                job_id: '',
+                status: 'ERROR',
+                verdicts: {},
+                score: null,
+                approved: false,
+              };
+            }
           }
         } else if (c.council.status === 'RUNNING') {
           const metaFile = path.win32.join(ctx.paths.jobsDir, `${c.council.job_id}.json`);
@@ -407,7 +518,7 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
       const bFailed = b.job_status !== 'DONE';
       if (aFailed !== bFailed) return aFailed ? 1 : -1;
 
-      // 2. Tests: pass > none > fail
+      // 2. Tests: pass > none > fail/error
       const testRank = (t: BestOfCandidate['tests']) => {
         if (!t || t.status === 'none') return 2;
         if (t.status === 'pass') return 1;
@@ -481,7 +592,7 @@ export async function handleBestOfStart(
     throw new ApiValidationError('Best-of-N requires between 2 and 4 candidates.', 400);
   }
 
-  const enabledAgentsMap = new Map(ctx.registry.agents.map((a) => [a.id, a]));
+  const enabledAgentsMap = new Map((ctx.registry?.agents ?? []).map((a) => [a.id, a]));
   const seenCandidates = new Set<string>();
   const parsedCandidates: Array<{ agent: string; model?: string; effort?: string }> = [];
 
@@ -495,7 +606,7 @@ export async function handleBestOfStart(
     if (!entry) {
       throw new ApiValidationError(`Candidate agent '${ag}' is not an enabled registry agent.`, 400);
     }
-    if (!entry.capabilities.write) {
+    if (!entry.capabilities?.write) {
       throw new ApiValidationError(`Candidate agent '${ag}' does not have write capability.`, 400);
     }
 
@@ -503,7 +614,10 @@ export async function handleBestOfStart(
     const effort = cObj.effort ? String(cObj.effort).trim() : undefined;
     const sig = `${ag}:${model || ''}`;
     if (seenCandidates.has(sig)) {
-      throw new ApiValidationError(`Duplicate candidate '${ag}' with model '${model || 'default'}'.`, 400);
+      throw new ApiValidationError(
+        `Duplicate candidate '${ag}' with model '${model || 'default'}'.`,
+        400
+      );
     }
     seenCandidates.add(sig);
 
@@ -512,7 +626,7 @@ export async function handleBestOfStart(
 
   let reviewers = Array.isArray(body.reviewers)
     ? (body.reviewers as string[]).map((r) => String(r).trim().toLowerCase())
-    : [...ctx.registry.defaults.council];
+    : [...(ctx.registry?.defaults?.council ?? ['claude', 'codex'])];
   if (reviewers.length === 0) {
     reviewers = ['claude', 'codex'];
   }
@@ -534,17 +648,22 @@ export async function handleBestOfStart(
       origin: 'bestof',
     });
 
-    const jobRes = await ctx.startJob({
-      mode: 'task',
-      agent: cand.agent,
-      role,
-      model: cand.model,
-      effort: cand.effort,
-      project_path: wtRes.worktree.worktree_path,
-      prompt,
-    });
-
-    const jobId = String(jobRes.job_id ?? '');
+    let jobId = '';
+    let jobStatus = 'RUNNING';
+    try {
+      const jobRes = await ctx.startJob({
+        mode: 'task',
+        agent: cand.agent,
+        role,
+        model: cand.model,
+        effort: cand.effort,
+        project_path: wtRes.worktree.worktree_path,
+        prompt,
+      });
+      jobId = String(jobRes.job_id ?? '');
+    } catch {
+      jobStatus = 'FAILED';
+    }
 
     candidatesRecords.push({
       i: candidateIdx,
@@ -553,7 +672,7 @@ export async function handleBestOfStart(
       effort: cand.effort,
       worktree_id: wtName,
       job_id: jobId,
-      job_status: 'RUNNING',
+      job_status: jobStatus,
       started_at: new Date().toISOString(),
       diff: null,
       tests: null,
@@ -590,8 +709,8 @@ export async function handleBestOfStatus(
   query: URLSearchParams
 ): Promise<Record<string, unknown>> {
   const id = String(query.get('id') ?? '').trim();
-  if (!id) {
-    throw new ApiValidationError('Missing best-of-N run id.', 400);
+  if (!id || !BESTOF_ID_REGEX.test(id)) {
+    throw new ApiValidationError('Invalid best-of-N run id.', 400);
   }
 
   const dataDir = ctx.paths.featureDataDir('worktrees');
@@ -631,10 +750,7 @@ export async function handleBestOfList(
     try {
       const run = JSON.parse(fs.readFileSync(path.win32.join(bestofDir, f), 'utf8')) as BestOfRun;
       if (run) {
-        if (
-          !projectPath ||
-          run.project_path.toLowerCase() === projectPath.toLowerCase()
-        ) {
+        if (!projectPath || run.project_path.toLowerCase() === projectPath.toLowerCase()) {
           runs.push(run);
         }
       }
@@ -659,8 +775,8 @@ export async function handleBestOfPick(
   }
 
   const id = String(body.id ?? '').trim();
-  if (!id) {
-    throw new ApiValidationError('Missing best-of-N run id.', 400);
+  if (!id || !BESTOF_ID_REGEX.test(id)) {
+    throw new ApiValidationError('Invalid best-of-N run id.', 400);
   }
 
   const candIndex = Number(body.candidate);
@@ -681,9 +797,18 @@ export async function handleBestOfPick(
       throw new ApiValidationError(`Candidate ${candIndex} not found in run '${id}'.`, 404);
     }
 
+    // N5: Refuse (409) if picked candidate is RUNNING
+    if (candidate.job_status === 'RUNNING') {
+      throw new ApiValidationError('Candidate job is still running.', 409);
+    }
+
+    // N5: Pass owner, message, remove, force to handleWorktreeMerge
     const mergeRes = await handleWorktreeMerge(ctx, {
       id: candidate.worktree_id,
       strategy: String(body.strategy ?? 'squash').trim() || 'squash',
+      owner: body.owner,
+      message: body.message,
+      remove: body.remove,
       force: body.force === true,
       confirm: true,
     });
@@ -692,9 +817,20 @@ export async function handleBestOfPick(
       return mergeRes;
     }
 
+    // N5: Cancel running jobs of other candidates before discarding
     if (body.discard_others !== false) {
       for (const other of run.candidates) {
         if (other.i !== candIndex) {
+          if (other.job_id) {
+            try {
+              await handleCancelJob({ job_id: other.job_id }, ctx.paths);
+            } catch {}
+          }
+          if (other.council?.job_id) {
+            try {
+              await handleCancelJob({ job_id: other.council.job_id }, ctx.paths);
+            } catch {}
+          }
           try {
             await handleWorktreeDiscard(ctx, {
               id: other.worktree_id,
@@ -732,8 +868,8 @@ export async function handleBestOfCancel(
   }
 
   const id = String(body.id ?? '').trim();
-  if (!id) {
-    throw new ApiValidationError('Missing best-of-N run id.', 400);
+  if (!id || !BESTOF_ID_REGEX.test(id)) {
+    throw new ApiValidationError('Invalid best-of-N run id.', 400);
   }
 
   const dataDir = ctx.paths.featureDataDir('worktrees');
@@ -744,22 +880,19 @@ export async function handleBestOfCancel(
       throw new ApiValidationError(`Best-of-N run '${id}' not found.`, 404);
     }
 
+    // N5: Cancel running jobs and council jobs via handleCancelJob
     for (const c of run.candidates) {
-      if (c.job_status === 'RUNNING') {
-        const metaFile = path.win32.join(ctx.paths.jobsDir, `${c.job_id}.json`);
-        if (isFileSafe(metaFile)) {
-          try {
-            const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { pid?: number };
-            const pid = Math.trunc(Number(meta.pid ?? 0) || 0);
-            if (pid > 0) {
-              await runCommand('taskkill.exe', ['/PID', String(pid), '/T', '/F'], { timeoutMs: 8000 });
-            }
-          } catch {
-            // Ignore kill errors
-          }
-        }
-        c.job_status = 'CANCELLED';
+      if (c.job_id) {
+        try {
+          await handleCancelJob({ job_id: c.job_id }, ctx.paths);
+        } catch {}
       }
+      if (c.council?.job_id) {
+        try {
+          await handleCancelJob({ job_id: c.council.job_id }, ctx.paths);
+        } catch {}
+      }
+      c.job_status = 'CANCELLED';
     }
 
     run.state = 'cancelled';

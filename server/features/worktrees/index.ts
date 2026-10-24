@@ -3,7 +3,13 @@ import path from 'node:path';
 import type { MawFeature } from '../../lib/feature.ts';
 import { isDirectorySafe, isFileSafe, resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
-import { createCheckpoint, gitRun, snapshotTree } from '../checkpoints/snapshot.ts';
+import {
+  createCheckpoint,
+  gitRun,
+  JOB_ID_REGEX,
+  snapshotTree,
+  validateRelativePath,
+} from '../checkpoints/snapshot.ts';
 import {
   handleBestOfCancel,
   handleBestOfList,
@@ -38,7 +44,7 @@ import {
 
 export async function computeWorktreeLiveStats(
   record: WorktreeRecord,
-  jobsDir: string
+  jobStatusSource?: Map<string, string> | string
 ): Promise<WorktreeLiveStats> {
   const wtPath = record.worktree_path;
   if (!isDirectorySafe(wtPath)) {
@@ -104,13 +110,17 @@ export async function computeWorktreeLiveStats(
 
   let jobStatus: string | null = null;
   if (record.job_id) {
-    const metaFile = path.win32.join(jobsDir, `${record.job_id}.json`);
-    if (isFileSafe(metaFile)) {
-      try {
-        const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { status?: string };
-        jobStatus = meta.status || null;
-      } catch {
-        jobStatus = null;
+    if (jobStatusSource instanceof Map) {
+      jobStatus = jobStatusSource.get(record.job_id) ?? null;
+    } else if (typeof jobStatusSource === 'string') {
+      const metaFile = path.win32.join(jobStatusSource, `${record.job_id}.json`);
+      if (isFileSafe(metaFile)) {
+        try {
+          const meta = JSON.parse(fs.readFileSync(metaFile, 'utf8')) as { status?: string };
+          jobStatus = meta.status || null;
+        } catch {
+          jobStatus = null;
+        }
       }
     }
   }
@@ -233,23 +243,46 @@ export const feature: MawFeature = {
           return loaded;
         });
 
-        const list: WorktreeWithLive[] = [];
-        for (const wt of store.worktrees) {
-          if (
-            projectPath &&
-            wt.project_path.toLowerCase() !== projectPath.toLowerCase()
-          ) {
-            continue;
+        // W9: Single ctx.readJobs() call to build job status map
+        const jobStatusMap = new Map<string, string>();
+        try {
+          const allJobs = await ctx.readJobs();
+          for (const j of allJobs) {
+            const jId = String(j.id ?? j.job_id ?? '').trim();
+            const jStatus = String(j.status ?? '').trim();
+            if (jId) {
+              jobStatusMap.set(jId, jStatus);
+            }
+          }
+        } catch {
+          // Keep empty map on failure
+        }
+
+        const filtered = store.worktrees.filter((wt) => {
+          if (projectPath && wt.project_path.toLowerCase() !== projectPath.toLowerCase()) {
+            return false;
           }
           if (!includeAll && wt.status !== 'active') {
-            continue;
+            return false;
           }
+          return true;
+        });
 
-          const live = await computeWorktreeLiveStats(wt, ctx.paths.jobsDir);
-          list.push({
-            ...wt,
-            live,
-          });
+        // W11: Cap live stats concurrency at 4
+        const list: WorktreeWithLive[] = [];
+        const CONCURRENCY_LIMIT = 4;
+        for (let i = 0; i < filtered.length; i += CONCURRENCY_LIMIT) {
+          const chunk = filtered.slice(i, i + CONCURRENCY_LIMIT);
+          const chunkResults = await Promise.all(
+            chunk.map(async (wt) => {
+              const live = await computeWorktreeLiveStats(wt, jobStatusMap);
+              return {
+                ...wt,
+                live,
+              };
+            })
+          );
+          list.push(...chunkResults);
         }
 
         return {
@@ -285,14 +318,18 @@ export const feature: MawFeature = {
         });
         const mergeBase = mbRes.code === 0 && mbRes.stdout.trim() ? mbRes.stdout.trim() : record.base_commit;
 
-        const subPath = req.url.searchParams.get('path') ?? undefined;
+        const rawSubPath = req.url.searchParams.get('path');
+        let subPath: string | undefined = undefined;
+        if (rawSubPath && rawSubPath.trim()) {
+          subPath = validateRelativePath(rawSubPath.trim());
+        }
 
-        // Diff from mergeBase to WORKTREE snapshot
+        // Diff from mergeBase to WORKTREE snapshot (C12: without -M)
         const fromTree = mergeBase;
         const toTree = await snapshotTree(wtPath);
 
-        const rawArgs = ['diff', '--raw', '-M', fromTree, toTree];
-        const numstatArgs = ['diff', '--numstat', '-M', fromTree, toTree];
+        const rawArgs = ['diff', '--raw', fromTree, toTree];
+        const numstatArgs = ['diff', '--numstat', fromTree, toTree];
         const patchArgs = ['diff', fromTree, toTree];
 
         if (subPath) {
@@ -432,8 +469,9 @@ export const feature: MawFeature = {
       method: 'POST',
       handler: async (ctx, req) => {
         const jobId = String(req.body.job_id ?? '').trim();
-        if (!jobId) {
-          throw new ApiValidationError('job_id is required for fork.', 400);
+        // F1: Validate job_id with JOB_ID_REGEX
+        if (!jobId || !JOB_ID_REGEX.test(jobId)) {
+          throw new ApiValidationError('Invalid job_id.', 400);
         }
 
         const metaFile = path.win32.join(ctx.paths.jobsDir, `${jobId}.json`);
@@ -451,7 +489,22 @@ export const feature: MawFeature = {
           throw new ApiValidationError(`Job meta unreadable: ${jobId}`, 404);
         }
 
-        const originalPrompt = fs.readFileSync(promptFile, 'utf8');
+        // F2: Strip UTF-8 BOM if present
+        let originalPrompt = fs.readFileSync(promptFile, 'utf8');
+        if (originalPrompt.charCodeAt(0) === 0xfeff) {
+          originalPrompt = originalPrompt.slice(1);
+        }
+
+        // F2: Pre-validate agent and role before creating worktree
+        const forkAgent = String(req.body.agent ?? meta.agent ?? 'antigravity').trim();
+        const forkRole = String(req.body.role ?? meta.role ?? 'backend').trim();
+        const enabledAgents = (ctx.registry?.agents ?? []).map((a) => a.id);
+        if (!enabledAgents.includes(forkAgent)) {
+          throw new ApiValidationError(`Unknown or disabled agent '${forkAgent}'.`, 400);
+        }
+        if (!forkRole || forkRole.startsWith('-')) {
+          throw new ApiValidationError(`Invalid role '${forkRole}'.`, 400);
+        }
 
         let rawLog = '';
         if (isFileSafe(logFile)) {
@@ -471,21 +524,23 @@ export const feature: MawFeature = {
         const store = await loadWorktreesStore(dataDir);
         const sourceWt = store.worktrees.find((w) => w.job_id === jobId);
 
-        let forkBase: string | undefined;
+        let forkBase: string | undefined = undefined;
+        let forkStartPoint: string | undefined = undefined;
         let projectPath = String(meta.project_path ?? ctx.paths.repoRoot).trim();
 
+        // W4: Result fork passes sourceWt.base as base and snapshot commit as start_point
         if (baseOption === 'result' && sourceWt && isDirectorySafe(sourceWt.worktree_path)) {
-          // Result base: snapshot commit of source worktree
           projectPath = sourceWt.project_path;
+          forkBase = sourceWt.base;
           try {
             const snapRes = await createCheckpoint(sourceWt.worktree_path, {
               jobKey: 'fork-source',
               event: 'safety',
               label: `snapshot before fork of job ${jobId}`,
             });
-            forkBase = snapRes.checkpoint.commit;
+            forkStartPoint = snapRes.checkpoint.commit;
           } catch {
-            forkBase = sourceWt.branch;
+            forkStartPoint = undefined;
           }
         }
 
@@ -521,14 +576,13 @@ export const feature: MawFeature = {
           ].join('\n');
         }
 
-        const forkAgent = String(req.body.agent ?? meta.agent ?? 'antigravity').trim();
-        const forkRole = String(req.body.role ?? meta.role ?? 'backend').trim();
         const forkModel = req.body.model ? String(req.body.model).trim() : undefined;
         const forkEffort = req.body.effort ? String(req.body.effort).trim() : undefined;
 
         const wtRes = await createWorktreeRecord(ctx, {
           project_path: projectPath,
           base: forkBase,
+          start_point: forkStartPoint,
           name: generateWorktreeName('fork'),
           owner: forkAgent,
           origin: 'fork',

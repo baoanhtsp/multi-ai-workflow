@@ -54,6 +54,7 @@ export async function handleGitLog(
   const commits: Array<{
     sha: string;
     short_sha: string;
+    short: string;
     author: string;
     date: string;
     subject: string;
@@ -67,6 +68,7 @@ export async function handleGitLog(
       commits.push({
         sha: parts[0]!,
         short_sha: parts[1]!,
+        short: parts[1]!,
         author: parts[2]!,
         date: parts[3]!,
         subject: parts[4]!,
@@ -106,8 +108,8 @@ export async function handleGitDiff(
     subPath = validateRelativePath(rawSubPath.trim());
   }
 
-  const rawArgs = ['diff', '--raw', '-M'];
-  const numstatArgs = ['diff', '--numstat', '-M'];
+  const rawArgs = ['diff', '--raw'];
+  const numstatArgs = ['diff', '--numstat'];
   const patchArgs = ['diff'];
 
   if (isStaged) {
@@ -244,7 +246,8 @@ export async function handleGitPull(
 
   const output = `${res.stdout}\n${res.stderr}`.trim().slice(-4000);
   if (res.code !== 0) {
-    throw new ApiValidationError(`git pull failed: ${res.stderr.trim() || `exit code ${res.code}`}`, 500);
+    const errTail = (res.stderr.trim() || `exit code ${res.code}`).slice(-400);
+    throw new ApiValidationError(`git pull failed: ${errTail}`, 500);
   }
 
   return {
@@ -303,7 +306,8 @@ export async function handleGitPush(
 
   const output = `${res.stdout}\n${res.stderr}`.trim().slice(-4000);
   if (res.code !== 0) {
-    throw new ApiValidationError(`git push failed: ${res.stderr.trim() || `exit code ${res.code}`}`, 500);
+    const errTail = (res.stderr.trim() || `exit code ${res.code}`).slice(-400);
+    throw new ApiValidationError(`git push failed: ${errTail}`, 500);
   }
 
   return {
@@ -350,7 +354,8 @@ export async function handleGitBranchSwitch(
 
   const output = `${res.stdout}\n${res.stderr}`.trim().slice(-4000);
   if (res.code !== 0) {
-    throw new ApiValidationError(`git switch failed: ${res.stderr.trim() || `exit code ${res.code}`}`, 500);
+    const errTail = (res.stderr.trim() || `exit code ${res.code}`).slice(-400);
+    throw new ApiValidationError(`git switch failed: ${errTail}`, 500);
   }
 
   return {
@@ -386,6 +391,17 @@ export async function handleGitBranchCreate(
     args.push(base);
   }
 
+  const dataDir = ctx.paths.featureDataDir('worktrees');
+  const auditEntry = {
+    Timestamp: new Date().toISOString(),
+    Tool: 'maw-s1',
+    Action: 'git_branch_create',
+    Project: projectPath,
+    Detail: `git branch create ${name} (base: ${base || 'HEAD'}, switch: ${shouldSwitch})`,
+  };
+  appendAuditEntry(ctx.paths.auditFile, auditEntry);
+  appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+
   const res = await gitRun(args, {
     cwd: projectPath,
     allowFailure: true,
@@ -393,8 +409,9 @@ export async function handleGitBranchCreate(
 
   const output = `${res.stdout}\n${res.stderr}`.trim().slice(-4000);
   if (res.code !== 0) {
+    const errTail = (res.stderr.trim() || `exit code ${res.code}`).slice(-400);
     throw new ApiValidationError(
-      `git branch creation failed: ${res.stderr.trim() || `exit code ${res.code}`}`,
+      `git branch creation failed: ${errTail}`,
       500
     );
   }

@@ -69,7 +69,14 @@ export const feature: MawFeature = {
           throw new ApiValidationError('Invalid project path.', 400);
         }
 
-        const jobId = req.url.searchParams.get('job_id') ?? undefined;
+        const rawJobId = req.url.searchParams.get('job_id');
+        let jobId: string | undefined = undefined;
+        if (rawJobId !== null && rawJobId !== '') {
+          if (!validateJobKey(rawJobId)) {
+            throw new ApiValidationError('Invalid job key.', 400);
+          }
+          jobId = rawJobId;
+        }
         const rawLimit = Number(req.url.searchParams.get('limit') ?? 200);
         const limit = Number.isFinite(rawLimit) ? Math.min(500, Math.max(1, Math.trunc(rawLimit))) : 200;
 

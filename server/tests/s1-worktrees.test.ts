@@ -605,3 +605,133 @@ test('S1 Worktrees: V8 git actions (log, diff, branch create/switch, option inje
     cleanupWorktreeEnv(env);
   }
 });
+
+test('S1 Worktrees: option injection and path traversal rejected (worktree_create, bestof_status, job_fork)', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    // 1. worktree_create base=--orphan=x
+    const wtCreateHandler = feature.routes.worktree_create!.handler;
+    const wtReq = makeMockRequest(env.ctx, 'http://127.0.0.1/api?action=worktree_create', {
+      project_path: env.repoDir,
+      base: '--orphan=x',
+    });
+    await assert.rejects(
+      async () => await wtCreateHandler(wtReq, wtReq),
+      (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+    );
+
+    // 2. bestof_status id=..\..\x
+    const boStatHandler = feature.routes.bestof_status!.handler;
+    const boReq = makeMockRequest(
+      env.ctx,
+      'http://127.0.0.1/api?action=bestof_status&id=..\\..\\x'
+    );
+    await assert.rejects(
+      async () => await boStatHandler(boReq, boReq),
+      (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+    );
+
+    // 3. job_fork job_id=..\x
+    const forkHandler = feature.routes.job_fork!.handler;
+    const forkReq = makeMockRequest(env.ctx, 'http://127.0.0.1/api?action=job_fork', {
+      job_id: '..\\x',
+    });
+    await assert.rejects(
+      async () => await forkHandler(forkReq, forkReq),
+      (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+    );
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees: handleWorktreeJob cleans up worktree and branch if startJob throws (W2)', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    const brokenCtx: MawFeatureContext = {
+      ...env.ctx,
+      startJob: async () => {
+        throw new Error('Simulated runner failure');
+      },
+    };
+
+    await assert.rejects(
+      async () => {
+        await handleWorktreeJob(brokenCtx, {
+          project_path: env.repoDir,
+          agent: 'antigravity',
+        });
+      },
+      (err: any) => err instanceof Error && err.message === 'Simulated runner failure'
+    );
+
+    // Verify store has no active worktree
+    const store = await loadWorktreesStore(env.paths.featureDataDir('worktrees'));
+    assert.equal(store.worktrees.length, 0, 'No worktree record should remain');
+
+    // Verify git branches: no maw/* branch created
+    const branchRes = await runCommand('git', ['branch'], { cwd: env.repoDir });
+    assert.ok(!branchRes.stdout.includes('maw/'), 'Branch maw/* must be cleaned up');
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});
+
+test('S1 Worktrees: Best-of-N slow check returns immediately with tests.status running (N2)', async () => {
+  const env = await setupWorktreeEnv();
+  try {
+    // Add checks.json to repository
+    fs.mkdirSync(path.win32.join(env.repoDir, '.maw'), { recursive: true });
+    fs.writeFileSync(
+      path.win32.join(env.repoDir, '.maw', 'checks.json'),
+      JSON.stringify({
+        checks: [
+          {
+            name: 'slow-test',
+            command: ['git', 'status'],
+          },
+        ],
+      }),
+      'utf8'
+    );
+
+    const startRes = await handleBestOfStart(env.ctx, {
+      project_path: env.repoDir,
+      prompt: 'Check slow test running state',
+      role: 'backend',
+      candidates: [
+        { agent: 'antigravity' },
+        { agent: 'claude' },
+      ],
+      judge: 'tests',
+    });
+
+    const runId = String(startRes.id);
+    const run = startRes.run as Record<string, unknown>;
+    const candidates = run.candidates as Array<Record<string, unknown>>;
+
+    // Mark candidate jobs DONE
+    for (const c of candidates) {
+      const jId = String(c.job_id);
+      fs.writeFileSync(
+        path.win32.join(env.jobsDir, `${jId}.json`),
+        JSON.stringify({ job_id: jId, status: 'DONE' }),
+        'utf8'
+      );
+    }
+
+    // Call status to advance to judging and trigger background checks
+    const statRes = await handleBestOfStatus(
+      env.ctx,
+      new URLSearchParams(`id=${runId}`)
+    );
+    assert.equal(statRes.ok, true);
+    const updatedRun = statRes.run as Record<string, unknown>;
+    assert.equal(updatedRun.state, 'judging');
+    const cand1 = (updatedRun.candidates as Array<Record<string, unknown>>)[0]!;
+    assert.ok(cand1.tests);
+    assert.equal((cand1.tests as Record<string, unknown>).status, 'running');
+  } finally {
+    cleanupWorktreeEnv(env);
+  }
+});

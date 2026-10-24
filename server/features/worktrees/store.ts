@@ -13,6 +13,7 @@ export interface WorktreeRecord {
   branch: string; // maw/<name>
   base: string; // base branch name (or commit when detached)
   base_commit: string; // sha at creation
+  start_point?: string; // optional start point commit/ref (W4)
   port: number; // MAW_PORT, unique among active records, 4400–4999
   origin: 'manual' | 'job' | 'fork' | 'bestof' | 'handoff';
   job_id?: string; // job running in it
@@ -107,8 +108,7 @@ export async function saveWorktreesStore(dataDir: string, store: WorktreesStoreF
   }
 }
 
-export async function allocateWorktreePort(dataDir: string): Promise<number> {
-  const store = await loadWorktreesStore(dataDir);
+export function allocateWorktreePortFromStore(store: WorktreesStoreFile): number {
   const usedPorts = new Set<number>();
   for (const wt of store.worktrees) {
     if (wt.status === 'active' && typeof wt.port === 'number') {
@@ -122,6 +122,11 @@ export async function allocateWorktreePort(dataDir: string): Promise<number> {
     }
   }
   throw new ApiValidationError('No free worktree port available in range 4400-4999.', 500);
+}
+
+export async function allocateWorktreePort(dataDir: string): Promise<number> {
+  const store = await loadWorktreesStore(dataDir);
+  return allocateWorktreePortFromStore(store);
 }
 
 export async function resolveMainRepoRoot(projectPath: string): Promise<string> {
@@ -205,6 +210,15 @@ function matchSimpleGlob(relPath: string, pattern: string): boolean {
   return new RegExp(`^${escaped}$`).test(normPath);
 }
 
+const FORBIDDEN_DIRS = new Set([
+  '.git',
+  '.maw-wt',
+  'node_modules',
+  'vendor',
+  '.venv',
+  'dist',
+]);
+
 export function copyWorktreeIncludeFiles(repoRoot: string, wtPath: string): string[] {
   const patterns = parseWorktreeInclude(repoRoot);
   if (patterns.length === 0) {
@@ -212,53 +226,112 @@ export function copyWorktreeIncludeFiles(repoRoot: string, wtPath: string): stri
   }
 
   const copied: string[] = [];
+  const copiedSet = new Set<string>();
   let totalBytes = 0;
   const MAX_FILES = 200;
   const MAX_BYTES = 50 * 1024 * 1024;
 
-  function scanDir(dir: string, relBase: string): void {
-    if (copied.length >= MAX_FILES || totalBytes >= MAX_BYTES) return;
-    let entries: fs.Dirent[] = [];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
+  const directPatterns: string[] = [];
+  const globPatterns: string[] = [];
+
+  for (const pat of patterns) {
+    if (pat.includes('*') || pat.includes('?')) {
+      globPatterns.push(pat);
+    } else {
+      directPatterns.push(pat);
     }
+  }
 
-    for (const entry of entries) {
-      if (copied.length >= MAX_FILES || totalBytes >= MAX_BYTES) break;
-      const relPath = relBase ? `${relBase}/${entry.name}` : entry.name;
-      const fullPath = path.win32.join(dir, entry.name);
+  // 1. Direct copy non-glob files without traversal (W12)
+  for (const relPath of directPatterns) {
+    if (copied.length >= MAX_FILES || totalBytes >= MAX_BYTES) break;
+    if (copiedSet.has(relPath)) continue;
 
-      if (entry.isDirectory()) {
-        if (entry.name === '.git' || entry.name === '.maw-wt' || entry.name === 'node_modules') {
-          continue;
-        }
-        scanDir(fullPath, relPath);
-      } else if (entry.isFile()) {
-        const matches = patterns.some((pat) => matchSimpleGlob(relPath, pat));
-        if (matches) {
-          try {
-            const st = fs.statSync(fullPath);
-            if (totalBytes + st.size <= MAX_BYTES) {
-              const destPath = path.win32.join(wtPath, relPath.replace(/\//g, '\\'));
-              const destDir = path.dirname(destPath);
-              if (!isDirectorySafe(destDir)) {
-                fs.mkdirSync(destDir, { recursive: true });
-              }
-              fs.copyFileSync(fullPath, destPath);
-              copied.push(relPath);
-              totalBytes += st.size;
-            }
-          } catch {
-            // Ignore individual file copy error
+    const fullPath = path.win32.join(repoRoot, relPath.replace(/\//g, '\\'));
+    if (isFileSafe(fullPath)) {
+      try {
+        const st = fs.statSync(fullPath);
+        if (totalBytes + st.size <= MAX_BYTES) {
+          const destPath = path.win32.join(wtPath, relPath.replace(/\//g, '\\'));
+          const destDir = path.dirname(destPath);
+          if (!isDirectorySafe(destDir)) {
+            fs.mkdirSync(destDir, { recursive: true });
           }
+          fs.copyFileSync(fullPath, destPath);
+          copied.push(relPath);
+          copiedSet.add(relPath);
+          totalBytes += st.size;
         }
+      } catch {
+        // Ignore single file copy errors
       }
     }
   }
 
-  scanDir(repoRoot, '');
+  // 2. Optimized glob search
+  if (globPatterns.length > 0 && copied.length < MAX_FILES && totalBytes < MAX_BYTES) {
+    function scanDir(dir: string, relBase: string): void {
+      if (copied.length >= MAX_FILES || totalBytes >= MAX_BYTES) return;
+      let entries: fs.Dirent[] = [];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+
+      for (const entry of entries) {
+        if (copied.length >= MAX_FILES || totalBytes >= MAX_BYTES) break;
+        const relPath = relBase ? `${relBase}/${entry.name}` : entry.name;
+        const fullPath = path.win32.join(dir, entry.name);
+
+        if (entry.isDirectory()) {
+          if (FORBIDDEN_DIRS.has(entry.name)) {
+            continue;
+          }
+          // Only traverse if some glob pattern could match inside this directory
+          const couldMatch = globPatterns.some((pat) => {
+            if (pat === '**' || pat.startsWith('**/')) return true;
+            const prefix = pat.split(/[*?]/)[0] ?? '';
+            const dirPrefix = prefix.endsWith('/') ? prefix.slice(0, -1) : path.posix.dirname(prefix);
+            if (!dirPrefix || dirPrefix === '.') return true;
+            return (
+              dirPrefix.startsWith(relPath) ||
+              relPath.startsWith(dirPrefix) ||
+              matchSimpleGlob(relPath, pat)
+            );
+          });
+
+          if (couldMatch) {
+            scanDir(fullPath, relPath);
+          }
+        } else if (entry.isFile()) {
+          if (copiedSet.has(relPath)) continue;
+          const matches = globPatterns.some((pat) => matchSimpleGlob(relPath, pat));
+          if (matches) {
+            try {
+              const st = fs.statSync(fullPath);
+              if (totalBytes + st.size <= MAX_BYTES) {
+                const destPath = path.win32.join(wtPath, relPath.replace(/\//g, '\\'));
+                const destDir = path.dirname(destPath);
+                if (!isDirectorySafe(destDir)) {
+                  fs.mkdirSync(destDir, { recursive: true });
+                }
+                fs.copyFileSync(fullPath, destPath);
+                copied.push(relPath);
+                copiedSet.add(relPath);
+                totalBytes += st.size;
+              }
+            } catch {
+              // Ignore individual file copy error
+            }
+          }
+        }
+      }
+    }
+
+    scanDir(repoRoot, '');
+  }
+
   return copied;
 }
 
