@@ -558,7 +558,9 @@ All four are bilingual through `MAW.addI18n` and use the theme CSS variables onl
 3. **Fallback suggestion field**: when a `before-agent` hook returns `@{ Block = $true; Reason; Suggest = '<agent>' }`, print `HOOK_BLOCKED_SUGGEST: <agent>` as well. S4 already encodes it in the reason tag, so this is optional.
 4. **Live log redaction**: the runner (`jobs.ts`) could pipe each line through a redaction function before `AppendAllText`, or the server could redact in `job_status` / `job_stream`. Today S4 can only redact after the job finishes.
 5. **Sandbox flags**: an optional registry field `policy_args: { read_only: [...], approve: [...] }` per agent, which `invoke-agent.ps1` / `invoke-cli-agent.ps1` add when the role policy says so (§5.6 table).
-6. **`MAW.followJob(jobId)`** in `index.html`, so the job header can switch to the automatic re-run job. Until then, S4 shows a toast with the new job id.
+6. **`MAW.followJob(jobId)`** and **`MAW.refreshJobHead()`** in `index.html`.
+   - `followJob` lets the job header switch to the automatic re-run job. Until it exists, S4 shows a toast with the new job id.
+   - `refreshJobHead` repaints the job actions after S4 learns about a recovery item. Until it exists, `feat-budget.js` calls the global `renderJobHead` when it is there.
 7. **`install.ps1`** must copy `scripts/hooks/**` to the installed scripts folder. Otherwise the S4 / S1 / S2 / S3 hooks never run from the dashboard (it prefers the installed scripts). For development, start the server with `MAW_HOOKS_DIR=<worktree>\antigravity\skills\claude-leader\scripts\hooks`.
 8. **S3 inbox**: pull `s4_attention` (§6.1), or tell S4 the `inbox_add` contract.
 9. **S1 `worktree_merge` / S6 handoff merge**: call `checks_gate` and refuse when `green: false` unless the request carries an `override_token` from `checks_override` (§3.4).
