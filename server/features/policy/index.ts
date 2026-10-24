@@ -1,9 +1,10 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MawFeature, MawFeatureContext, MawFeatureRequest } from '../../lib/feature.ts';
 import { resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
-import type { RecoveryData } from '../fallback/index.ts';
+import { withRecoveryLock, type RecoveryData, type RecoveryItem } from '../fallback/index.ts';
 import {
   appendJsonl,
   createAttentionId,
@@ -664,6 +665,13 @@ export const feature: MawFeature = {
           throw new ApiValidationError(`Unknown approval id: ${id}`, 404);
         }
 
+        if (apr.status !== 'pending') {
+          throw new ApiValidationError(
+            `Approval '${id}' cannot be approved (status: ${apr.status}).`,
+            409
+          );
+        }
+
         apr.status = 'approved';
         apr.approved_at = new Date().toISOString();
         writeJsonAtomic(approvalsFile, approvals);
@@ -679,6 +687,45 @@ export const feature: MawFeature = {
             newJobId = String(started.job_id || '');
           }
         }
+
+        await withRecoveryLock(async () => {
+          const fallbackDir = ctx.paths.featureDataDir('fallback');
+          const recFile = path.win32.join(fallbackDir, 'recovery.json');
+          const recData = readJsonSafe<RecoveryData>(recFile, {
+            processed_jobs: [],
+            items: [],
+          }).data;
+
+          const existingItem = recData.items.find(
+            (it) => it.source_job_id === apr.job_id || it.new_job_id === apr.job_id
+          );
+          const rootJobId = existingItem ? existingItem.root_job_id : apr.job_id;
+
+          const now = new Date().toISOString();
+          const hex = crypto.randomBytes(6).toString('hex');
+          const recoveryItem: RecoveryItem = {
+            id: `rec_${hex}`,
+            created_at: now,
+            kind: 'approval',
+            status: 'started',
+            source_job_id: apr.job_id,
+            root_job_id: rootJobId,
+            new_job_id: newJobId || null,
+            agent: apr.agent,
+            role: apr.role,
+            fallback_agent: null,
+            attempt: 1,
+            next_at: null,
+            reason: `Policy approval for ${apr.command || apr.id}`,
+            error: null,
+          };
+
+          recData.items.push(recoveryItem);
+          if (recData.items.length > 500) {
+            recData.items = recData.items.slice(-500);
+          }
+          writeJsonAtomic(recFile, recData);
+        });
 
         appendPolicyAudit(ctx, 'policy_approve', { id, rerun, new_job_id: newJobId });
 
@@ -704,6 +751,13 @@ export const feature: MawFeature = {
         const apr = approvals.find((a) => a.id === id);
         if (!apr) {
           throw new ApiValidationError(`Unknown approval id: ${id}`, 404);
+        }
+
+        if (apr.status !== 'pending') {
+          throw new ApiValidationError(
+            `Approval '${id}' cannot be rejected (status: ${apr.status}).`,
+            409
+          );
         }
 
         apr.status = 'rejected';

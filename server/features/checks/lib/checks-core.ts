@@ -465,7 +465,7 @@ export function trustProjectChecks(
 // ============================================================================
 
 export interface ResolvedCommand {
-  type: 'exe' | 'shim' | 'cmd' | 'ps1';
+  type: 'exe' | 'shim' | 'cmd' | 'ps1' | 'not_found';
   file: string;
   args: string[];
 }
@@ -481,9 +481,10 @@ export function resolveCommandTarget(
     .filter(Boolean);
 
   let targetPath = '';
+  const hasSlash = path.isAbsolute(cmd) || cmd.includes('/') || cmd.includes('\\');
 
   // 1. Direct or relative file with extension
-  if (path.isAbsolute(cmd) || cmd.includes('/') || cmd.includes('\\')) {
+  if (hasSlash) {
     const resolved = path.resolve(cwd, cmd);
     if (fs.existsSync(resolved)) {
       targetPath = resolved;
@@ -491,7 +492,7 @@ export function resolveCommandTarget(
   }
 
   // 2. PATH resolution
-  if (!targetPath) {
+  if (!targetPath && !hasSlash) {
     const envPath = (process.env.PATH || '').split(path.delimiter);
     const hasExt = pathext.some((ext) => cmd.toLowerCase().endsWith(ext));
 
@@ -517,6 +518,13 @@ export function resolveCommandTarget(
   }
 
   if (!targetPath) {
+    if (!hasSlash) {
+      return {
+        type: 'not_found',
+        file: cmd,
+        args,
+      };
+    }
     // If not found, default to direct invocation of cmd
     targetPath = cmd;
   }
@@ -603,8 +611,26 @@ export async function runCheckProcess(
 
   const resolved = resolveCommandTarget(cmd0, rawArgs, cwd);
 
+  if (resolved.type === 'not_found') {
+    return {
+      state: check.required ? 'fail' : 'warn',
+      exit_code: 1,
+      duration_ms: 0,
+      output_tail: `command not found on PATH: ${cmd0}`,
+    };
+  }
+
   // If it's a .cmd or .bat that couldn't be resolved as a shim:
   if (resolved.type === 'cmd') {
+    if (!/^[A-Za-z0-9_\-.:\\/]+$/.test(resolved.file)) {
+      return {
+        state: 'fail',
+        exit_code: 1,
+        duration_ms: 0,
+        output_tail: 'unsafe path for a .cmd script',
+      };
+    }
+
     // Check safe argument pattern: ^[A-Za-z0-9_\-.:/\\=@+,]*$
     const safeArgRegex = /^[A-Za-z0-9_\-.:/\\=@+,]*$/;
     for (const arg of resolved.args) {
@@ -1193,4 +1219,64 @@ export async function computeGate(
     green,
     items,
   };
+}
+
+// ============================================================================
+// 8. Result & Summary Storage Helpers
+// ============================================================================
+
+export function normProjectKey(p: string): string {
+  return p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+}
+
+export function getStoredResults(
+  paths: { featureDataDir(f: string): string },
+  projectPath: string
+): CheckRunResult[] {
+  const hash = crypto.createHash('sha1').update(normProjectKey(projectPath)).digest('hex');
+  const file = path.win32.join(paths.featureDataDir('checks'), 'results', `${hash}.json`);
+  return readJsonSafe<CheckRunResult[]>(file, []).data;
+}
+
+export function saveStoredResults(
+  paths: { featureDataDir(f: string): string },
+  projectPath: string,
+  results: CheckRunResult[]
+): void {
+  const hash = crypto.createHash('sha1').update(normProjectKey(projectPath)).digest('hex');
+  const dir = path.win32.join(paths.featureDataDir('checks'), 'results');
+  const file = path.win32.join(dir, `${hash}.json`);
+  writeJsonAtomic(file, results);
+}
+
+export function getLastSummary(
+  paths: { featureDataDir(f: string): string }
+): Record<string, { green: boolean; at: string }> {
+  const file = path.win32.join(paths.featureDataDir('checks'), 'summary.json');
+  return readJsonSafe<Record<string, { green: boolean; at: string }>>(file, {}).data;
+}
+
+export function saveLastSummary(
+  paths: { featureDataDir(f: string): string },
+  projectPath: string,
+  green: boolean,
+  at: string
+): void {
+  const file = path.win32.join(paths.featureDataDir('checks'), 'summary.json');
+  const summary = getLastSummary(paths);
+  const key = normProjectKey(projectPath);
+  summary[key] = { green, at };
+
+  // Limit to 20 most recent
+  const keys = Object.keys(summary);
+  if (keys.length > 20) {
+    const sorted = keys.sort((a, b) => (summary[b]?.at || '').localeCompare(summary[a]?.at || ''));
+    const trimmed: Record<string, { green: boolean; at: string }> = {};
+    for (const k of sorted.slice(0, 20)) {
+      trimmed[k] = summary[k]!;
+    }
+    writeJsonAtomic(file, trimmed);
+    return;
+  }
+  writeJsonAtomic(file, summary);
 }

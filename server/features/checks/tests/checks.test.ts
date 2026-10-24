@@ -226,6 +226,36 @@ test('runCheckProcess: execution without shell, exit code, timeout with taskkill
     assert.equal(unsafeRes.exit_code, 1);
     assert.ok(unsafeRes.output_tail.includes('unsafe argument for a .cmd script'));
 
+    // 3b. Unsafe path for .cmd script is refused without spawning
+    const unsafeDir = path.join(dir, 'a&b');
+    fs.mkdirSync(unsafeDir, { recursive: true });
+    const unsafePathCmd = path.join(unsafeDir, 'script.cmd');
+    fs.writeFileSync(unsafePathCmd, '@echo off\r\necho TEST\r\n', 'utf8');
+    const unsafePathCheck: CheckItem = {
+      id: 'unsafe_path_cmd',
+      label: 'Unsafe Path CMD',
+      command: [unsafePathCmd, 'arg1'],
+      timeout_s: 5,
+      required: true,
+    };
+    const unsafePathRes = await runCheckProcess(unsafePathCheck, dir);
+    assert.equal(unsafePathRes.state, 'fail');
+    assert.equal(unsafePathRes.exit_code, 1);
+    assert.ok(unsafePathRes.output_tail.includes('unsafe path for a .cmd script'));
+
+    // 3c. Non-existent command on PATH is refused immediately without spawning
+    const missingCheck: CheckItem = {
+      id: 'missing_cmd',
+      label: 'Missing Command',
+      command: ['nonexistent_binary_xyz_123', '--flag'],
+      timeout_s: 5,
+      required: true,
+    };
+    const missingRes = await runCheckProcess(missingCheck, dir);
+    assert.equal(missingRes.state, 'fail');
+    assert.equal(missingRes.exit_code, 1);
+    assert.ok(missingRes.output_tail.includes('command not found on PATH: nonexistent_binary_xyz_123'));
+
     // 4. Timeout kills the process tree
     const hangScript = path.join(dir, 'hang.js');
     fs.writeFileSync(hangScript, 'setTimeout(() => {}, 60000);', 'utf8');

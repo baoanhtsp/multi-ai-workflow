@@ -1,5 +1,25 @@
 # 40-s4-before-agent.ps1 - S4 Before-Agent Hook (SPEC §9.0 / S4 Design §0.2, §1.3, §2.3)
 try {
+    # If caller is running in DryRun mode, preview is permitted without blocking
+    $isDry = $false
+    try {
+        if ($DryRun) { $isDry = $true }
+        elseif ($Context -is [System.Collections.IDictionary] -and $Context.ContainsKey("dry_run") -and $Context["dry_run"]) { $isDry = $true }
+        else {
+            $parentVar = Get-Variable -Name "DryRun" -Scope 1 -ErrorAction SilentlyContinue
+            if ($parentVar -and [bool]$parentVar.Value) { $isDry = $true }
+            else {
+                $parentVar2 = Get-Variable -Name "DryRun" -Scope 2 -ErrorAction SilentlyContinue
+                if ($parentVar2 -and [bool]$parentVar2.Value) { $isDry = $true }
+            }
+        }
+    } catch {
+        # Ignore
+    }
+    if ($isDry) {
+        return @{ Block = $false; Reason = "" }
+    }
+
     $runtimePath = ""
     if ($env:MAW_S4_RUNTIME -and (Test-Path -LiteralPath $env:MAW_S4_RUNTIME -PathType Leaf)) {
         $runtimePath = $env:MAW_S4_RUNTIME

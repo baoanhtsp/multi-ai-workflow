@@ -11,6 +11,8 @@ import {
   getProjectChecksSha256,
   isProjectChecksTrusted,
   runCheckProcess,
+  saveLastSummary,
+  saveStoredResults,
   validateChecksConfig,
   type CheckRunResult,
 } from '../checks/lib/checks-core.ts';
@@ -31,6 +33,7 @@ import {
   createDefaultFallbackConfig,
   createDefaultPolicyConfig,
   estimateNextCallCost,
+  extractProjectEnvSecrets,
   findProjectOverride,
   isPathInsideProject,
   loadBudgetConfig,
@@ -38,6 +41,7 @@ import {
   loadPolicyConfig,
   matchCommand,
   matchGlob,
+  parsePorcelainPaths,
   pickFallback,
   readAuditRows,
   readJsonSafe,
@@ -182,8 +186,18 @@ async function main(): Promise<void> {
 
               const { config: policyCfg } = loadPolicyConfig(paths.featureDataDir('policy'));
               if (policyCfg.enabled) {
-                const cleaned = cleanPromptText(rawPrompt);
-                const redactedPrompt = redactSecrets(cleaned);
+                let cleaned = cleanPromptText(rawPrompt);
+                if (policyCfg.global.redact_secrets !== false) {
+                  const envSecrets =
+                    policyCfg.global.redact_env_files !== false && project
+                      ? extractProjectEnvSecrets(project)
+                      : [];
+                  cleaned = redactSecrets(cleaned, [
+                    ...envSecrets,
+                    ...(policyCfg.global.secret_patterns || []),
+                  ]);
+                }
+                const redactedPrompt = cleaned;
 
                 let brief = generatePolicyBrief(role, policyCfg, false);
                 let fullPrompt = `${brief}\n\n${redactedPrompt}`;
@@ -740,19 +754,38 @@ async function main(): Promise<void> {
 
           const globalCfg = policyCfg.global;
           const roleCfg = policyCfg.roles[role] || {};
+          const profileRole = (process.env.MAW_ROLE_PROFILE || '').trim().toLowerCase();
+          const profileRoleCfg = (profileRole && policyCfg.roles[profileRole]) || {};
+
           const allowCmds = Array.from(
-            new Set([...(globalCfg.allow_commands || []), ...(roleCfg.allow_commands || [])])
+            new Set([
+              ...(globalCfg.allow_commands || []),
+              ...(roleCfg.allow_commands || []),
+              ...(profileRoleCfg.allow_commands || []),
+            ])
           );
           const denyCmds = Array.from(
-            new Set([...(globalCfg.deny_commands || []), ...(roleCfg.deny_commands || [])])
+            new Set([
+              ...(globalCfg.deny_commands || []),
+              ...(roleCfg.deny_commands || []),
+              ...(profileRoleCfg.deny_commands || []),
+            ])
           );
           const approveCmds = Array.from(
-            new Set([...(globalCfg.approve_commands || []), ...(roleCfg.approve_commands || [])])
+            new Set([
+              ...(globalCfg.approve_commands || []),
+              ...(roleCfg.approve_commands || []),
+              ...(profileRoleCfg.approve_commands || []),
+            ])
           );
           const protectedPaths = Array.from(
-            new Set([...(globalCfg.protected_paths || []), ...(roleCfg.protected_paths || [])])
+            new Set([
+              ...(globalCfg.protected_paths || []),
+              ...(roleCfg.protected_paths || []),
+              ...(profileRoleCfg.protected_paths || []),
+            ])
           );
-          const readOnly = roleCfg.read_only === true;
+          const readOnly = roleCfg.read_only === true || profileRoleCfg.read_only === true;
 
           // 1. Log scan for deny / approve commands
           if (logContent) {
@@ -797,9 +830,18 @@ async function main(): Promise<void> {
             }
 
             // In-place secret redaction of job log (Design §5.2.3)
-            const redacted = redactSecrets(logContent);
-            if (redacted !== logContent) {
-              fs.writeFileSync(logFile, redacted, 'utf8');
+            if (policyCfg.global.redact_secrets !== false) {
+              const envSecrets =
+                policyCfg.global.redact_env_files !== false && project
+                  ? extractProjectEnvSecrets(project)
+                  : [];
+              const redacted = redactSecrets(logContent, [
+                ...envSecrets,
+                ...(policyCfg.global.secret_patterns || []),
+              ]);
+              if (redacted !== logContent) {
+                fs.writeFileSync(logFile, redacted, 'utf8');
+              }
             }
           }
 
@@ -843,12 +885,30 @@ async function main(): Promise<void> {
 
               for (const cl of currentLines) {
                 if (!snapshotLines.has(cl)) {
-                  // Newly modified file
-                  const filePath = cl.slice(3).trim();
+                  // Newly modified files (handles renames & quoted paths)
+                  const filePaths = parsePorcelainPaths(cl);
+                  for (const filePath of filePaths) {
+                    // Protected path check
+                    for (const pattern of protectedPaths) {
+                      if (matchGlob(filePath, pattern)) {
+                        violations.push({
+                          id: 'viol_' + crypto.randomBytes(6).toString('hex'),
+                          ts: new Date().toISOString(),
+                          job_id: jobId,
+                          project,
+                          agent,
+                          role,
+                          kind: 'protected_path',
+                          severity: 'high',
+                          detail: `Modified protected path: ${filePath}`,
+                          file: filePath,
+                        });
+                        break;
+                      }
+                    }
 
-                  // Protected path check
-                  for (const pattern of protectedPaths) {
-                    if (matchGlob(filePath, pattern)) {
+                    // Read-only role check
+                    if (readOnly) {
                       violations.push({
                         id: 'viol_' + crypto.randomBytes(6).toString('hex'),
                         ts: new Date().toISOString(),
@@ -856,29 +916,12 @@ async function main(): Promise<void> {
                         project,
                         agent,
                         role,
-                        kind: 'protected_path',
+                        kind: 'read_only_write',
                         severity: 'high',
-                        detail: `Modified protected path: ${filePath}`,
+                        detail: `Read-only role modified file: ${filePath}`,
                         file: filePath,
                       });
-                      break;
                     }
-                  }
-
-                  // Read-only role check
-                  if (readOnly) {
-                    violations.push({
-                      id: 'viol_' + crypto.randomBytes(6).toString('hex'),
-                      ts: new Date().toISOString(),
-                      job_id: jobId,
-                      project,
-                      agent,
-                      role,
-                      kind: 'read_only_write',
-                      severity: 'high',
-                      detail: `Read-only role modified file: ${filePath}`,
-                      file: filePath,
-                    });
                   }
                 }
               }
@@ -951,6 +994,18 @@ async function main(): Promise<void> {
             return;
           }
 
+          const isTrusted = isProjectChecksTrusted(paths, workdir, shaInfo.sha256);
+          if (!isTrusted) {
+            const reason =
+              'Test gate: .maw/checks.json changed and is not trusted — review and trust it in the dashboard (Checks tab) [S4:gate]';
+            outputResult({
+              block: true,
+              reason,
+              lines: [reason],
+            });
+            return;
+          }
+
           let rawConfig: unknown = null;
           try {
             rawConfig = JSON.parse(shaInfo.content);
@@ -981,6 +1036,10 @@ async function main(): Promise<void> {
 
           // Evaluate gate (skip spec_guard and review as per design 3.4)
           const gate = await computeGate(paths, workdir, config, results, true, true);
+          const nowIso = new Date().toISOString();
+          saveStoredResults(paths, workdir, results);
+          saveLastSummary(paths, workdir, gate.green, nowIso);
+
           if (!gate.green) {
             const failedItems = gate.items.filter(
               (it) => it.state === 'fail' || it.state === 'timeout'

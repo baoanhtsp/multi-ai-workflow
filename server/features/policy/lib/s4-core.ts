@@ -1118,6 +1118,50 @@ export function isValidEnvSecret(key: string, value: string): boolean {
   return false;
 }
 
+export function extractProjectEnvSecrets(projectPath: string): string[] {
+  if (!projectPath || !fs.existsSync(projectPath)) return [];
+  const secrets = new Set<string>();
+  const MAX_FILE_SIZE = 256 * 1024; // 256 KB
+
+  try {
+    const entries = fs.readdirSync(projectPath, { withFileTypes: true });
+    for (const ent of entries) {
+      if (!ent.isFile()) continue;
+      const name = ent.name;
+      if (name === '.env' || name.startsWith('.env.')) {
+        const fullPath = path.join(projectPath, name);
+        try {
+          const stat = fs.statSync(fullPath);
+          if (stat.size > MAX_FILE_SIZE) continue;
+          const content = fs.readFileSync(fullPath, 'utf8');
+          const lines = content.split(/\r?\n/);
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) continue;
+            const stripped = trimmed.startsWith('export ') ? trimmed.slice(7).trim() : trimmed;
+            const eqIdx = stripped.indexOf('=');
+            if (eqIdx <= 0) continue;
+            const key = stripped.slice(0, eqIdx).trim();
+            let val = stripped.slice(eqIdx + 1).trim();
+            if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+              val = val.slice(1, -1);
+            }
+            if (isValidEnvSecret(key, val)) {
+              secrets.add(val);
+            }
+          }
+        } catch {
+          // Ignore unreadable env file
+        }
+      }
+    }
+  } catch {
+    // Ignore unreadable directory
+  }
+
+  return Array.from(secrets);
+}
+
 export function redactSecrets(text: string, extraValues?: string[]): string {
   if (!text) return '';
 
@@ -1281,6 +1325,36 @@ function matchGlobExact(str: string, pat: string): boolean {
   }
   const regex = new RegExp(`^${reStr}$`, 'i');
   return regex.test(str);
+}
+
+export function unquoteGitPath(raw: string): string {
+  const p = raw.trim();
+  if (p.startsWith('"') && p.endsWith('"') && p.length >= 2) {
+    try {
+      return JSON.parse(p);
+    } catch {
+      return p.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    }
+  }
+  return p;
+}
+
+export function parsePorcelainPaths(line: string): string[] {
+  if (!line || line.length < 3) return [];
+  const rawPath = line.substring(3).trim();
+  if (!rawPath) return [];
+
+  if (rawPath.includes(' -> ')) {
+    const parts = rawPath.split(' -> ');
+    if (parts.length === 2) {
+      const oldPath = unquoteGitPath(parts[0]!);
+      const newPath = unquoteGitPath(parts[1]!);
+      return [oldPath, newPath].filter(Boolean);
+    }
+  }
+
+  const single = unquoteGitPath(rawPath);
+  return single ? [single] : [];
 }
 
 // ============================================================================

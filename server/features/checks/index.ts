@@ -17,9 +17,14 @@ import {
   createDefaultChecksConfig,
   detectChecks,
   getGitInfo,
+  getLastSummary,
   getProjectChecksSha256,
+  getStoredResults,
   isProjectChecksTrusted,
+  normProjectKey,
   runCheckProcess,
+  saveLastSummary,
+  saveStoredResults,
   trustProjectChecks,
   validateChecksConfig,
   type CheckRunResult,
@@ -38,10 +43,6 @@ interface RunningProject {
 }
 
 const activeRuns = new Map<string, RunningProject>();
-
-function normProjectKey(p: string): string {
-  return p.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
-}
 
 function appendChecksAudit(
   ctx: MawFeatureContext,
@@ -65,53 +66,6 @@ function getOverrides(ctx: MawFeatureContext): ChecksOverride[] {
 function saveOverrides(ctx: MawFeatureContext, overrides: ChecksOverride[]): void {
   const file = path.win32.join(ctx.paths.featureDataDir('checks'), 'overrides.json');
   writeJsonAtomic(file, overrides);
-}
-
-function getStoredResults(ctx: MawFeatureContext, projectPath: string): CheckRunResult[] {
-  const hash = crypto.createHash('sha1').update(normProjectKey(projectPath)).digest('hex');
-  const file = path.win32.join(ctx.paths.featureDataDir('checks'), 'results', `${hash}.json`);
-  return readJsonSafe<CheckRunResult[]>(file, []).data;
-}
-
-function saveStoredResults(
-  ctx: MawFeatureContext,
-  projectPath: string,
-  results: CheckRunResult[]
-): void {
-  const hash = crypto.createHash('sha1').update(normProjectKey(projectPath)).digest('hex');
-  const dir = path.win32.join(ctx.paths.featureDataDir('checks'), 'results');
-  const file = path.win32.join(dir, `${hash}.json`);
-  writeJsonAtomic(file, results);
-}
-
-function getLastSummary(ctx: MawFeatureContext): Record<string, { green: boolean; at: string }> {
-  const file = path.win32.join(ctx.paths.featureDataDir('checks'), 'summary.json');
-  return readJsonSafe<Record<string, { green: boolean; at: string }>>(file, {}).data;
-}
-
-function saveLastSummary(
-  ctx: MawFeatureContext,
-  projectPath: string,
-  green: boolean,
-  at: string
-): void {
-  const file = path.win32.join(ctx.paths.featureDataDir('checks'), 'summary.json');
-  const summary = getLastSummary(ctx);
-  const key = normProjectKey(projectPath);
-  summary[key] = { green, at };
-
-  // Limit to 20 most recent
-  const keys = Object.keys(summary);
-  if (keys.length > 20) {
-    const sorted = keys.sort((a, b) => (summary[b]?.at || '').localeCompare(summary[a]?.at || ''));
-    const trimmed: Record<string, { green: boolean; at: string }> = {};
-    for (const k of sorted.slice(0, 20)) {
-      trimmed[k] = summary[k]!;
-    }
-    writeJsonAtomic(file, trimmed);
-    return;
-  }
-  writeJsonAtomic(file, summary);
 }
 
 // ============================================================================
@@ -304,7 +258,7 @@ export const feature: MawFeature = {
         (async () => {
           const gitInfo = getGitInfo(projectPath);
           const dirtySig = computeDirtySignature(gitInfo.porcelainLines);
-          const results: CheckRunResult[] = getStoredResults(ctx, projectPath);
+          const results: CheckRunResult[] = getStoredResults(ctx.paths, projectPath);
 
           for (const check of checksToRun) {
             if (runInfo.cancelled) break;
@@ -323,7 +277,7 @@ export const feature: MawFeature = {
             };
             if (runIdx >= 0) results[runIdx] = runningEntry;
             else results.push(runningEntry);
-            saveStoredResults(ctx, projectPath, results);
+            saveStoredResults(ctx.paths, projectPath, results);
 
             const res = await runCheckProcess(check, projectPath, (child) => {
               runInfo.childProcess = child;
@@ -344,7 +298,7 @@ export const feature: MawFeature = {
             const finalIdx = results.findIndex((r) => r.id === check.id);
             if (finalIdx >= 0) results[finalIdx] = finishedEntry;
             else results.push(finishedEntry);
-            saveStoredResults(ctx, projectPath, results);
+            saveStoredResults(ctx.paths, projectPath, results);
           }
 
           activeRuns.delete(normKey);
@@ -352,7 +306,7 @@ export const feature: MawFeature = {
           // Recompute gate and update summary
           try {
             const gate = await computeGate(ctx.paths, projectPath, config, results);
-            saveLastSummary(ctx, projectPath, gate.green, new Date().toISOString());
+            saveLastSummary(ctx.paths, projectPath, gate.green, new Date().toISOString());
           } catch {
             // Ignore
           }
@@ -386,7 +340,7 @@ export const feature: MawFeature = {
         const runId = active ? active.runId : null;
 
         const gitInfo = getGitInfo(projectPath);
-        const results = getStoredResults(ctx, projectPath);
+        const results = getStoredResults(ctx.paths, projectPath);
 
         const shaInfo = getProjectChecksSha256(projectPath);
         let config = createDefaultChecksConfig();
@@ -443,7 +397,7 @@ export const feature: MawFeature = {
           throw new ApiValidationError('Invalid project_path.', 400);
         }
 
-        const results = getStoredResults(ctx, projectPath);
+        const results = getStoredResults(ctx.paths, projectPath);
         const shaInfo = getProjectChecksSha256(projectPath);
         let config = createDefaultChecksConfig();
         let isUntrusted = false;
@@ -574,7 +528,7 @@ export const feature: MawFeature = {
   },
   status: async (ctx: MawFeatureContext) => {
     const running = Array.from(activeRuns.values()).map((r) => r.projectPath);
-    const last = getLastSummary(ctx);
+    const last = getLastSummary(ctx.paths);
     return {
       running,
       last,

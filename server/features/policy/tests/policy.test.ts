@@ -155,6 +155,86 @@ test('approval flow: pending -> approve -> single-use consumption and rerun trig
     // Verify approval file updated to 'approved'
     const updatedApprovals = JSON.parse(fs.readFileSync(approvalsFile, 'utf8')) as PolicyApproval[];
     assert.equal(updatedApprovals[0]!.status, 'approved');
+
+    // Item 4: Verify recovery item created in recovery.json
+    const fallbackDir = paths.featureDataDir('fallback');
+    const recFile = path.join(fallbackDir, 'recovery.json');
+    const recData = JSON.parse(fs.readFileSync(recFile, 'utf8'));
+    assert.equal(recData.items.length, 1);
+    const recItem = recData.items[0];
+    assert.equal(recItem.kind, 'approval');
+    assert.equal(recItem.status, 'started');
+    assert.equal(recItem.source_job_id, 'job_src_1');
+    assert.equal(recItem.root_job_id, 'job_src_1');
+    assert.equal(recItem.new_job_id, 'job_rerun_1');
+
+    // Item 4: Calling policy_approve again on non-pending returns 409
+    await assert.rejects(
+      async () => {
+        await approveHandler(ctx as any, reqMock as any);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 409);
+        assert.ok(err.message.includes('cannot be approved'));
+        return true;
+      }
+    );
+
+    // Item 4: Calling policy_reject on non-pending returns 409
+    const rejectHandler = policyFeature.routes['policy_reject']!.handler;
+    const rejectReqMock = {
+      body: { id: aprId },
+      url: new URL('http://localhost/api?action=policy_reject'),
+      query: new URLSearchParams(),
+      req: {} as any,
+      res: {} as any,
+      ctx,
+    };
+    await assert.rejects(
+      async () => {
+        await rejectHandler(ctx as any, rejectReqMock as any);
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 409);
+        assert.ok(err.message.includes('cannot be rejected'));
+        return true;
+      }
+    );
+
+    // Rejecting a pending item works, then rejecting again returns 409
+    const aprId2 = 'apr_test_reject';
+    const pendingApproval: PolicyApproval = {
+      id: aprId2,
+      job_id: 'job_src_2',
+      role,
+      agent: 'claude',
+      project: paths.projectsRoot,
+      command: 'DROP DATABASE',
+      prompt_sha256: promptSha256,
+      created_at: new Date().toISOString(),
+      status: 'pending',
+    };
+    writeJsonAtomic(approvalsFile, [...updatedApprovals, pendingApproval]);
+
+    const rejectRes = (await rejectHandler(
+      ctx as any,
+      { ...rejectReqMock, body: { id: aprId2 } } as any
+    )) as Record<string, unknown>;
+    assert.equal(rejectRes.ok, true);
+
+    await assert.rejects(
+      async () => {
+        await rejectHandler(
+          ctx as any,
+          { ...rejectReqMock, body: { id: aprId2 } } as any
+        );
+      },
+      (err: any) => {
+        assert.equal(err.statusCode, 409);
+        assert.ok(err.message.includes('cannot be rejected'));
+        return true;
+      }
+    );
   } finally {
     cleanup();
   }
@@ -359,6 +439,36 @@ test('HTTP status codes regression (Item 1): real HTTP server returns 400 on inv
     assert.equal(notFoundRes.statusCode, 404);
     assert.equal(notFoundRes.data.ok, false);
     assert.ok(String(notFoundRes.data.error).includes('not found'));
+
+    // 3. policy_approve and policy_reject on non-pending item -> must return HTTP 409
+    const policyDir = path.join(mawHome, 'data', 'policy');
+    fs.mkdirSync(policyDir, { recursive: true });
+    const approvalsFile = path.join(policyDir, 'approvals.json');
+    writeJsonAtomic(approvalsFile, [
+      {
+        id: 'apr_http_test',
+        job_id: 'job_http_1',
+        role: 'backend',
+        agent: 'claude',
+        project: tmp,
+        command: 'DROP TABLE',
+        prompt_sha256: 'abc',
+        created_at: new Date().toISOString(),
+        status: 'approved',
+      },
+    ]);
+
+    const badApproveRes = await requestJson('policy_approve', 'POST', {
+      id: 'apr_http_test',
+    });
+    assert.equal(badApproveRes.statusCode, 409);
+    assert.equal(badApproveRes.data.ok, false);
+
+    const badRejectRes = await requestJson('policy_reject', 'POST', {
+      id: 'apr_http_test',
+    });
+    assert.equal(badRejectRes.statusCode, 409);
+    assert.equal(badRejectRes.data.ok, false);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     try {
