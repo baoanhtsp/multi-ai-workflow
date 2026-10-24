@@ -1,0 +1,6 @@
+interface:
+  display_name: "Multi-AI Team Leader"
+  short_description: "Orchestrate Claude Code (100% Frontend) and Antigravity Gemini (Backend/Core)"
+  default_prompt: "Use $multi-ai-leader to design SPEC.md, delegate 100% Frontend to Claude Sonnet, delegate Backend/Tests to Antigravity (Gemini 4 Argon), and review the resulting git diff."
+policy:
+  allow_implicit_invocation: true
