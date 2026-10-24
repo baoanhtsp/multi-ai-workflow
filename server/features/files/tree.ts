@@ -34,7 +34,7 @@ export async function getFilesTree(options: {
   const rawDir = (options.dir ?? '').trim().replace(/\\/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
   const relDir = rawDir ? validateSafeRelativePath(projectPath, rawDir) : '';
 
-  const realProject = fs.realpathSync(projectPath);
+  const realProject = fs.realpathSync.native(projectPath);
   const targetDir = relDir ? path.win32.join(realProject, relDir.replace(/\//g, '\\')) : realProject;
 
   // Check git repo

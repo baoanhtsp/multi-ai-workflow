@@ -29,7 +29,7 @@ export async function searchProjectFiles(options: {
 
   const terms = rawQ.toLowerCase().split(/\s+/).filter(Boolean);
 
-  const realProject = fs.realpathSync(projectPath);
+  const realProject = fs.realpathSync.native(projectPath);
   const revParseRes = await runCommand('git', ['-C', realProject, 'rev-parse', '--is-inside-work-tree']);
   const isGit = revParseRes.code === 0 && revParseRes.stdout.trim() === 'true';
 

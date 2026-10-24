@@ -192,7 +192,7 @@ export function openFileInEditor(options: {
 }): { ok: true; command: string[] } {
   const { projectPath, relPath, line, paths, spawnFn } = options;
   const validRelPath = validateSafeRelativePath(projectPath, relPath);
-  const realProject = fs.realpathSync(projectPath);
+  const realProject = fs.realpathSync.native(projectPath);
   const fullFilePath = path.win32.join(realProject, validRelPath.replace(/\//g, '\\'));
 
   if (!fs.existsSync(fullFilePath)) {

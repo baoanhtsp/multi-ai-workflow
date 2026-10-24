@@ -45,7 +45,7 @@ export function validateSafeRelativePath(projectPath: string, relPath: string): 
 
   let realProject: string;
   try {
-    realProject = fs.realpathSync(projectPath);
+    realProject = fs.realpathSync.native(projectPath);
   } catch {
     throw new ApiValidationError('Invalid project_path.', 400);
   }
@@ -55,7 +55,7 @@ export function validateSafeRelativePath(projectPath: string, relPath: string): 
 
   let realTarget: string | null = null;
   try {
-    realTarget = fs.realpathSync(targetCandidate);
+    realTarget = fs.realpathSync.native(targetCandidate);
   } catch (err: unknown) {
     if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT') {
       throw new ApiValidationError('Invalid path.', 400);
@@ -79,7 +79,7 @@ export function validateSafeRelativePath(projectPath: string, relPath: string): 
     while (cur.length >= realProject.length) {
       let realCur: string | null = null;
       try {
-        realCur = fs.realpathSync(cur);
+        realCur = fs.realpathSync.native(cur);
       } catch (curErr: unknown) {
         if ((curErr as NodeJS.ErrnoException)?.code !== 'ENOENT') {
           throw new ApiValidationError('Invalid path.', 400);
@@ -596,7 +596,7 @@ export async function runReviewDiff(
         }
         if (wtPath && bName === ref) {
           try {
-            target_path = fs.realpathSync(wtPath);
+            target_path = fs.realpathSync.native(wtPath);
           } catch {
             target_path = wtPath;
           }

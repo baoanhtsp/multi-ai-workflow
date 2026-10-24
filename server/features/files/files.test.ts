@@ -356,7 +356,7 @@ test('files feature end-to-end: tree, dotfiles, .git excluded, path traversal, r
   // Conditional 8.3 GIT~1 test
   let gitShortNameResolves = false;
   try {
-    const candidateReal = fs.realpathSync(path.win32.join(projectDir, 'GIT~1'));
+    const candidateReal = fs.realpathSync.native(path.win32.join(projectDir, 'GIT~1'));
     if (candidateReal.toLowerCase().endsWith('.git')) {
       gitShortNameResolves = true;
     }
@@ -365,6 +365,7 @@ test('files feature end-to-end: tree, dotfiles, .git excluded, path traversal, r
   }
 
   if (gitShortNameResolves) {
+    // Direct directory alias
     await assert.rejects(
       async () => {
         await filesFeature.routes.files_tree.handler(
@@ -382,6 +383,46 @@ test('files feature end-to-end: tree, dotfiles, .git excluded, path traversal, r
       },
       (err: any) => err instanceof ApiValidationError && err.statusCode === 400,
       'Expected GIT~1 8.3 short name to be rejected with 400'
+    );
+
+    // Existing file inside .git via 8.3 alias
+    await assert.rejects(
+      async () => {
+        await filesFeature.routes.files_read.handler(
+          fakeCtx as any,
+          {
+            ...fakeCtx,
+            url: new URL(`http://127.0.0.1/api?action=files_read&project_path=${encodeURIComponent(projectDir)}&path=GIT~1/config`),
+            query: new URLSearchParams({ project_path: projectDir, path: 'GIT~1/config' }),
+            body: {},
+            req: {} as any,
+            res: {} as any,
+            ctx: fakeCtx,
+          }
+        );
+      },
+      (err: any) => err instanceof ApiValidationError && err.statusCode === 400,
+      'Expected GIT~1/config 8.3 short name to be rejected with 400'
+    );
+
+    // Non-existent file inside .git via 8.3 alias (ancestor walk)
+    await assert.rejects(
+      async () => {
+        await filesFeature.routes.files_read.handler(
+          fakeCtx as any,
+          {
+            ...fakeCtx,
+            url: new URL(`http://127.0.0.1/api?action=files_read&project_path=${encodeURIComponent(projectDir)}&path=GIT~1/nonexistent.txt`),
+            query: new URLSearchParams({ project_path: projectDir, path: 'GIT~1/nonexistent.txt' }),
+            body: {},
+            req: {} as any,
+            res: {} as any,
+            ctx: fakeCtx,
+          }
+        );
+      },
+      (err: any) => err instanceof ApiValidationError && err.statusCode === 400,
+      'Expected non-existent file under GIT~1 to be rejected with 400'
     );
   }
 

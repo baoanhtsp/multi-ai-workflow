@@ -35,7 +35,7 @@ export async function readProjectFile(
   relPathInput: string
 ): Promise<Record<string, unknown>> {
   const validPath = validateSafeRelativePath(projectPath, relPathInput);
-  const realProject = fs.realpathSync(projectPath);
+  const realProject = fs.realpathSync.native(projectPath);
   const fullPath = path.win32.join(realProject, validPath.replace(/\//g, '\\'));
 
   let stat: fs.Stats;
