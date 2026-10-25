@@ -14,6 +14,7 @@ import {
 export interface AuditLogRow {
   Timestamp: string;
   Tool: string;
+  Account?: string;
   Role: string;
   Model: string;
   WorkDir: string;
@@ -228,6 +229,7 @@ export function getAuditStats(auditFile: string): AuditStats {
     const rowItem: AuditLogRow = {
       Timestamp: String(entry.Timestamp ?? ''),
       Tool: tool,
+      Account: String(entry.Account ?? 'default').trim().toLowerCase() || 'default',
       Role: role,
       Model: modelName,
       WorkDir: String(entry.WorkDir ?? ''),
@@ -284,5 +286,9 @@ export function appendAuditEntry(auditFile: string, entry: Record<string, unknow
   if (!isDirectorySafe(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  fs.appendFileSync(auditFile, JSON.stringify(entry) + '\n', 'utf8');
+  const normalizedEntry: Record<string, unknown> = {
+    ...entry,
+    Account: String(entry.Account ?? 'default').trim().toLowerCase() || 'default',
+  };
+  fs.appendFileSync(auditFile, JSON.stringify(normalizedEntry) + '\n', 'utf8');
 }

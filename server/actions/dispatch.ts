@@ -96,6 +96,7 @@ export async function handleDispatch(
       appendAuditEntry(paths.auditFile, {
         Timestamp: new Date().toISOString(),
         Tool: 'antigravity',
+        Account: info.account || 'default',
         Role: role,
         Model: modelOverride || 'gemini-4-argon',
         WorkDir: validatedProjectPath,

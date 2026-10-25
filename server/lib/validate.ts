@@ -121,8 +121,23 @@ export function buildValidatedCommand(
   let conversationId: string | undefined;
   let resumeToken: string | undefined;
   let replyLanguage: 'vi' | 'en' | undefined;
+  let account: string | undefined;
   let cliArgs: string[] | undefined;
   let envVars: Record<string, string> | undefined;
+
+  if (body.account !== undefined && body.account !== null && String(body.account).trim() !== '') {
+    if (typeof body.account !== 'string') {
+      throw new ApiValidationError('Invalid account: must be a string.', 400);
+    }
+    const acc = body.account.trim().toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{0,23}$/.test(acc)) {
+      throw new ApiValidationError(
+        `Invalid account id '${body.account}'. Must match ^[a-z0-9][a-z0-9-]{0,23}$.`,
+        400
+      );
+    }
+    account = acc;
+  }
 
   if (body.reply_language !== undefined && body.reply_language !== null) {
     if (typeof body.reply_language !== 'string') {
@@ -432,6 +447,9 @@ export function buildValidatedCommand(
   }
   if (replyLanguage !== undefined) {
     baseInfo.reply_language = replyLanguage;
+  }
+  if (account !== undefined) {
+    baseInfo.account = account;
   }
   if (cliArgs !== undefined) {
     baseInfo.cli_args = cliArgs;

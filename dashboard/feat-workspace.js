@@ -12,7 +12,7 @@
       'ws.view': 'Không gian agent',
       'ws.agents': 'Agent', 'ws.chat': 'Trò chuyện', 'ws.panel': 'Bảng phụ',
       'ws.filter': 'Lọc agent…', 'ws.newAgent': '+ Agent', 'ws.newGroup': '+ Nhóm', 'ws.team': 'Thiết lập đội',
-      'ws.ungrouped': 'Chưa có nhóm', 'ws.noAgents': 'Chưa có agent nào. Tạo một agent hoặc thiết lập đội.', 'ws.noAgentsShort': 'Chưa có agent.', 'ws.noProjAgents': 'Dự án {p} chưa có agent.', 'ws.allProj': 'Mọi dự án ({n} agent khác)', 'ws.otherProj': 'agent này làm việc ở dự án khác với dự án đang chọn', 'ws.projGuideT': 'Dự án {p} chưa có agent', 'ws.projGuideX': 'Agent làm việc trong thư mục của một dự án. {n} agent hiện có thuộc dự án khác. Thiết lập đội để tạo agent làm việc trong {p}, hoặc xem agent của dự án khác.', 'ws.showAll': 'Xem agent dự án khác ({n})', 'ws.ed.lang': 'Ngôn ngữ trả lời', 'ws.ed.lang.auto': 'Theo giao diện dashboard', 'ws.ed.lang.vi': 'Tiếng Việt', 'ws.ed.lang.en': 'English', 'ws.guideT': 'Tạo đội agent đầu tiên', 'ws.guideX': 'Mỗi agent là một AI có tên, vai trò, thư mục làm việc và lịch sử chat riêng (ví dụ Lead, Worker, Tester). “Thiết lập đội” tạo cả nhóm từ một mẫu; sau đó chọn agent ở cột trái để trò chuyện và chuyển việc (handoff) giữa các agent.',
+      'ws.ungrouped': 'Chưa có nhóm', 'ws.noAgents': 'Chưa có agent nào. Tạo một agent hoặc thiết lập đội.', 'ws.noAgentsShort': 'Chưa có agent.', 'ws.noProjAgents': 'Dự án {p} chưa có agent.', 'ws.allProj': 'Mọi dự án ({n} agent khác)', 'ws.otherProj': 'agent này làm việc ở dự án khác với dự án đang chọn', 'ws.projGuideT': 'Dự án {p} chưa có agent', 'ws.projGuideX': 'Agent làm việc trong thư mục của một dự án. {n} agent hiện có thuộc dự án khác. Thiết lập đội để tạo agent làm việc trong {p}, hoặc xem agent của dự án khác.', 'ws.showAll': 'Xem agent dự án khác ({n})', 'ws.ed.lang': 'Ngôn ngữ trả lời', 'ws.ed.account': 'Tài khoản', 'ws.ed.account.auto': 'Tự chọn theo hạn mức', 'ws.ed.account.default': 'Mặc định', 'ws.lh.title': 'Hết hạn mức — bàn giao', 'ws.lh.go': 'Chuyển ngay', 'ws.lh.wait': 'Chờ tới lúc mở lại', 'ws.lh.done': 'Đã chuyển, kèm thư bàn giao.', 'ws.lh.declined': 'Đã chọn chờ tới lúc mở lại.', 'ws.ed.lang.auto': 'Theo giao diện dashboard', 'ws.ed.lang.vi': 'Tiếng Việt', 'ws.ed.lang.en': 'English', 'ws.guideT': 'Tạo đội agent đầu tiên', 'ws.guideX': 'Mỗi agent là một AI có tên, vai trò, thư mục làm việc và lịch sử chat riêng (ví dụ Lead, Worker, Tester). “Thiết lập đội” tạo cả nhóm từ một mẫu; sau đó chọn agent ở cột trái để trò chuyện và chuyển việc (handoff) giữa các agent.',
       'ws.pickAgent': 'Chọn một agent ở cột trái để bắt đầu trò chuyện.',
       'ws.noConv': 'Agent này chưa có cuộc trò chuyện.', 'ws.newConv': 'Cuộc trò chuyện mới',
       'ws.st.idle': 'Rảnh', 'ws.st.thinking': 'Đang suy nghĩ', 'ws.st.waiting': 'Đang chờ', 'ws.st.error': 'Lỗi', 'ws.st.needs-login': 'Cần đăng nhập',
@@ -66,7 +66,7 @@
       'ws.view': 'Workspace',
       'ws.agents': 'Agents', 'ws.chat': 'Chat', 'ws.panel': 'Panel',
       'ws.filter': 'Filter agents…', 'ws.newAgent': '+ Agent', 'ws.newGroup': '+ Group', 'ws.team': 'Team setup',
-      'ws.ungrouped': 'Ungrouped', 'ws.noAgents': 'No agents yet. Create one or set up a team.', 'ws.noAgentsShort': 'No agents yet.', 'ws.noProjAgents': '{p} has no agents yet.', 'ws.allProj': 'All projects ({n} other agents)', 'ws.otherProj': 'this agent works in another project than the selected one', 'ws.projGuideT': '{p} has no agents yet', 'ws.projGuideX': 'An agent works in the folder of one project. The {n} existing agents belong to other projects. Set up a team to create agents that work in {p}, or look at the agents of other projects.', 'ws.showAll': 'Show other projects ({n})', 'ws.ed.lang': 'Reply language', 'ws.ed.lang.auto': 'Follow the dashboard language', 'ws.ed.lang.vi': 'Tiếng Việt', 'ws.ed.lang.en': 'English', 'ws.guideT': 'Create your first agent team', 'ws.guideX': 'Each agent is an AI with a name, a role, a working folder and its own chat history (for example Lead, Worker, Tester). “Team setup” creates a whole team from a template; then pick an agent on the left to chat and hand work between agents.',
+      'ws.ungrouped': 'Ungrouped', 'ws.noAgents': 'No agents yet. Create one or set up a team.', 'ws.noAgentsShort': 'No agents yet.', 'ws.noProjAgents': '{p} has no agents yet.', 'ws.allProj': 'All projects ({n} other agents)', 'ws.otherProj': 'this agent works in another project than the selected one', 'ws.projGuideT': '{p} has no agents yet', 'ws.projGuideX': 'An agent works in the folder of one project. The {n} existing agents belong to other projects. Set up a team to create agents that work in {p}, or look at the agents of other projects.', 'ws.showAll': 'Show other projects ({n})', 'ws.ed.lang': 'Reply language', 'ws.ed.account': 'Account', 'ws.ed.account.auto': 'Pick by quota', 'ws.ed.account.default': 'Default', 'ws.lh.title': 'Out of quota — handoff', 'ws.lh.go': 'Switch now', 'ws.lh.wait': 'Wait until it resets', 'ws.lh.done': 'Switched, with a handoff letter.', 'ws.lh.declined': 'Chose to wait until it resets.', 'ws.ed.lang.auto': 'Follow the dashboard language', 'ws.ed.lang.vi': 'Tiếng Việt', 'ws.ed.lang.en': 'English', 'ws.guideT': 'Create your first agent team', 'ws.guideX': 'Each agent is an AI with a name, a role, a working folder and its own chat history (for example Lead, Worker, Tester). “Team setup” creates a whole team from a template; then pick an agent on the left to chat and hand work between agents.',
       'ws.pickAgent': 'Pick an agent on the left to start chatting.',
       'ws.noConv': 'This agent has no conversation yet.', 'ws.newConv': 'New conversation',
       'ws.st.idle': 'Idle', 'ws.st.thinking': 'Thinking', 'ws.st.waiting': 'Waiting', 'ws.st.error': 'Error', 'ws.st.needs-login': 'Needs login',
@@ -538,7 +538,7 @@
     const html = !a ? `<strong class="ws-top-title">${esc(t('ws.title'))}</strong><span class="ws-grow"></span><button type="button" class="help-btn" data-help="workspace" title="${esc(t('ws.help.tip'))}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.3-2.4 3.8"/><path d="M12 17.2h.01"/></svg><span>${esc(t('ws.help'))}</span></button>` : `
       <select id="wsTopAgent" class="ws-top-agent" aria-label="${esc(t('ws.agents'))}" ${S.agents.length ? '' : 'disabled'}>${opts || `<option>${esc(t('ws.agents'))}</option>`}</select>
       ${a ? `<span class="pill ws-projpill${inProject(a) ? '' : ' warn'}" title="${esc(a.workdir + (inProject(a) ? '' : ' — ' + t('ws.otherProj')))}"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>${esc(projName(a.workdir))}</span>` : ''}
-      ${a ? `<span class="pill ws-plat" title="${esc(plat?.label || a.platform)}"><span class="dot" style="background:${esc(plat?.color || 'var(--faint)')}"></span>${esc(plat?.label || a.platform)}${a.model ? ' · ' + esc(a.model) : ''}</span>` : ''}
+      ${a ? `<span class="pill ws-plat" title="${esc(plat?.label || a.platform)}"><span class="dot" style="background:${esc(plat?.color || 'var(--faint)')}"></span>${esc(plat?.label || a.platform)}${(c?.account || a.account) && (c?.account || a.account) !== 'default' ? ' · ' + esc(c?.account || a.account) : ''}${a.model ? ' · ' + esc(a.model) : ''}</span>` : ''}
       ${a ? (g?.branch ? `<span class="pill mono" title="${esc(a.workdir)}">⎇ ${esc(g.branch)}${g.ahead ? ` ↑${+g.ahead}` : ''}${g.behind ? ` ↓${+g.behind}` : ''}</span>` : `<span class="pill faint">${esc(g && g.has_git === false ? t('ws.noGit') : '⎇ …')}</span>`) : ''}
       ${a && g && g.modified !== undefined ? `<span class="pill ws-diffstat"><span class="t-ok">+</span><span class="t-err">−</span> ${esc(t('ws.files', { n: +g.modified || 0 }))}</span>` : ''}
       ${c ? `<span class="pill" title="${esc(t('ws.cost'))}">${esc(money(c.cost_usd))}</span>` : ''}
@@ -854,6 +854,7 @@
       </div>
       <label class="ws-f"><span>${esc(t('ws.ed.workdir'))}</span><input class="input mono" name="workdir" list="wsProjList" required value="${esc(cur.workdir)}"><datalist id="wsProjList">${projects.map(p => `<option value="${esc(p.path)}">${esc(p.name)}</option>`).join('')}</datalist></label>
       <label class="ws-f"><span>${esc(t('ws.ed.persona'))}</span><textarea name="persona" rows="3" maxlength="4000">${esc(cur.persona || '')}</textarea></label>
+      <label class="ws-f"><span>${esc(t('ws.ed.account'))}</span><select name="account"><option value="">${esc(t('ws.ed.account.auto'))}</option></select></label>
       <label class="ws-f"><span>${esc(t('ws.ed.lang'))}</span><select name="reply_language">${['', 'vi', 'en'].map(v => `<option value="${v}" ${(cur.reply_language || '') === v ? 'selected' : ''}>${esc(t('ws.ed.lang.' + (v || 'auto')))}</option>`).join('')}</select></label>
       <label class="ws-check"><input type="checkbox" name="bookmark" ${cur.bookmark ? 'checked' : ''}> ${esc(t('ws.ed.bm'))}</label>
       <details class="ws-adv"><summary>${esc(t('ws.ed.advanced'))}</summary>
@@ -874,7 +875,16 @@
       f.effort.disabled = !(p?.efforts || []).length;
     };
     fillME();
-    f.platform.onchange = () => { cur.platform = f.platform.value; fillME(); };
+    // Accounts of the chosen platform (S7); the field stays "auto" when the server has no accounts feature.
+    let accountList = null;
+    const fillAccounts = async () => {
+      if (!accountList) { try { accountList = (await get('account_list')).accounts || []; } catch { accountList = []; } }
+      const ids = ['default', ...accountList.filter(x => x.agent === f.platform.value && x.id !== 'default' && x.enabled !== false).map(x => x.id)];
+      f.account.innerHTML = `<option value="">${esc(t('ws.ed.account.auto'))}</option>` + ids.map(id => `<option value="${esc(id)}">${esc(id === 'default' ? t('ws.ed.account.default') : (accountList.find(x => x.agent === f.platform.value && x.id === id)?.label || id))}</option>`).join('');
+      f.account.value = ids.includes(cur.account) ? cur.account : '';
+    };
+    fillAccounts();
+    f.platform.onchange = () => { cur.platform = f.platform.value; fillME(); fillAccounts(); };
     qs('[data-refresh]', f).onclick = async ev => {
       ev.target.disabled = true;
       try { const d = await get('ws_platforms', { refresh: 1 }); S.platforms = d.platforms || S.platforms; f.platform.innerHTML = platOpts(); fillME(); } catch (e) { fail(e); }
@@ -889,7 +899,7 @@
           for (const line of f.env.value.split(/\r?\n/)) { const m = /^\s*([^=\s]+)\s*=(.*)$/.exec(line); if (m) env[m[1]] = m[2]; }
           const agent = {
             name: f.name.value.trim(), group_id: f.group_id.value, platform: f.platform.value, model: f.model.value, effort: f.effort.value,
-            workdir: f.workdir.value.trim(), role: f.role.value, persona: f.persona.value, reply_language: f.reply_language.value, bookmark: f.bookmark.checked,
+            workdir: f.workdir.value.trim(), role: f.role.value, persona: f.persona.value, reply_language: f.reply_language.value, account: f.account.value, bookmark: f.bookmark.checked,
             hooks: { before: f.before.value, after: f.after.value },
             retry_policy: { max_attempts: +f.max_attempts.value || 0, backoff_sec: +f.backoff_sec.value || 30 },
             cli_args: f.cli_args.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean), env,
@@ -991,6 +1001,15 @@
   }
   function msgHtml(m) {
     const a = curAgent();
+    if (m.role === 'system' && m.kind === 'limit_handoff') {
+      const st = m.handoff?.state || m.state || 'done';
+      return `<div class="ws-msg ws-lh is-${esc(st)}" data-seq="${m.seq}">
+        <div class="ws-lh-t"><b>${esc(t('ws.lh.title'))}</b><time>${esc(timeOf(m.ts))}</time></div>
+        <div class="ws-lh-x">${esc(m.text)}</div>
+        ${st === 'pending' ? `<div class="ws-lh-a"><button type="button" class="btn btn-sm btn-primary" data-lh="go">${esc(t('ws.lh.go'))}</button><button type="button" class="btn btn-sm" data-lh="decline">${esc(t('ws.lh.wait'))}</button></div>`
+          : `<div class="ws-lh-s">${esc(t(st === 'declined' ? 'ws.lh.declined' : 'ws.lh.done'))}</div>`}
+      </div>`;
+    }
     if (m.role === 'system') return `<div class="ws-msg ws-sys" data-seq="${m.seq}"><span>${esc(m.text)}</span><time>${esc(timeOf(m.ts))}</time></div>`;
     if (m.role === 'handoff') {
       const ho = S.handoffs.find(x => x.id === m.handoff_id);
@@ -1031,6 +1050,13 @@
     box.innerHTML = S.messages.length ? S.messages.map(msgHtml).join('') : `<div class="empty">…</div>`;
     qsa('[data-hid]', box).forEach(b => b.onclick = () => { setPanel('handoffs'); const card = qs(`[data-hcard="${CSS.escape(b.dataset.hid)}"]`, S.el); card?.scrollIntoView({ block: 'nearest' }); card?.classList.add('ws-flash'); });
     qsa('[data-retry]', box).forEach(b => b.onclick = () => retryFrom(+b.dataset.retry));
+    qsa('[data-lh]', box).forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try {
+        await post('chat_limit_handoff', b.dataset.lh === 'go' ? { conversation_id: S.conv.id } : { conversation_id: S.conv.id, decline: true });
+        await refreshConv(); renderAll();
+      } catch (e) { fail(e); b.disabled = false; }
+    });
     qsa('[data-tomem]', box).forEach(b => b.onclick = () => {
       const m = S.messages.find(x => x.seq === +b.dataset.tomem); if (!m) return;
       const first = m.text.split(/\r?\n/).find(l => l.trim()) || '';

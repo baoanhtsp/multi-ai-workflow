@@ -23,6 +23,7 @@ import {
   type FallbackConfig,
 } from '../policy/lib/s4-core.ts';
 import { syncAttentionToInbox } from '../policy/lib/inbox-bridge.ts';
+import { decideQuotaRoute, recordAccountRateLimited } from '../quota/store.ts';
 
 export interface RecoveryItem {
   id: string;
@@ -30,8 +31,10 @@ export interface RecoveryItem {
   source_job_id: string;
   kind: 'fallback' | 'transient' | 'usage_limit' | 'approval';
   agent: string;
+  account?: string;
   role: string;
   fallback_agent: string | null;
+  fallback_account?: string | null;
   attempt: number;
   status: 'waiting' | 'starting' | 'started' | 'done' | 'cancelled' | 'failed' | 'gave_up' | 'suggested';
   next_at: string | null;
@@ -354,6 +357,60 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
           pushRecoveryItem(item);
         }
       } else if (classified.kind === 'usage_limit') {
+        const failedAccount = String(meta.account ?? 'default').trim().toLowerCase() || 'default';
+        if (isKnownAgent) {
+          try {
+            recordAccountRateLimited(
+              ctx.paths,
+              ctx.registry,
+              failedAgent,
+              failedAccount,
+              classified.reset_at ?? null
+            );
+          } catch {}
+        }
+
+        // S7 §4.3: First try a new account of the same agent (or fallback agent when prefer_fallback_on_limit && auto_fallback) via §3.2 before waiting
+        if (isKnownAgent && !isMultiAgentMode) {
+          try {
+            const qDecision = decideQuotaRoute(ctx.paths, ctx.registry, {
+              agent: failedAgent,
+              role,
+              account: failedAccount,
+              refreshIfStale: false,
+            }).decision;
+            const isSameAgentOtherAcc =
+              qDecision.chosen.agent === failedAgent && qDecision.chosen.account !== failedAccount;
+            const isAllowedCrossAgent =
+              qDecision.chosen.agent !== failedAgent &&
+              routingCfg.recovery.prefer_fallback_on_limit &&
+              roleCfg.auto_fallback &&
+              Boolean(classified.reset_at);
+            if (qDecision.reason === 'switched' && (isSameAgentOtherAcc || isAllowedCrossAgent)) {
+              const item: RecoveryItem = {
+                id: generateRecoveryId(),
+                root_job_id: rootJobId,
+                source_job_id: jobId,
+                kind: 'fallback',
+                agent: failedAgent,
+                account: failedAccount,
+                role,
+                fallback_agent: qDecision.chosen.agent,
+                fallback_account: qDecision.chosen.account,
+                attempt,
+                status: 'waiting',
+                next_at: now.toISOString(),
+                reason: `Usage limit reached; switched to ${qDecision.chosen.agent}/${qDecision.chosen.account}`,
+                created_at: now.toISOString(),
+                new_job_id: null,
+                error: null,
+              };
+              pushRecoveryItem(item);
+              continue;
+            }
+          } catch {}
+        }
+
         // Item 13: usage_limit without a reset time = transient with the LONGEST backoff step (design 0.6), not 'suggested'
         if (!classified.reset_at) {
           const longestBackoffSec = routingCfg.recovery.backoff_s[routingCfg.recovery.backoff_s.length - 1] ?? 1800;
@@ -514,6 +571,15 @@ export async function scanFinishedJobs(ctx: MawFeatureContext): Promise<void> {
           pushRecoveryItem(item);
         }
       } else if (classified.kind === 'transient') {
+        const failedAccount = String(meta.account ?? 'default').trim().toLowerCase() || 'default';
+        if (
+          isKnownAgent &&
+          (classified.code === '429' || classified.code === 'rate_limit')
+        ) {
+          try {
+            recordAccountRateLimited(ctx.paths, ctx.registry, failedAgent, failedAccount, null);
+          } catch {}
+        }
         const stepIndex = Math.min(attempt - 1, routingCfg.recovery.backoff_s.length - 1);
         const backoffSec = routingCfg.recovery.backoff_s[stepIndex] ?? 30;
 
@@ -620,6 +686,9 @@ async function processDueItems(ctx: MawFeatureContext): Promise<void> {
       validAgentIds.has(item.fallback_agent)
     ) {
       runBody = replaceAgent(runBody, item.agent, item.fallback_agent);
+    }
+    if (item.fallback_account) {
+      runBody.account = item.fallback_account;
     }
     dueItemToStart = item;
   });
@@ -734,6 +803,9 @@ export async function applyRecoveryItem(
       validAgentIds.has(targetAgent)
     ) {
       runBody = replaceAgent(runBody, item.agent, targetAgent);
+    }
+    if (!customAgent && item.fallback_account) {
+      runBody.account = item.fallback_account;
     }
     itemToApply = item;
   });

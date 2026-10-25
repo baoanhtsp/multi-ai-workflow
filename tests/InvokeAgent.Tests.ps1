@@ -713,4 +713,54 @@ Describe "v4.0 Agent Registry (lib/maw-registry.ps1) & CLI Adapter (invoke-cli-a
         $LASTEXITCODE | Should -Be 0
         ($outNone | Out-String) | Should -Not -Match '# Language'
     }
+
+    It "S7: resolves -Account from accounts.json, forwards -Account in DryRun, and rejects unknown or disabled accounts" {
+        $tmpMaw = Join-Path $env:TEMP ("maw_s7_acc_" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $tmpMaw -Force | Out-Null
+        $accDir = Join-Path $tmpMaw "accounts\claude\work"
+        New-Item -ItemType Directory -Path $accDir -Force | Out-Null
+
+        $accJson = @{
+            version  = 1
+            accounts = @(
+                @{
+                    agent    = "claude"
+                    id       = "work"
+                    label    = "Claude Work"
+                    dir      = $accDir
+                    priority = 1
+                    enabled  = $true
+                },
+                @{
+                    agent    = "claude"
+                    id       = "disabled-acc"
+                    label    = "Disabled"
+                    dir      = $accDir
+                    priority = 2
+                    enabled  = $false
+                }
+            )
+        } | ConvertTo-Json -Depth 6
+        [System.IO.File]::WriteAllText((Join-Path $tmpMaw "accounts.json"), $accJson, (New-Object System.Text.UTF8Encoding($false)))
+
+        $prevMaw = $env:MAW_HOME
+        try {
+            $env:MAW_HOME = $tmpMaw
+
+            $outWork = & $script:invokeAgentPath -Agent claude -Account work -Role backend -WorkDir $script:repoRoot -Prompt "Test work account" -DryRun 2>&1
+            $LASTEXITCODE | Should -Be 0
+            ($outWork | Out-String) | Should -Match '-Account work'
+
+            $outUnknown = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:invokeAgentPath -Agent claude -Account nonexistent -Role backend -WorkDir $script:repoRoot -Prompt "Test unknown" -DryRun 2>&1
+            $LASTEXITCODE | Should -Not -Be 0
+            ($outUnknown | Out-String) | Should -Match 'Unknown account'
+
+            $outDisabled = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:invokeAgentPath -Agent claude -Account "disabled-acc" -Role backend -WorkDir $script:repoRoot -Prompt "Test disabled" -DryRun 2>&1
+            $LASTEXITCODE | Should -Not -Be 0
+            ($outDisabled | Out-String) | Should -Match 'disabled'
+        } finally {
+            $env:MAW_HOME = $prevMaw
+            Remove-Item -LiteralPath $tmpMaw -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }

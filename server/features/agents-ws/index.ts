@@ -108,6 +108,15 @@ function validateAgentFields(agent: Agent, ctx: MawFeatureContext): void {
     throw new ApiValidationError(`Invalid platform '${platform}'. Must be an enabled registry agent.`, 400);
   }
 
+  const rawAccount = String(agent.account ?? '').trim().toLowerCase();
+  if (rawAccount && !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(rawAccount)) {
+    throw new ApiValidationError(
+      `Invalid account id '${rawAccount}'. Must match ^[a-z0-9][a-z0-9_-]{0,31}$.`,
+      400
+    );
+  }
+  agent.account = rawAccount;
+
   const model = String(agent.model ?? '').trim();
   const allowed = allowedModels(ctx, platform);
   if (model && !allowed.includes(model)) {
@@ -502,6 +511,7 @@ export const feature: MawFeature = {
               group_id: String(rawAgent.group_id ?? '').trim(),
               order: typeof rawAgent.order === 'number' ? rawAgent.order : agentsData.agents.length,
               platform: String(rawAgent.platform ?? '').trim().toLowerCase(),
+              account: String(rawAgent.account ?? '').trim().toLowerCase(),
               model: String(rawAgent.model ?? '').trim(),
               effort: String(rawAgent.effort ?? '').trim(),
               workdir: String(rawAgent.workdir ?? '').trim(),

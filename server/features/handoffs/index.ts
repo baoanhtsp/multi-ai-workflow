@@ -111,6 +111,13 @@ export const feature: MawFeature = {
           const task = String(body.task ?? '').trim();
           const acceptance = String(body.acceptance ?? '').trim().slice(0, 1000);
           const thread = body.thread !== undefined && body.thread !== null ? String(body.thread).trim().slice(0, 60) : '';
+          const reqAccount =
+            body.account !== undefined && body.account !== null
+              ? String(body.account).trim().toLowerCase()
+              : '';
+          if (reqAccount && !/^[a-z0-9][a-z0-9_-]{0,31}$/.test(reqAccount)) {
+            throw new ApiValidationError(`Invalid account '${reqAccount}'.`, 400);
+          }
 
           if (!leadConvId) {
             throw new ApiValidationError('Missing lead_conversation_id.', 400);
@@ -267,6 +274,9 @@ export const feature: MawFeature = {
             worktree: '',
             branch: '',
             platform: memberPlatform,
+            ...(reqAccount || memberAgent?.account
+              ? { account: reqAccount || memberAgent?.account }
+              : {}),
             actual_model: '',
             created_at: new Date().toISOString(),
             started_at: '',

@@ -96,6 +96,13 @@
 .ws-pre { white-space: pre-wrap; word-break: break-word; }
 .ws-msg-att { margin-top: 4px; display: flex; gap: 4px; flex-wrap: wrap; }
 .ws-msg > .btn { margin-top: 6px; }
+.ws-lh { align-self: center; width: min(560px, 92%); padding: 10px 14px; border: 1px solid var(--warn); border-radius: 10px; background: var(--warn-soft); font-size: 12.5px; }
+.ws-lh.is-done, .ws-lh.is-declined { border-color: var(--border); background: var(--surface-2); }
+.ws-lh-t { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.ws-lh-t time { margin-left: auto; color: var(--faint); font-size: 11px; }
+.ws-lh-x { line-height: 1.5; color: var(--text); }
+.ws-lh-a { display: flex; gap: 8px; margin-top: 8px; }
+.ws-lh-s { margin-top: 6px; color: var(--muted); }
 .ws-sys { align-self: center; display: flex; gap: 10px; align-items: center; font-size: 12px; color: var(--muted); padding: 2px 10px; border: 1px dashed var(--border); border-radius: 999px; max-width: 92%; }
 .ws-hmsg { align-self: stretch; max-width: none; display: flex; align-items: center; gap: 8px; }
 .ws-hlink { flex: 1; min-width: 0; display: flex; gap: 8px; align-items: center; text-align: left; border: 1px solid var(--border); border-left: 3px solid var(--info); background: var(--surface); border-radius: 6px; padding: 7px 10px; font-size: 12.5px; cursor: pointer; color: var(--text); }

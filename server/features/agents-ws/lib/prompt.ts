@@ -96,7 +96,26 @@ export interface BuildPromptOptions {
   teamMembers?: PromptMemberInfo[];
   attachmentLines?: string[];
   replyLanguage?: string;
+  handoffLetter?: string;
   maxChars?: number; // default 17000
+}
+
+export function buildLimitHandoffLetter(opts: {
+  from: { agent: string; account: string };
+  reason: string;
+  summary?: string;
+  messages?: Array<{ role: string; text: string }>;
+}): string {
+  const header = `Continuing from ${opts.from.agent}/${opts.from.account} (stopped at ${opts.reason}). Pick up without repeating completed work.`;
+  if (opts.summary && opts.summary.trim()) {
+    return `${header}\n\n${opts.summary.trim().slice(0, 6000)}`;
+  }
+  const msgs = (opts.messages ?? []).slice(-10);
+  const rendered = msgs.map((m) => {
+    const t = String(m.text ?? '').trim().slice(0, 2500);
+    return `${String(m.role ?? 'user').toUpperCase()}:\n${t}`;
+  });
+  return rendered.length > 0 ? `${header}\n\n${rendered.join('\n\n')}` : header;
 }
 
 export interface GetMaxMessageCharsOptions {
@@ -252,14 +271,23 @@ export function buildPrompt(opts: BuildPromptOptions): string {
   const effectiveLang = resolveEffectiveReplyLanguage(opts.agent.reply_language, opts.replyLanguage);
   const languageSection = getLanguageSection(effectiveLang);
 
+  let handoffLetterSection = '';
+  if (opts.handoffLetter && opts.handoffLetter.trim()) {
+    const cleanLetter = opts.handoffLetter.trim().replace(/^#\s*Handoff letter\r?\n+/i, '');
+    handoffLetterSection = `# Handoff letter\n${cleanLetter}`;
+  }
+
   const assemble = (
     msgs: string[],
     mem: string,
     sum: string,
     agSec: string,
-    dispSec: string
+    dispSec: string,
+    hLetter = handoffLetterSection
   ): string => {
-    const sections: string[] = [agSec];
+    const sections: string[] = [];
+    if (hLetter) sections.push(hLetter);
+    sections.push(agSec);
     if (mem) sections.push(mem);
     if (sum) sections.push(sum);
     if (msgs.length > 0) {
@@ -342,6 +370,16 @@ export function buildPrompt(opts: BuildPromptOptions): string {
     if (currentFull.length > maxBudget && dispatchSection) {
       dispatchSection = '';
       currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection);
+    }
+    if (currentFull.length > maxBudget && handoffLetterSection) {
+      const withoutLetter = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection, '');
+      const allowed = maxBudget - withoutLetter.length - 4;
+      if (allowed > 40) {
+        handoffLetterSection = handoffLetterSection.slice(0, allowed);
+      } else {
+        handoffLetterSection = '';
+      }
+      currentFull = assemble(currentMsgs, currentMem, currentSum, agentSection, dispatchSection, handoffLetterSection);
     }
   }
 

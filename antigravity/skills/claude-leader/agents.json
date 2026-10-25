@@ -181,6 +181,9 @@
         "model_args": ["-m", "{model}"],
         "effort_args": [],
         "resume_args": ["--resume", "{session_id}"],
+        "account_env": {
+          "GEMINI_CLI_HOME": "{account_dir}"
+        },
         "output": "gemini-json",
         "max_arg_chars": 30000,
         "pricing": {

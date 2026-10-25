@@ -14,6 +14,7 @@ export interface Agent {
   group_id: string;
   order: number;
   platform: string;
+  account?: string;
   model: string;
   effort: string;
   workdir: string;

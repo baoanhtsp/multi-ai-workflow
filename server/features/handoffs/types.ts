@@ -29,6 +29,7 @@ export interface Handoff {
   worktree: string;
   branch: string;
   platform: string;
+  account?: string;
   actual_model: string;
   created_at: string;
   started_at: string;

@@ -143,11 +143,12 @@ export async function runCliWithShimFallback(
   cmd: string,
   args: string[],
   userProfile: string,
-  timeoutMs = 5000
+  timeoutMs = 5000,
+  env?: NodeJS.ProcessEnv
 ): Promise<{ code: number; stdout: string; stderr: string; resolvedPath: string | null }> {
   let resolved = resolveCliExecutable(cmd, userProfile);
   if (!resolved) {
-    const whereRes = await runCommand('where.exe', [cmd], { timeoutMs: 2500 });
+    const whereRes = await runCommand('where.exe', [cmd], { timeoutMs: 2500, env });
     if (whereRes.code === 0 && whereRes.stdout.trim() !== '') {
       const firstLine = whereRes.stdout
         .replace(/\r\n/g, '\n')
@@ -161,7 +162,7 @@ export async function runCliWithShimFallback(
   }
 
   if (!resolved) {
-    const directRes = await runCommand(cmd, args, { timeoutMs });
+    const directRes = await runCommand(cmd, args, { timeoutMs, env });
     return {
       code: directRes.code,
       stdout: directRes.stdout,
@@ -172,19 +173,19 @@ export async function runCliWithShimFallback(
 
   const ext = path.extname(resolved).toLowerCase();
   if (ext === '.cmd' || ext === '.bat') {
-    const res = await runCommand('cmd.exe', ['/d', '/s', '/c', resolved, ...args], { timeoutMs });
+    const res = await runCommand('cmd.exe', ['/d', '/s', '/c', resolved, ...args], { timeoutMs, env });
     return { code: res.code, stdout: res.stdout, stderr: res.stderr, resolvedPath: resolved };
   }
   if (ext === '.ps1') {
     const res = await runCommand(
       'powershell.exe',
       ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', resolved, ...args],
-      { timeoutMs }
+      { timeoutMs, env }
     );
     return { code: res.code, stdout: res.stdout, stderr: res.stderr, resolvedPath: resolved };
   }
 
-  const res = await runCommand(resolved, args, { timeoutMs });
+  const res = await runCommand(resolved, args, { timeoutMs, env });
   return { code: res.code, stdout: res.stdout, stderr: res.stderr, resolvedPath: resolved };
 }
 
@@ -249,20 +250,84 @@ function scanRecentJobErrors(
   return { hasError: hasAuthOrRateErr, isRateLimited, lastMinutesAgo: minsAgo };
 }
 
-function findCodexQuota(userProfile: string): {
+export interface CodexQuotaWindow {
+  id: '5h' | '7d' | 'custom';
   used_percent: number;
   resets_at: string;
-  window: string;
-} | null {
-  const sessionsDir = path.win32.join(userProfile, '.codex', 'sessions');
-  if (!isDirectorySafe(sessionsDir)) return null;
+  window_minutes: number;
+  source: 'provider';
+}
+
+export function mapCodexWindowMinutes(windowMinutes?: number | null): '5h' | '7d' | 'custom' {
+  if (windowMinutes === 300) return '5h';
+  if (windowMinutes === 10080) return '7d';
+  return 'custom';
+}
+
+export function parseCodexRateLimitsFromRolloutLine(line: string): CodexQuotaWindow[] {
+  if (!line.includes('"rate_limits"')) return [];
+  try {
+    const parsed = JSON.parse(line) as {
+      payload?: {
+        type?: string;
+        rate_limits?: {
+          primary?: { used_percent?: number; resets_at?: number; window_minutes?: number } | null;
+          secondary?: { used_percent?: number; resets_at?: number; window_minutes?: number } | null;
+        };
+      };
+      rate_limits?: {
+        primary?: { used_percent?: number; resets_at?: number; window_minutes?: number } | null;
+        secondary?: { used_percent?: number; resets_at?: number; window_minutes?: number } | null;
+      };
+    };
+    const rl = parsed.payload?.rate_limits ?? parsed.rate_limits;
+    if (!rl) return [];
+
+    const out: CodexQuotaWindow[] = [];
+    for (const rawWin of [rl.primary, rl.secondary]) {
+      if (!rawWin || typeof rawWin.used_percent !== 'number' || !Number.isFinite(rawWin.used_percent)) {
+        continue;
+      }
+      let resetsIso = '';
+      if (rawWin.resets_at && Number.isFinite(rawWin.resets_at)) {
+        const ms = rawWin.resets_at > 1e11 ? rawWin.resets_at : rawWin.resets_at * 1000;
+        resetsIso = new Date(ms).toISOString();
+      }
+      const winMinutes = typeof rawWin.window_minutes === 'number' ? rawWin.window_minutes : 0;
+      const winId = mapCodexWindowMinutes(winMinutes);
+      const existingIdx = out.findIndex((w) => w.id === winId);
+      const entry: CodexQuotaWindow = {
+        id: winId,
+        used_percent: Math.max(0, Math.min(100, rawWin.used_percent)),
+        resets_at: resetsIso,
+        window_minutes: winMinutes,
+        source: 'provider',
+      };
+      if (existingIdx >= 0) {
+        if (entry.used_percent >= out[existingIdx]!.used_percent) {
+          out[existingIdx] = entry;
+        }
+      } else {
+        out.push(entry);
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+export function findCodexQuotaWindows(
+  codexHomeDir: string,
+  options?: { maxAgeMs?: number }
+): CodexQuotaWindow[] {
+  const sessionsDir = path.win32.join(codexHomeDir, 'sessions');
+  if (!isDirectorySafe(sessionsDir)) return [];
 
   try {
-    // Find newest rollout-*.jsonl under sessions (<= 24h old)
     const now = Date.now();
-    const twentyFourHours = 24 * 3600 * 1000;
-    let newestFile: string | null = null;
-    let newestMtime = 0;
+    const maxAgeMs = options?.maxAgeMs ?? 7 * 24 * 3600 * 1000;
+    const candidates: Array<{ file: string; mtime: number }> = [];
 
     function walk(dir: string, depth = 0): void {
       if (depth > 6) return;
@@ -273,9 +338,8 @@ function findCodexQuota(userProfile: string): {
         } else if (entry.isFile() && entry.name.startsWith('rollout-') && entry.name.endsWith('.jsonl')) {
           try {
             const st = fs.statSync(full);
-            if (st.mtimeMs > newestMtime && now - st.mtimeMs <= twentyFourHours) {
-              newestMtime = st.mtimeMs;
-              newestFile = full;
+            if (now - st.mtimeMs <= maxAgeMs) {
+              candidates.push({ file: full, mtime: st.mtimeMs });
             }
           } catch {
             // Ignore
@@ -285,58 +349,66 @@ function findCodexQuota(userProfile: string): {
     }
 
     walk(sessionsDir);
-    if (!newestFile) return null;
+    if (candidates.length === 0) return [];
+    candidates.sort((a, b) => b.mtime - a.mtime);
 
-    // Read the last lines of rollout file
-    const st = fs.statSync(newestFile);
-    const readLen = Math.min(st.size, 65536);
-    const fd = fs.openSync(newestFile, 'r');
-    let chunk = '';
-    try {
-      const buf = Buffer.alloc(readLen);
-      const n = fs.readSync(fd, buf, 0, readLen, Math.max(0, st.size - readLen));
-      chunk = buf.subarray(0, n).toString('utf8');
-    } finally {
-      fs.closeSync(fd);
-    }
-
-    const lines = chunk.split('\n').map((l) => l.trim()).filter(Boolean).reverse();
-    for (const line of lines) {
-      if (!line.includes('"token_count"') || !line.includes('"rate_limits"')) continue;
+    for (const cand of candidates.slice(0, 5)) {
+      const st = fs.statSync(cand.file);
+      const readLen = Math.min(st.size, 65536);
+      const fd = fs.openSync(cand.file, 'r');
+      let chunk = '';
       try {
-        const parsed = JSON.parse(line) as {
-          payload?: {
-            type?: string;
-            rate_limits?: {
-              primary?: { used_percent?: number; resets_at?: number; window_minutes?: number } | null;
-              secondary?: { used_percent?: number; resets_at?: number; window_minutes?: number } | null;
-            };
-          };
-        };
-        const rl = parsed.payload?.rate_limits;
-        const lim = rl?.primary ?? rl?.secondary;
-        if (lim && typeof lim.used_percent === 'number') {
-          let resetsIso = '';
-          if (lim.resets_at) {
-            const ms = lim.resets_at > 1e11 ? lim.resets_at : lim.resets_at * 1000;
-            resetsIso = new Date(ms).toISOString();
-          }
-          const winMinutes = lim.window_minutes ?? 0;
-          const windowStr = winMinutes >= 60 ? `${Math.round(winMinutes / 60)}h` : `${winMinutes}m`;
-          return {
-            used_percent: lim.used_percent,
-            resets_at: resetsIso,
-            window: windowStr,
-          };
+        const buf = Buffer.alloc(readLen);
+        const n = fs.readSync(fd, buf, 0, readLen, Math.max(0, st.size - readLen));
+        chunk = buf.subarray(0, n).toString('utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      const lines = chunk
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .reverse();
+      for (const line of lines) {
+        const wins = parseCodexRateLimitsFromRolloutLine(line);
+        if (wins.length > 0) {
+          return wins;
         }
-      } catch {
-        // Ignore parse error
       }
     }
   } catch {
     // Ignore quota read error
   }
-  return null;
+  return [];
+}
+
+function findCodexQuota(userProfile: string): {
+  used_percent: number;
+  resets_at: string;
+  window: string;
+  windows?: CodexQuotaWindow[];
+} | null {
+  const codexHome = path.win32.join(userProfile, '.codex');
+  const wins = findCodexQuotaWindows(codexHome, { maxAgeMs: 24 * 3600 * 1000 });
+  if (wins.length === 0) return null;
+
+  const sorted = [...wins].sort((a, b) => b.used_percent - a.used_percent);
+  const top = sorted[0]!;
+  const winMinutes = top.window_minutes;
+  const windowStr =
+    top.id === '5h' || top.id === '7d'
+      ? top.id
+      : winMinutes >= 60
+        ? `${Math.round(winMinutes / 60)}h`
+        : `${winMinutes}m`;
+
+  return {
+    used_percent: top.used_percent,
+    resets_at: top.resets_at,
+    window: windowStr,
+    windows: wins,
+  };
 }
 
 interface ClaudeAuthStatus {
