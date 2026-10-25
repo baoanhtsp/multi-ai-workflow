@@ -28,6 +28,10 @@ param(
     [string]$ResumeId = "",
 
     [Parameter(Mandatory=$false)]
+    [ValidateSet("", "vi", "en")]
+    [string]$ReplyLanguage = "",
+
+    [Parameter(Mandatory=$false)]
     [switch]$NewSession,
 
     [Parameter(Mandatory=$false)]
@@ -154,6 +158,13 @@ $fullPrompt = if ($Prompt -and $Prompt.Trim()) {
 
 if ($normRole -eq "reviewer") {
     $fullPrompt = Add-ReviewerContract -Prompt $fullPrompt
+}
+
+$normReplyLang = if ($ReplyLanguage) { $ReplyLanguage.Trim().ToLowerInvariant() } else { "" }
+if ($normReplyLang -eq "vi") {
+    $fullPrompt = "$fullPrompt`n`n# Language`nAlways reply in Vietnamese (tiếng Việt), whatever language the message or the history uses. Keep code, commands, file paths and identifiers as they are."
+} elseif ($normReplyLang -eq "en") {
+    $fullPrompt = "$fullPrompt`n`n# Language`nAlways reply in English. Keep code, commands, file paths and identifiers as they are."
 }
 
 # 4b. Invoke before-agent hooks (SPEC §9.0: block exits 5 with reason)

@@ -568,6 +568,7 @@ export const feature: MawFeature = {
               agent.workdir = workdir;
               agent.role = role.exec_role;
               agent.persona = role.persona;
+              agent.reply_language = agent.reply_language ?? '';
               agent.team_id = team.id;
               agent.team_role = role.key;
               agent.group_id = group.id;
@@ -597,6 +598,7 @@ export const feature: MawFeature = {
                 workdir,
                 role: role.exec_role,
                 persona: role.persona,
+                reply_language: '',
                 team_id: team.id,
                 team_role: role.key,
                 cli_args: [],

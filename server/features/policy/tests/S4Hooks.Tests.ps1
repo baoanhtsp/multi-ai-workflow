@@ -91,8 +91,10 @@ Describe "S4 Hook Wrappers" {
             $env:TMP = $script:tempDir
             $script:tempMawHome = Join-Path $script:tempDir ".maw"
             $script:tempUser = Join-Path $script:tempDir "user"
+            $script:tempWorkDir = Join-Path $script:tempDir "work-repo"
             $script:tempBudgetDir = Join-Path $script:tempMawHome "data\budget"
             $script:tempAuditDir = Join-Path $script:tempUser ".gemini\antigravity"
+            New-Item -ItemType Directory -Force -Path $script:tempWorkDir | Out-Null
             New-Item -ItemType Directory -Force -Path $script:tempBudgetDir | Out-Null
             New-Item -ItemType Directory -Force -Path $script:tempAuditDir | Out-Null
 
@@ -123,7 +125,7 @@ Describe "S4 Hook Wrappers" {
                 Agent = "claude"
                 Role = "backend"
                 Model = "sonnet"
-                WorkDir = $script:repoRoot
+                WorkDir = $script:tempWorkDir
                 CostUsd = 2.00
                 InputTokens = 1000
                 OutputTokens = 2000
@@ -153,7 +155,7 @@ Describe "S4 Hook Wrappers" {
             $Context = @{
                 agent = "claude"
                 role = "backend"
-                workdir = $script:repoRoot
+                workdir = $script:tempWorkDir
             }
             $res = & $script:beforeAgentHook
             $res.Block | Should -Be $true
@@ -172,7 +174,7 @@ Describe "S4 Hook Wrappers" {
                 job_id = "job_start_test"
                 mode = "task"
                 role = "reviewer"
-                project = $script:repoRoot
+                project = $script:tempWorkDir
             }
             $res = & $script:jobStartHook
             $res.Block | Should -Be $false

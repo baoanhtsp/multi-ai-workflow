@@ -120,6 +120,31 @@ function New-MawCheckpoint {
         $top = ($topRes.StdOut.Trim() -split "[\r\n]+")[0].Trim()
         $normWorkDir = [System.IO.Path]::GetFullPath($top).TrimEnd('\', '/').ToLowerInvariant()
 
+        if ($env:MAW_TEST -eq "1") {
+            $sysLocalTemp = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Temp" } else { $null }
+            $tempCandidates = @(
+                [System.IO.Path]::GetTempPath(),
+                $env:TEMP,
+                $env:TMP,
+                $sysLocalTemp
+            ) | Where-Object { $_ -and $_.Trim() } | ForEach-Object {
+                try { [System.IO.Path]::GetFullPath($_.Trim()).TrimEnd('\', '/').ToLowerInvariant() } catch { $null }
+            } | Where-Object { $_ } | Select-Object -Unique
+
+            $inTemp = $false
+            foreach ($tc in $tempCandidates) {
+                if ($normWorkDir -eq $tc -or $normWorkDir.StartsWith("$tc\")) {
+                    $inTemp = $true
+                    break
+                }
+            }
+            if (-not $inTemp) {
+                $script:MawCheckpointLastMessage = "[checkpoint] skipped in test mode: repo '$top' is outside TEMP"
+                Write-Warning $script:MawCheckpointLastMessage
+                return $null
+            }
+        }
+
         # Sanitize message inputs (C7)
         $cleanLabel = ($Label -replace '[\x00-\x1f\x7f]', ' ').Trim()
         if ($cleanLabel.Length -gt 200) {

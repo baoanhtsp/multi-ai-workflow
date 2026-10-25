@@ -24,11 +24,20 @@ BeforeAll {
     $env:MAW_S4_RUNTIME = Join-Path $script:isolatedBase "nonexistent-runtime.json"
 
     $repoRoot = Split-Path -Parent $PSScriptRoot
+    $script:realRepoRoot = $repoRoot
     $script:invokeAgentPath = Join-Path $repoRoot "antigravity\skills\claude-leader\scripts\invoke-agent.ps1"
     $script:invokeCliPath   = Join-Path $repoRoot "antigravity\skills\claude-leader\scripts\invoke-cli-agent.ps1"
     $script:registryLibPath = Join-Path $repoRoot "antigravity\skills\claude-leader\scripts\lib\maw-registry.ps1"
     $script:scriptsDir      = Join-Path $repoRoot "antigravity\skills\claude-leader\scripts"
-    $script:repoRoot = $repoRoot
+    $script:repoRoot = Join-Path $script:isoTemp "test repo"
+    New-Item -ItemType Directory -Path $script:repoRoot -Force | Out-Null
+    & git -C $script:repoRoot init -q 2>$null | Out-Null
+    & git -C $script:repoRoot config core.autocrlf false
+    & git -C $script:repoRoot config user.email "test@example.com"
+    & git -C $script:repoRoot config user.name "Test"
+    Copy-Item -LiteralPath (Join-Path $repoRoot "SPEC.md") -Destination (Join-Path $script:repoRoot "SPEC.md") -Force
+    & git -C $script:repoRoot add -A
+    & git -C $script:repoRoot commit -m "initial" -q 2>$null | Out-Null
     . $script:registryLibPath
 }
 
@@ -161,11 +170,11 @@ Describe "invoke-agent.ps1 Unified Role Dispatcher (SPEC section 5)" {
 
         try {
             Copy-Item -LiteralPath $script:invokeAgentPath -Destination (Join-Path $tmpScripts "invoke-agent.ps1") -Force
-            Copy-Item -LiteralPath (Join-Path $script:repoRoot "antigravity\skills\claude-leader\agents.json") -Destination (Join-Path $tmpSkill "agents.json") -Force
-            Copy-Item -LiteralPath (Join-Path $script:repoRoot "antigravity\skills\claude-leader\scripts\lib\maw-common.ps1") -Destination (Join-Path $tmpLib "maw-common.ps1") -Force
-            Copy-Item -LiteralPath (Join-Path $script:repoRoot "antigravity\skills\claude-leader\scripts\lib\maw-registry.ps1") -Destination (Join-Path $tmpLib "maw-registry.ps1") -Force
-            Copy-Item -LiteralPath (Join-Path $script:repoRoot "antigravity\skills\claude-leader\scripts\lib\maw-hooks.ps1") -Destination (Join-Path $tmpLib "maw-hooks.ps1") -Force
-            Copy-Item -LiteralPath (Join-Path $script:repoRoot "antigravity\skills\claude-leader\templates\roles\reviewer.md") -Destination (Join-Path $tmpRoles "reviewer.md") -Force
+            Copy-Item -LiteralPath (Join-Path $script:realRepoRoot "antigravity\skills\claude-leader\agents.json") -Destination (Join-Path $tmpSkill "agents.json") -Force
+            Copy-Item -LiteralPath (Join-Path $script:realRepoRoot "antigravity\skills\claude-leader\scripts\lib\maw-common.ps1") -Destination (Join-Path $tmpLib "maw-common.ps1") -Force
+            Copy-Item -LiteralPath (Join-Path $script:realRepoRoot "antigravity\skills\claude-leader\scripts\lib\maw-registry.ps1") -Destination (Join-Path $tmpLib "maw-registry.ps1") -Force
+            Copy-Item -LiteralPath (Join-Path $script:realRepoRoot "antigravity\skills\claude-leader\scripts\lib\maw-hooks.ps1") -Destination (Join-Path $tmpLib "maw-hooks.ps1") -Force
+            Copy-Item -LiteralPath (Join-Path $script:realRepoRoot "antigravity\skills\claude-leader\templates\roles\reviewer.md") -Destination (Join-Path $tmpRoles "reviewer.md") -Force
 
             $fakeCodex = @'
 [Console]::Error.WriteLine("STDERR_FIRST_LINE_FROM_CHILD")
@@ -685,5 +694,23 @@ Describe "v4.0 Agent Registry (lib/maw-registry.ps1) & CLI Adapter (invoke-cli-a
 
         $outCli = & $script:invokeCliPath -AgentId gemini -Role backend -WorkDir $script:repoRoot -ResumeId "sess-gem-4" -Prompt "Resume gemini" -DryRun 2>&1
         ($outCli | Out-String) | Should -Match '"--resume","sess-gem-4"'
+    }
+
+    It "H9.1: appends # Language instruction for -ReplyLanguage vi|en across claude, codex, antigravity, and cli adapters, and omits when not passed" {
+        foreach ($ag in @("claude", "codex", "antigravity", "gemini")) {
+            $outVi = & $script:invokeAgentPath -Agent $ag -Role backend -WorkDir $script:repoRoot -ReplyLanguage vi -Prompt "Check vi" -DryRun 2>&1
+            $LASTEXITCODE | Should -Be 0
+            $textVi = ($outVi | Out-String)
+            $textVi | Should -Match '# Language\r?\nAlways reply in Vietnamese \(tiếng Việt\), whatever language the message or the history uses\. Keep code, commands, file paths and identifiers as they are\.'
+
+            $outEn = & $script:invokeAgentPath -Agent $ag -Role backend -WorkDir $script:repoRoot -ReplyLanguage en -Prompt "Check en" -DryRun 2>&1
+            $LASTEXITCODE | Should -Be 0
+            $textEn = ($outEn | Out-String)
+            $textEn | Should -Match '# Language\r?\nAlways reply in English\. Keep code, commands, file paths and identifiers as they are\.'
+        }
+
+        $outNone = & $script:invokeAgentPath -Agent claude -Role backend -WorkDir $script:repoRoot -Prompt "Check default" -DryRun 2>&1
+        $LASTEXITCODE | Should -Be 0
+        ($outNone | Out-String) | Should -Not -Match '# Language'
     }
 }

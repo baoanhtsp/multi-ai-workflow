@@ -66,6 +66,19 @@ function makeTempEnv(): {
   };
 }
 
+async function makeTempGitRepo(tempDir: string): Promise<string> {
+  const projectDir = path.join(tempDir, 'test-project');
+  fs.mkdirSync(projectDir, { recursive: true });
+  await runCommand('git', ['init', '-q'], { cwd: projectDir });
+  await runCommand('git', ['config', 'user.email', 'test@example.com'], { cwd: projectDir });
+  await runCommand('git', ['config', 'user.name', 'Test User'], { cwd: projectDir });
+  await runCommand('git', ['config', 'commit.gpgSign', 'false'], { cwd: projectDir });
+  fs.copyFileSync(path.join(repoRoot, 'SPEC.md'), path.join(projectDir, 'SPEC.md'));
+  await runCommand('git', ['add', 'SPEC.md'], { cwd: projectDir });
+  await runCommand('git', ['commit', '-m', 'init', '-q'], { cwd: projectDir });
+  return projectDir;
+}
+
 test('trimIncompleteUtf8Tail never splits multi-byte UTF-8 sequences', () => {
   const text = 'Hello Đặng Bảo Anh 🚀 Tiếng Việt chuẩn 100%';
   const fullBuf = Buffer.from(text, 'utf8');
@@ -440,9 +453,10 @@ function rawHttpRequest(options: {
 
 test('HTTP security guards, static serving, 256 KB body limit, and SSE job_stream work end-to-end', async () => {
   const { tempDir, cleanup } = makeTempEnv();
+  const projectDir = await makeTempGitRepo(tempDir);
   const { server } = createMawHttpServer({
     repoRoot,
-    projectsRoot: path.dirname(repoRoot),
+    projectsRoot: tempDir,
     userProfile: tempDir,
   });
 
@@ -566,7 +580,7 @@ test('HTTP security guards, static serving, 256 KB body limit, and SSE job_strea
       body: JSON.stringify({
         mode: 'spec-guard',
         role: 'check',
-        project_path: repoRoot,
+        project_path: projectDir,
       }),
     });
     assert.equal(runRes.statusCode, 200);
@@ -1118,10 +1132,11 @@ test('v4.0 status, registry-driven dispatch, uninstalled agent 400 on run_job, a
     'utf8'
   );
   process.env.MAW_HOME = testMawHome;
+  const projectDir = await makeTempGitRepo(tempDir);
 
   const { server } = createMawHttpServer({
     repoRoot,
-    projectsRoot: path.dirname(repoRoot),
+    projectsRoot: tempDir,
     userProfile: tempDir,
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -1167,7 +1182,7 @@ test('v4.0 status, registry-driven dispatch, uninstalled agent 400 on run_job, a
           mode: 'task',
           agent: ag,
           role: 'backend',
-          project_path: repoRoot,
+          project_path: projectDir,
           prompt: `Test ${ag}`,
         }),
       });
@@ -1190,7 +1205,7 @@ test('v4.0 status, registry-driven dispatch, uninstalled agent 400 on run_job, a
       body: JSON.stringify({
         mode: 'council',
         reviewers: ['claude', 'gemini'],
-        project_path: repoRoot,
+        project_path: projectDir,
         prompt: 'Review changes',
       }),
     });
@@ -1213,7 +1228,7 @@ test('v4.0 status, registry-driven dispatch, uninstalled agent 400 on run_job, a
         mode: 'task',
         agent: 'uninstalled-ai',
         role: 'backend',
-        project_path: repoRoot,
+        project_path: projectDir,
         prompt: 'Should fail 400',
       }),
     });
@@ -1235,7 +1250,7 @@ test('v4.0 status, registry-driven dispatch, uninstalled agent 400 on run_job, a
       body: JSON.stringify({
         mode: 'spec-guard',
         role: 'check',
-        project_path: repoRoot,
+        project_path: projectDir,
       }),
     });
     assert.equal(runInstalled.statusCode, 200);
@@ -1253,7 +1268,7 @@ test('v4.0 status, registry-driven dispatch, uninstalled agent 400 on run_job, a
         mode: 'task',
         agent: 'installed-ps-ai',
         role: 'reviewer',
-        project_path: repoRoot,
+        project_path: projectDir,
         prompt: 'Inline prompt that must become -PromptFile in meta',
       }),
     });
@@ -1265,7 +1280,7 @@ test('v4.0 status, registry-driven dispatch, uninstalled agent 400 on run_job, a
     );
     const paths = resolveServerPaths({
       userProfile: tempDir,
-      projectsRoot: path.dirname(repoRoot),
+      projectsRoot: tempDir,
     });
     const metaOnDisk = JSON.parse(
       fs.readFileSync(path.join(paths.jobsDir, `${runTaskData.job_id}.json`), 'utf8')

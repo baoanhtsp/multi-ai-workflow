@@ -14,6 +14,7 @@ export interface ValidatedCommandInfo {
   agent_profile_id?: string;
   conversation_id?: string;
   resume_token?: string;
+  reply_language?: 'vi' | 'en';
   cli_args?: string[];
   env?: Record<string, string>;
   project_path: string;
@@ -84,6 +85,9 @@ export function buildCommandSpec(
     }
     if (info.resume_token && info.resume_token !== '') {
       tokens.push({ kind: 'str', name: '-ResumeId', value: info.resume_token });
+    }
+    if (info.reply_language && (info.reply_language === 'vi' || info.reply_language === 'en')) {
+      tokens.push({ kind: 'str', name: '-ReplyLanguage', value: info.reply_language });
     }
     if (promptFile !== null) {
       tokens.push({ kind: 'str', name: '-PromptFile', value: promptFile });

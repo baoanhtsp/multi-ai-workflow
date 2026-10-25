@@ -28,7 +28,12 @@ import {
 import { parseJobLog } from '../agents-ws/lib/logparse.ts';
 import { parseRoleMarkdown, type RoleSections } from '../agents-ws/lib/markdown-roles.ts';
 import { s6StateStorage, withS6State } from '../agents-ws/lib/mutex.ts';
-import { buildPrompt, getMaxMessageCharsForAgent, type PromptMemberInfo } from '../agents-ws/lib/prompt.ts';
+import {
+  buildPrompt,
+  getMaxMessageCharsForAgent,
+  resolveEffectiveReplyLanguage,
+  type PromptMemberInfo,
+} from '../agents-ws/lib/prompt.ts';
 import { readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent } from '../agents-ws/types.ts';
 import type { Handoff, HandoffStatus } from '../handoffs/types.ts';
@@ -346,6 +351,7 @@ export async function finalizeHandoff(
               leadConv.queue.push({
                 id: 'q_' + generateMessageId().slice(2, 8),
                 text: tableText,
+                reply_language: leadConv.reply_language || target.reply_language,
                 ts: new Date().toISOString(),
                 system_generated: true,
               });
@@ -636,6 +642,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
             conv.queue.push({
               id: 'q_' + generateMessageId().slice(2, 8),
               text: lastUserText,
+              reply_language: conv.reply_language,
               ts: new Date(Date.now() + backoffSec * 1000).toISOString(),
               is_retry: true,
             });
@@ -680,6 +687,10 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
                   }
 
                   const roleScope = targetRole?.override?.write_scope ?? team.shared?.write_scope;
+                  const leadTurnLang = resolveEffectiveReplyLanguage(
+                    agent.reply_language,
+                    conv.reply_language
+                  );
                   const hRecord: Handoff = {
                     id: generateHandoffId(),
                     team_id: team.id,
@@ -692,6 +703,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
                     to_role: targetRole?.key ?? item.to,
                     task: item.task,
                     acceptance: item.acceptance || '',
+                    reply_language: leadTurnLang,
                     status: 'started',
                     job_id: '',
                     member_conversation_id: '',
@@ -1282,15 +1294,23 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
           '```'
       );
 
+      const memberEffectiveLang = resolveEffectiveReplyLanguage(
+        memberAgent.reply_language,
+        h.reply_language
+      );
+      memberConv.reply_language = memberEffectiveLang;
+
       const memberPrompt = buildPrompt({
         agent: {
           name: memberAgent.name,
           persona: memberAgent.persona,
           team_role: memberAgent.team_role,
+          reply_language: memberAgent.reply_language,
           role_sections: roleSections,
         },
         memoryContext: memContext,
         newMessageText: promptLines.join('\n'),
+        replyLanguage: h.reply_language,
       });
 
       const execRole = memberAgent.role || 'backend';
@@ -1680,11 +1700,17 @@ export async function startTurnJob(
       conv.resume.session === conv.session
   );
 
+  const effectiveReplyLang = resolveEffectiveReplyLanguage(
+    agent.reply_language,
+    item.reply_language || conv.reply_language
+  );
+
   const promptText = buildPrompt({
     agent: {
       name: agent.name,
       persona: agent.persona,
       team_role: agent.team_role,
+      reply_language: agent.reply_language,
       role_sections: agentRoleSections,
       hooks: agent.hooks,
       may_delegate: mayDelegate,
@@ -1696,6 +1722,7 @@ export async function startTurnJob(
     recentMessages: isResuming ? [] : relevantHistory,
     teamMembers,
     attachmentLines: (item.attachments ?? []).map((a) => `Attached image: ${a.path || a.name}`),
+    replyLanguage: effectiveReplyLang,
   });
 
   // Item 1 (Codex Pass 6): If final buildPrompt result exceeds 17000, abort before starting job
@@ -1705,11 +1732,13 @@ export async function startTurnJob(
       {
         name: agent.name,
         team_role: agent.team_role,
+        reply_language: agent.reply_language,
         hooks: agent.hooks,
         may_delegate: mayDelegate,
       },
       {
         attachmentLines: attachLines,
+        replyLanguage: effectiveReplyLang,
       }
     );
     throw new ApiValidationError(`Message too long for this agent (max ${maxAllowedChars} chars)`, 400);
@@ -1797,6 +1826,7 @@ export async function startTurnJob(
   conv.platform = targetPlatform;
   conv.model = targetModel;
   conv.effort = targetEffort;
+  conv.reply_language = effectiveReplyLang;
   conv.updated_at = new Date().toISOString();
 }
 

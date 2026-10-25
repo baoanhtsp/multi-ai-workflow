@@ -21,6 +21,7 @@ export interface Handoff {
   to_role: string;
   task: string;
   acceptance: string;
+  reply_language?: string;
   status: HandoffStatus;
   job_id: string;
   member_conversation_id: string;

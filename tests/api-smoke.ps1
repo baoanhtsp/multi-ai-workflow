@@ -109,7 +109,27 @@ function Start-SmokeNodeServer {
 }
 
 Write-Host "[api-smoke] Starting Node.js v4.0 server using $nodeExe on 127.0.0.1:$port (TMP='$spaceTempDir')..." -ForegroundColor Cyan
-$serverProc = Start-SmokeNodeServer
+$smokeProjectDir = Join-Path $spaceTempDir "smoke-project"
+New-Item -ItemType Directory -Path (Join-Path $smokeProjectDir "server") -Force | Out-Null
+& git -C $smokeProjectDir init 2>$null | Out-Null
+& git -C $smokeProjectDir config user.email "smoke@example.com"
+& git -C $smokeProjectDir config user.name "Smoke"
+$smokeSpecContent = @"
+# Project Specification: Smoke Project
+
+## Strict File Ownership Matrix
+
+| Layer | Owner AI | Allowed File Paths | Forbidden Files |
+| :--- | :--- | :--- | :--- |
+| Frontend | Claude (Frontend) | ``dashboard/**`` | ``server/**`` |
+| Backend | Antigravity | ``server/**`` | ``SPEC.md``, ``dashboard/**`` |
+"@
+[System.IO.File]::WriteAllText((Join-Path $smokeProjectDir "SPEC.md"), $smokeSpecContent, (New-Object System.Text.UTF8Encoding($false)))
+[System.IO.File]::WriteAllText((Join-Path $smokeProjectDir "server\index.ts"), "export const ok = true;`n", (New-Object System.Text.UTF8Encoding($false)))
+& git -C $smokeProjectDir add -A
+& git -C $smokeProjectDir commit -m "initial" 2>$null | Out-Null
+
+$serverProc = Start-SmokeNodeServer -ProjectsRootArg $spaceTempDir
 
 $httpClient = New-Object System.Net.Http.HttpClient
 $httpClient.Timeout = [TimeSpan]::FromSeconds(25)
@@ -268,7 +288,7 @@ try {
     if ($rServerTs.StatusCode -ne 404) { throw "Test 1d failed: GET /server/main.ts expected 404, got $($rServerTs.StatusCode)" }
     Write-Host "  [PASS] 1d. GET /../SPEC.md and GET /server/main.ts -> 404" -ForegroundColor Green
 
-    $validBody = (@{ project_path = $repoRoot } | ConvertTo-Json -Compress)
+    $validBody = (@{ project_path = $smokeProjectDir } | ConvertTo-Json -Compress)
 
     # 2. POST without X-MAW-Request -> 403
     $r2 = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=spec_guard" -ContentType "application/json" -Body $validBody
@@ -321,7 +341,7 @@ try {
         mode         = "task"
         agent        = "claude"
         role         = "backend"
-        project_path = $repoRoot
+        project_path = $smokeProjectDir
         prompt       = "Implement backend validation."
     } | ConvertTo-Json -Compress)
     $r8 = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=dispatch" -Headers @{ "X-MAW-Request" = "1" } -Body $taskBody
@@ -337,7 +357,7 @@ try {
         mode         = "team"
         agent        = "claude"
         team         = @{ backend = "antigravity"; frontend = "claude"; reviewer = "codex" }
-        project_path = $repoRoot
+        project_path = $smokeProjectDir
         prompt       = "Coordinate full-stack feature."
     } | ConvertTo-Json -Compress)
     $r9 = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=dispatch" -Headers @{ "X-MAW-Request" = "1" } -Body $teamBody
@@ -353,7 +373,7 @@ try {
         mode         = "task"
         agent        = "invalid-agent"
         role         = "backend"
-        project_path = $repoRoot
+        project_path = $smokeProjectDir
         prompt       = "Test invalid agent"
     } | ConvertTo-Json -Compress)
     $r10 = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=dispatch" -Headers @{ "X-MAW-Request" = "1" } -Body $badAgentBody
@@ -365,7 +385,7 @@ try {
         mode         = "team"
         agent        = "claude"
         team         = @{}
-        project_path = $repoRoot
+        project_path = $smokeProjectDir
         prompt       = "Test empty team"
     } | ConvertTo-Json -Compress)
     $r11 = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=dispatch" -Headers @{ "X-MAW-Request" = "1" } -Body $emptyTeamBody
@@ -375,7 +395,7 @@ try {
     # 12. C1: Space-path run_job (spec-guard) + SSE job_stream + job_status -> DONE, exit_code: 0, AND real SPEC.md CONTRACT GUARD REPORT in log
     $jobBody = (@{
         mode         = "spec-guard"
-        project_path = $repoRoot
+        project_path = $smokeProjectDir
     } | ConvertTo-Json -Compress)
     $r12 = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=run_job" -Headers @{ "X-MAW-Request" = "1" } -Body $jobBody
     if ($r12.StatusCode -ne 200) { throw "Test 12 failed: run_job expected 200, got $($r12.StatusCode) ($($r12.Body))" }

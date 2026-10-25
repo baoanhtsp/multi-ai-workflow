@@ -10,6 +10,7 @@ import { runCommand } from '../../../lib/proc.ts';
 import { ApiValidationError } from '../../../lib/validate.ts';
 import { feature as agentsFeature } from '../../agents-ws/index.ts';
 import { getBaseCommit, getDirtyFilesWithHashes, getNonIsolatedChangedFiles, getWorktreeChangedFiles } from '../../agents-ws/lib/git.ts';
+import { LANGUAGE_SECTION_EN, LANGUAGE_SECTION_VI } from '../../agents-ws/lib/prompt.ts';
 import { feature as chatFeature } from '../../chat/index.ts';
 import { setWorktreeFeatureCheckerForTest, tick } from '../../chat/tick.ts';
 import { BUILTIN_FULL_TEMPLATE } from '../../teams/defaults.ts';
@@ -1726,6 +1727,126 @@ test('handoffs: [Pass 7 Item 5 & 6] handoff_retry status 409 guard and handoff_a
     },
     (err: any) => err instanceof ApiValidationError && err.statusCode === 409
   );
+});
+
+test('handoffs: [H9.1] member brief uses member reply_language else Lead dispatch reply_language across auto-handoff, handoff_dispatch, and handoff_retry', async () => {
+  const { makeReq, testProj, baseCtx, setNextReply } = setupHandoffTestContext();
+
+  const saveTeamReq = makeReq({
+    project_path: testProj,
+    team: {
+      ...BUILTIN_FULL_TEMPLATE.team,
+      shared: { ...BUILTIN_FULL_TEMPLATE.team.shared, isolate: false, auto_continue: false },
+    },
+    roles_md: BUILTIN_FULL_TEMPLATE.roles_md,
+  });
+  await teamsFeature.routes['team_save']!.handler(saveTeamReq, saveTeamReq);
+  const applyRes = (await teamsFeature.routes['team_apply']!.handler(
+    makeReq({ project_path: testProj }),
+    makeReq()
+  )) as any;
+
+  const leadAgent = applyRes.agents.find((a: any) => a.team_role === 'lead');
+  const workerAgent = applyRes.agents.find((a: any) => a.team_role === 'worker');
+  const plannerAgent = applyRes.agents.find((a: any) => a.team_role === 'planner');
+
+  // Set plannerAgent.reply_language = 'vi' (explicit override), leave workerAgent.reply_language = ''
+  await agentsFeature.routes['ws_agent_save']!.handler(
+    makeReq({ agent: { id: plannerAgent.id, reply_language: 'vi' } }),
+    makeReq()
+  );
+
+  const createConvRes = (await chatFeature.routes['chat_create']!.handler(
+    makeReq({ agent_id: leadAgent.id }),
+    makeReq()
+  )) as any;
+  const leadConvId = createConvRes.conversation.id;
+
+  const capturedBodies: Array<Record<string, unknown>> = [];
+  const origStartJob = baseCtx.startJob;
+  baseCtx.startJob = async (body: Record<string, unknown>) => {
+    capturedBodies.push(body);
+    return origStartJob(body);
+  };
+
+  // 1. Invalid reply_language on handoff_dispatch => 400
+  await assert.rejects(
+    async () => {
+      await feature.routes['handoff_dispatch']!.handler(
+        makeReq({
+          lead_conversation_id: leadConvId,
+          to: 'worker',
+          task: 'Bad lang handoff',
+          reply_language: 'es',
+        }),
+        makeReq()
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+
+  // 2. Lead turn with reply_language: 'en' dispatches auto-handoffs to worker (no agent lang -> inherits 'en') and planner (agent lang 'vi' -> 'vi' wins)
+  setNextReply(
+    'Delegating:\n```handoff\n{ "handoffs": [ { "to": "worker", "task": "Worker task", "acceptance": "ok" }, { "to": "planner", "task": "Planner task", "acceptance": "ok" } ] }\n```'
+  );
+  await chatFeature.routes['chat_send']!.handler(
+    makeReq({
+      conversation_id: leadConvId,
+      text: 'Start project',
+      reply_language: 'en',
+    }),
+    makeReq()
+  );
+
+  // Tick 1: Lead turn finishes, creates 2 handoffs with reply_language='en', and starts the first one (planner or worker)
+  setNextReply(
+    '```json\n{"status":"failed","summary":"Failed first attempt","files_changed":[],"evidence":"","blockers":[],"cost":null,"decisions":[]}\n```'
+  );
+  await tick(baseCtx);
+  await tick(baseCtx);
+
+  const listRes = (await feature.routes['handoff_list']!.handler(
+    makeReq({}, { conversation_id: leadConvId }),
+    makeReq()
+  )) as any;
+  const workerHandoff = listRes.handoffs.find((h: any) => h.to_role === 'worker');
+  const plannerHandoff = listRes.handoffs.find((h: any) => h.to_role === 'planner');
+  assert.equal(workerHandoff.reply_language, 'en');
+  assert.equal(plannerHandoff.reply_language, 'en');
+
+  const workerJob = capturedBodies.find((b) => String(b.prompt ?? '').includes('# Task for worker'));
+  const plannerJob = capturedBodies.find((b) => String(b.prompt ?? '').includes('# Task for planner'));
+  assert.ok(workerJob, 'Worker job should have been started');
+  assert.ok(plannerJob, 'Planner job should have been started');
+  assert.ok(
+    String(workerJob!.prompt).endsWith(LANGUAGE_SECTION_EN),
+    'Worker with empty agent.reply_language must inherit Lead turn reply_language (en)'
+  );
+  assert.ok(
+    String(plannerJob!.prompt).endsWith(LANGUAGE_SECTION_VI),
+    'Planner with agent.reply_language=vi must override Lead turn reply_language (en)'
+  );
+
+  // 3. handoff_retry with invalid reply_language => 400, and valid reply_language updates handoff.reply_language
+  await assert.rejects(
+    async () => {
+      await feature.routes['handoff_retry']!.handler(
+        makeReq({ id: workerHandoff.id, reply_language: 'bad' }),
+        makeReq()
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+
+  capturedBodies.length = 0;
+  const retryRes = (await feature.routes['handoff_retry']!.handler(
+    makeReq({ id: workerHandoff.id, reply_language: 'vi' }),
+    makeReq()
+  )) as any;
+  assert.equal(retryRes.ok, true);
+  assert.equal(retryRes.handoff.reply_language, 'vi');
+  assert.ok(capturedBodies.length >= 1);
+  assert.ok(String(capturedBodies[0]!.prompt).endsWith(LANGUAGE_SECTION_VI));
 });
 
 

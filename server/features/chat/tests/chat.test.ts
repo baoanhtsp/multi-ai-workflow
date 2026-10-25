@@ -6,10 +6,14 @@ import path from 'node:path';
 import test from 'node:test';
 import { createFeatureContext, type MawFeatureRequest } from '../../../lib/feature.ts';
 import { resolveServerPaths } from '../../../lib/paths.ts';
-import { ApiValidationError } from '../../../lib/validate.ts';
+import { ApiValidationError, buildValidatedCommand } from '../../../lib/validate.ts';
 import { feature as agentsFeature } from '../../agents-ws/index.ts';
 import { isS6StateLocked, s6StateStorage, withS6State } from '../../agents-ws/lib/mutex.ts';
-import { buildPrompt } from '../../agents-ws/lib/prompt.ts';
+import {
+  buildPrompt,
+  LANGUAGE_SECTION_EN,
+  LANGUAGE_SECTION_VI,
+} from '../../agents-ws/lib/prompt.ts';
 import { feature } from '../index.ts';
 import { ensureTickStarted, readConversationMessages, resetTickTimerForTest, tick } from '../tick.ts';
 
@@ -1313,6 +1317,150 @@ test('chat: [Pass 7 Item 4] unique attachment filenames (<timestamp>-<random>-<s
   const filesAfterReject = fs.readdirSync(attachDir);
   assert.equal(filesAfterReject.length, 1, 'No new file written when queue capacity validation fails');
   assert.equal(filesAfterReject.some((f) => f.includes('rejected_overflow')), false);
+});
+
+test('chat: [H9.1] buildPrompt appends # Language (never trimmed under long history), agent.reply_language beats request, invalid => 400, and buildValidatedCommand passes -ReplyLanguage', async () => {
+  const { makeReq, testProj, paths, baseCtx } = setupChatTestContext();
+
+  // 1. Default buildPrompt uses Vietnamese (# Language at the end)
+  const pDefault = buildPrompt({
+    agent: { name: 'Worker' },
+    newMessageText: 'Hello there',
+  });
+  assert.ok(pDefault.endsWith(LANGUAGE_SECTION_VI), 'Default prompt must end with Vietnamese # Language section');
+
+  // 2. Request replyLanguage "en" when agent.reply_language is "" -> English
+  const pEn = buildPrompt({
+    agent: { name: 'Worker', reply_language: '' },
+    newMessageText: 'Xin chào',
+    replyLanguage: 'en',
+  });
+  assert.ok(pEn.endsWith(LANGUAGE_SECTION_EN), 'Request replyLanguage=en must end with English # Language section');
+
+  // 3. agent.reply_language ("vi") beats request replyLanguage ("en")
+  const pAgentWins = buildPrompt({
+    agent: { name: 'Worker', reply_language: 'vi' },
+    newMessageText: 'Hello',
+    replyLanguage: 'en',
+  });
+  assert.ok(pAgentWins.endsWith(LANGUAGE_SECTION_VI), 'agent.reply_language must override request replyLanguage');
+
+  // 4. Very long history (20 x 2500 chars) trims history but NEVER trims # Language
+  const hugeHistory = Array.from({ length: 20 }, (_, i) => ({
+    seq: i + 1,
+    role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+    text: `History turn ${i + 1}: ` + 'A'.repeat(2400),
+  }));
+  const pTrimmed = buildPrompt({
+    agent: {
+      name: 'Lead',
+      persona: 'P'.repeat(2000),
+      may_delegate: true,
+    },
+    memoryContext: 'M'.repeat(2500),
+    summary: 'S'.repeat(2500),
+    recentMessages: hugeHistory,
+    newMessageText: 'Current question',
+  });
+  assert.ok(pTrimmed.length <= 17000, `Prompt length ${pTrimmed.length} must be <= 17000`);
+  assert.ok(
+    pTrimmed.endsWith(LANGUAGE_SECTION_VI),
+    '# Language section must remain intact at the very end even after heavy trimming'
+  );
+
+  // 5. chat_send: agent.reply_language beats request reply_language, and invalid reply_language => 400
+  let capturedJobPrompts: string[] = [];
+  const origStartJob = baseCtx.startJob;
+  baseCtx.startJob = async (body: Record<string, unknown>) => {
+    capturedJobPrompts.push(String(body.prompt ?? ''));
+    return origStartJob(body);
+  };
+
+  const agSave = (await agentsFeature.routes['ws_agent_save']!.handler(
+    makeReq({
+      agent: {
+        name: 'Lang Test Agent',
+        platform: 'claude',
+        workdir: testProj,
+        reply_language: 'en',
+      },
+    }),
+    makeReq()
+  )) as any;
+  const convRes = (await feature.routes['chat_create']!.handler(
+    makeReq({ agent_id: agSave.agent.id }),
+    makeReq()
+  )) as any;
+  const convId = convRes.conversation.id;
+
+  // Invalid reply_language => 400
+  await assert.rejects(
+    async () => {
+      await feature.routes['chat_send']!.handler(
+        makeReq({
+          conversation_id: convId,
+          text: 'Test bad lang',
+          reply_language: 'jp',
+        }),
+        makeReq()
+      );
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+
+  // Send with reply_language: 'vi' while agent has reply_language: 'en' -> agent wins ('en')
+  await feature.routes['chat_send']!.handler(
+    makeReq({
+      conversation_id: convId,
+      text: 'Who wins?',
+      reply_language: 'vi',
+    }),
+    makeReq()
+  );
+  assert.equal(capturedJobPrompts.length, 1);
+  assert.ok(capturedJobPrompts[0]!.endsWith(LANGUAGE_SECTION_EN));
+
+  // 6. Core buildValidatedCommand / run_job passes -ReplyLanguage when provided, omits when not, and rejects invalid
+  const cmdWithLang = buildValidatedCommand(
+    {
+      mode: 'task',
+      agent: 'claude',
+      role: 'backend',
+      project_path: testProj,
+      prompt: 'Check lang flag',
+      reply_language: 'vi',
+    },
+    paths
+  );
+  assert.match(cmdWithLang.command, /-ReplyLanguage 'vi'/);
+
+  const cmdWithoutLang = buildValidatedCommand(
+    {
+      mode: 'task',
+      agent: 'claude',
+      role: 'backend',
+      project_path: testProj,
+      prompt: 'Check no lang flag',
+    },
+    paths
+  );
+  assert.doesNotMatch(cmdWithoutLang.command, /-ReplyLanguage/);
+
+  assert.throws(
+    () =>
+      buildValidatedCommand(
+        {
+          mode: 'task',
+          agent: 'claude',
+          role: 'backend',
+          project_path: testProj,
+          prompt: 'Bad lang',
+          reply_language: 'de',
+        },
+        paths
+      ),
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
 });
 
 

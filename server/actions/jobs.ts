@@ -70,6 +70,7 @@ export interface JobMeta {
   agent_profile_id?: string;
   conversation_id?: string;
   resume_token?: string;
+  reply_language?: 'vi' | 'en';
   session_ref?: JobSessionRef | string;
   parent_job_id?: string;
   steer_strategy?: string;
@@ -882,6 +883,9 @@ export async function handleRunJob(
   if (info.resume_token) {
     metaDraft.resume_token = info.resume_token;
     metaDraft.session_ref = { platform: agent || mode, id: info.resume_token };
+  }
+  if (info.reply_language) {
+    metaDraft.reply_language = info.reply_language;
   }
 
   let launched: { job_id: string; pid: number; command: string; meta: JobMeta };

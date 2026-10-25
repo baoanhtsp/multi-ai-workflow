@@ -9,7 +9,7 @@ import { ApiValidationError } from '../../lib/validate.ts';
 import { CONVERSATION_ID_REGEX, generateConversationId, generateMessageId, generateQueueId } from '../agents-ws/lib/ids.ts';
 import { allowedModels } from '../agents-ws/lib/models.ts';
 import { withS6State } from '../agents-ws/lib/mutex.ts';
-import { getMaxMessageCharsForAgent } from '../agents-ws/lib/prompt.ts';
+import { getMaxMessageCharsForAgent, validateReplyLanguage } from '../agents-ws/lib/prompt.ts';
 import { assertSafeProjectMawWrite } from '../agents-ws/lib/security.ts';
 import { appendAuditLog, readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent } from '../agents-ws/types.ts';
@@ -294,6 +294,11 @@ export const feature: MawFeature = {
             throw new ApiValidationError('Text is required and must not exceed 15,000 characters.', 400);
           }
 
+          const reqReplyLang = validateReplyLanguage(body.reply_language, {
+            allowEmpty: true,
+            fieldName: 'reply_language',
+          });
+
           const chatDir = ctx.paths.featureDataDir('chat');
           const convsFile = path.win32.join(chatDir, 'conversations.json');
           const convsData = await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
@@ -454,11 +459,13 @@ export const feature: MawFeature = {
             {
               name: agent.name,
               team_role: agent.team_role,
+              reply_language: agent.reply_language,
               hooks: agent.hooks,
               may_delegate: mayDelegate,
             },
             {
               attachmentLines: attachLines,
+              replyLanguage: reqReplyLang,
             }
           );
           if (text.length > maxAllowedChars) {
@@ -579,6 +586,7 @@ export const feature: MawFeature = {
               platform: targetPlatform,
               model: targetModel,
               effort: targetEffort,
+              reply_language: reqReplyLang || undefined,
               ts: new Date().toISOString(),
               attachments: savedAttachments,
             };
@@ -605,6 +613,7 @@ export const feature: MawFeature = {
             platform: targetPlatform,
             model: targetModel,
             effort: targetEffort,
+            reply_language: reqReplyLang || undefined,
             ts: new Date().toISOString(),
             attachments: savedAttachments,
           };

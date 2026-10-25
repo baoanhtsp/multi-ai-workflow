@@ -164,6 +164,17 @@ Describe "S1 Checkpoints PowerShell Library" {
                 $res | Should -BeNullOrEmpty
             } | Should -Not -Throw
         }
+
+        It "H8: refuses real repository outside TEMP when MAW_TEST=1 with a warning" {
+            $realRepo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+            $beforeRefs = (& git -C $realRepo for-each-ref refs/maw) -join "`n"
+            $warnRecords = $null
+            $res = New-MawCheckpoint -WorkDir $realRepo -JobKey "job_h8_ps_skip" -Event "manual" -Label "must skip" -WarningVariable warnRecords 3>$null
+            $res | Should -BeNullOrEmpty
+            ($warnRecords | Out-String) | Should -Match "skipped in test mode: repo"
+            $afterRefs = (& git -C $realRepo for-each-ref refs/maw) -join "`n"
+            $afterRefs | Should -Be $beforeRefs
+        }
     }
 
     Context "Hook execution through Invoke-MawHooks" {

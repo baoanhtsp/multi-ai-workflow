@@ -11,6 +11,7 @@ import type { Handoff } from '../handoffs/types.ts';
 import { AGENT_ID_REGEX, generateAgentId, generateGroupId, GROUP_ID_REGEX } from './lib/ids.ts';
 import { allowedModels } from './lib/models.ts';
 import { withS6State } from './lib/mutex.ts';
+import { validateReplyLanguage } from './lib/prompt.ts';
 import { appendAuditLog, readJsonStore, writeJsonStore } from './lib/store.ts';
 import type {
   Agent,
@@ -131,6 +132,11 @@ function validateAgentFields(agent: Agent, ctx: MawFeatureContext): void {
       400
     );
   }
+
+  agent.reply_language = validateReplyLanguage(agent.reply_language, {
+    allowEmpty: true,
+    fieldName: 'reply_language',
+  });
 
   if (Array.isArray(agent.cli_args)) {
     if (agent.cli_args.length > 20) {
@@ -311,6 +317,7 @@ export const feature: MawFeature = {
 
           liveAgents.push({
             ...agent,
+            reply_language: agent.reply_language ?? '',
             status,
             active_job_id: activeJobId,
             active_conversation_id: activeConvId,
@@ -441,10 +448,18 @@ export const feature: MawFeature = {
             }
 
             // Merge partial update
+            const mergedReplyLang =
+              rawAgent.reply_language !== undefined
+                ? validateReplyLanguage(rawAgent.reply_language, {
+                    allowEmpty: true,
+                    fieldName: 'reply_language',
+                  })
+                : (existing.reply_language ?? '');
             const merged: Agent = {
               ...existing,
               ...rawAgent,
               id: existing.id,
+              reply_language: mergedReplyLang,
               created_at: existing.created_at,
               updated_at: nowIso,
               deleted_at: null,
@@ -476,6 +491,11 @@ export const feature: MawFeature = {
               throw new ApiValidationError(`A live agent with name '${name}' already exists.`, 409);
             }
 
+            const newReplyLang = validateReplyLanguage(rawAgent.reply_language, {
+              allowEmpty: true,
+              fieldName: 'reply_language',
+            });
+
             const newAgent: Agent = {
               id: generateAgentId(),
               name,
@@ -487,6 +507,7 @@ export const feature: MawFeature = {
               workdir: String(rawAgent.workdir ?? '').trim(),
               role: String(rawAgent.role ?? 'backend').trim().toLowerCase(),
               persona: String(rawAgent.persona ?? '').trim().slice(0, 4000),
+              reply_language: newReplyLang,
               team_id: String(rawAgent.team_id ?? '').trim(),
               team_role: String(rawAgent.team_role ?? '').trim(),
               cli_args: Array.isArray(rawAgent.cli_args) ? rawAgent.cli_args.map(String) : [],

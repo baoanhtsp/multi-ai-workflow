@@ -50,7 +50,7 @@ export async function getProjectGitInfo(projectPath: string): Promise<ProjectGit
   }
 
   const [branchRes, statusRes, abRes, brRes, wtRes, logRes] = await Promise.all([
-    runCommand('git.exe', ['-C', projectPath, 'rev-parse', '--abbrev-ref', 'HEAD'], {
+    runCommand('git.exe', ['-C', projectPath, 'branch', '--show-current'], {
       timeoutMs: 8000,
     }),
     runCommand('git.exe', ['-C', projectPath, 'status', '--porcelain'], { timeoutMs: 8000 }),
@@ -77,7 +77,17 @@ export async function getProjectGitInfo(projectPath: string): Promise<ProjectGit
     }),
   ]);
 
-  const curBranch = branchRes.stdout.trim();
+  let curBranch = branchRes.code === 0 ? branchRes.stdout.trim() : '';
+  if (!curBranch) {
+    const shortHeadRes = await runCommand(
+      'git.exe',
+      ['-C', projectPath, 'rev-parse', '--short', 'HEAD'],
+      { timeoutMs: 8000 }
+    );
+    if (shortHeadRes.code === 0 && shortHeadRes.stdout.trim()) {
+      curBranch = shortHeadRes.stdout.trim();
+    }
+  }
   const statusLines = statusRes.stdout
     .replace(/\r\n/g, '\n')
     .split('\n')
@@ -85,23 +95,27 @@ export async function getProjectGitInfo(projectPath: string): Promise<ProjectGit
 
   let ahead = 0;
   let behind = 0;
-  const abMatch = /^(\d+)\s+(\d+)$/.exec(abRes.stdout.trim());
-  if (abMatch) {
-    ahead = Number.parseInt(abMatch[1]!, 10);
-    behind = Number.parseInt(abMatch[2]!, 10);
+  if (abRes.code === 0) {
+    const abMatch = /^(\d+)\s+(\d+)$/.exec(abRes.stdout.trim());
+    if (abMatch) {
+      ahead = Number.parseInt(abMatch[1]!, 10);
+      behind = Number.parseInt(abMatch[2]!, 10);
+    }
   }
 
   const branches: GitBranchInfo[] = [];
-  for (const rawLine of brRes.stdout.replace(/\r\n/g, '\n').split('\n')) {
-    const line = rawLine.replace(/^[\s"]+|[ \t\n\r\0\x0B"]+$/g, '');
-    if (!line) continue;
-    const parts = line.split('|');
-    branches.push({
-      name: parts[0] ?? '',
-      sha: parts[1] ?? '',
-      is_current: (parts[2] ?? '') === '*',
-      updated: parts[3] ?? '',
-    });
+  if (brRes.code === 0) {
+    for (const rawLine of brRes.stdout.replace(/\r\n/g, '\n').split('\n')) {
+      const line = rawLine.replace(/^[\s"]+|[ \t\n\r\0\x0B"]+$/g, '');
+      if (!line) continue;
+      const parts = line.split('|');
+      branches.push({
+        name: parts[0] ?? '',
+        sha: parts[1] ?? '',
+        is_current: (parts[2] ?? '') === '*',
+        updated: parts[3] ?? '',
+      });
+    }
   }
 
   const worktrees: GitWorktreeInfo[] = [];
@@ -130,20 +144,22 @@ export async function getProjectGitInfo(projectPath: string): Promise<ProjectGit
   }
 
   const commits: GitCommitInfo[] = [];
-  for (const rawLine of logRes.stdout.replace(/\r\n/g, '\n').split('\n')) {
-    const line = rawLine.replace(/^[\s"]+|[ \t\n\r\0\x0B"]+$/g, '');
-    if (!line) continue;
-    const parts = line.split('|');
-    const sha = parts[0] ?? '';
-    const subject = parts.length > 4 ? parts.slice(1, parts.length - 2).join('|') : (parts[1] ?? '');
-    const time = parts.length > 4 ? (parts[parts.length - 2] ?? '') : (parts[2] ?? '');
-    const author = parts.length > 4 ? (parts[parts.length - 1] ?? '') : (parts[3] ?? '');
-    commits.push({ sha, subject, time, author });
+  if (logRes.code === 0) {
+    for (const rawLine of logRes.stdout.replace(/\r\n/g, '\n').split('\n')) {
+      const line = rawLine.replace(/^[\s"]+|[ \t\n\r\0\x0B"]+$/g, '');
+      if (!line) continue;
+      const parts = line.split('|');
+      const sha = parts[0] ?? '';
+      const subject = parts.length > 4 ? parts.slice(1, parts.length - 2).join('|') : (parts[1] ?? '');
+      const time = parts.length > 4 ? (parts[parts.length - 2] ?? '') : (parts[2] ?? '');
+      const author = parts.length > 4 ? (parts[parts.length - 1] ?? '') : (parts[3] ?? '');
+      commits.push({ sha, subject, time, author });
+    }
   }
 
   return {
     has_git: true,
-    current_branch: curBranch || 'HEAD',
+    current_branch: curBranch || null,
     modified_count: statusLines.length,
     ahead,
     behind,

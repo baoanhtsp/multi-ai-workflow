@@ -1,7 +1,63 @@
+import { ApiValidationError } from '../../../lib/validate.ts';
+
+export type ReplyLanguage = 'vi' | 'en';
+
+export const ALLOWED_REPLY_LANGUAGES: readonly ReplyLanguage[] = ['vi', 'en'];
+
+export const LANGUAGE_SECTION_VI =
+  '# Language\nAlways reply in Vietnamese (tiếng Việt), whatever language the message or the history uses. Keep code, commands, file paths and identifiers as they are.';
+
+export const LANGUAGE_SECTION_EN =
+  '# Language\nAlways reply in English. Keep code, commands, file paths and identifiers as they are.';
+
+export function validateReplyLanguage(
+  raw: unknown,
+  options?: { allowEmpty?: boolean; fieldName?: string }
+): '' | ReplyLanguage {
+  const fieldName = options?.fieldName ?? 'reply_language';
+  if (raw === undefined || raw === null) {
+    if (options?.allowEmpty !== false) {
+      return '';
+    }
+    throw new ApiValidationError(`Invalid ${fieldName}: must be "vi" or "en".`, 400);
+  }
+  if (typeof raw !== 'string') {
+    throw new ApiValidationError(`Invalid ${fieldName}: must be "vi" or "en".`, 400);
+  }
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === '') {
+    if (options?.allowEmpty !== false) {
+      return '';
+    }
+    throw new ApiValidationError(`Invalid ${fieldName}: must be "vi" or "en".`, 400);
+  }
+  if (trimmed !== 'vi' && trimmed !== 'en') {
+    throw new ApiValidationError(`Invalid ${fieldName} '${raw}'. Allowed: vi, en.`, 400);
+  }
+  return trimmed;
+}
+
+export function resolveEffectiveReplyLanguage(
+  agentReplyLanguage?: string,
+  requestReplyLanguage?: string
+): ReplyLanguage {
+  const ag = String(agentReplyLanguage ?? '').trim().toLowerCase();
+  if (ag === 'vi' || ag === 'en') return ag;
+  const req = String(requestReplyLanguage ?? '').trim().toLowerCase();
+  if (req === 'vi' || req === 'en') return req;
+  return 'vi';
+}
+
+export function getLanguageSection(lang?: string): string {
+  const normalized = String(lang ?? '').trim().toLowerCase();
+  return normalized === 'en' ? LANGUAGE_SECTION_EN : LANGUAGE_SECTION_VI;
+}
+
 export interface PromptAgentInfo {
   name: string;
   persona?: string;
   team_role?: string;
+  reply_language?: string;
   role_sections?: {
     responsibility?: string;
     delegation?: string;
@@ -39,11 +95,13 @@ export interface BuildPromptOptions {
   recentMessages?: PromptHistoryMessage[];
   teamMembers?: PromptMemberInfo[];
   attachmentLines?: string[];
+  replyLanguage?: string;
   maxChars?: number; // default 17000
 }
 
 export interface GetMaxMessageCharsOptions {
   attachmentLines?: string[];
+  replyLanguage?: string;
   maxBudget?: number;
 }
 
@@ -53,6 +111,7 @@ export function getMaxMessageCharsForAgent(
 ): number {
   const maxBudget = typeof options === 'number' ? options : (options?.maxBudget ?? 17000);
   const attachmentLines = typeof options === 'object' ? options.attachmentLines : undefined;
+  const requestReplyLang = typeof options === 'object' ? options.replyLanguage : undefined;
 
   // 1. Agent section after maximal trimming
   const minimalAgentHeader =
@@ -79,6 +138,10 @@ export function getMaxMessageCharsForAgent(
       '# Dispatch Tool\nTo delegate tasks to members, end your reply with exactly one fenced handoff block:\n```handoff\n{ "handoffs": [ { "to": "<role_key>", "task": "<task description>", "acceptance": "<criteria>", "thread": "" } ] }\n```\nDo not do members\' work yourself. Results come back as [Handoff <id>] messages.';
     fixedSections.push(minimalDispatch);
   }
+
+  // 4. Language section (never trimmed, always last)
+  const effectiveLang = resolveEffectiveReplyLanguage(agent.reply_language, requestReplyLang);
+  fixedSections.push(getLanguageSection(effectiveLang));
 
   // When message text is present, it is added to messageParts with '\n\n' separator (+2 chars)
   const fixedTotal = fixedSections.join('\n\n').length + 2;
@@ -185,6 +248,10 @@ export function buildPrompt(opts: BuildPromptOptions): string {
     }
   }
 
+  // 7. # Language section (never trimmed, always last)
+  const effectiveLang = resolveEffectiveReplyLanguage(opts.agent.reply_language, opts.replyLanguage);
+  const languageSection = getLanguageSection(effectiveLang);
+
   const assemble = (
     msgs: string[],
     mem: string,
@@ -200,6 +267,7 @@ export function buildPrompt(opts: BuildPromptOptions): string {
     }
     sections.push(messageSection);
     if (dispSec) sections.push(dispSec);
+    sections.push(languageSection);
     return sections.join('\n\n');
   };
 

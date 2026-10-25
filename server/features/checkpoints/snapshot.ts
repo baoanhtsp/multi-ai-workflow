@@ -1,11 +1,35 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { appendActionAudit } from '../../lib/feature.ts';
-import { getTempDir, isDirectorySafe, isFileSafe, type ServerPaths } from '../../lib/paths.ts';
+import { appendServerLog } from '../../lib/logger.ts';
+import {
+  getTempDir,
+  isDirectorySafe,
+  isFileSafe,
+  isTestContext,
+  type ServerPaths,
+} from '../../lib/paths.ts';
 import { runCommand, type RunCommandOptions, type RunCommandResult } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
+
+const REAL_MAW_REPO_ROOT = path.win32
+  .resolve(import.meta.dirname, '..', '..', '..')
+  .toLowerCase()
+  .replace(/\\+$/, '');
+
+export function isTestAllowedCheckpointRepo(repoTopPath: string): boolean {
+  const normRepo = path.win32.resolve(repoTopPath).toLowerCase().replace(/\\+$/, '');
+  if (normRepo === REAL_MAW_REPO_ROOT || normRepo.startsWith(REAL_MAW_REPO_ROOT + '\\')) {
+    return false;
+  }
+  const candidateTemps = [os.tmpdir(), getTempDir(), process.env.TEMP, process.env.TMP]
+    .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
+    .map((v) => path.win32.resolve(v.trim()).toLowerCase().replace(/\\+$/, ''));
+  return candidateTemps.some((t) => normRepo === t || normRepo.startsWith(t + '\\'));
+}
 
 export interface CheckpointStats {
   files: number;
@@ -649,6 +673,36 @@ export async function createCheckpoint(
   const round = options.round ?? null;
   const normTop = normalizeWorkdir(top);
 
+  if (isTestContext() && !isTestAllowedCheckpointRepo(top)) {
+    appendServerLog(
+      'WARN',
+      `[checkpoint] Refused to create checkpoint in non-temp repo during test context: ${top}`
+    );
+    const unixNow = Math.floor(Date.now() / 1000);
+    return {
+      ok: true,
+      created: false,
+      checkpoint: {
+        id: `${jobKey}/0000`,
+        job_key: jobKey,
+        n: 0,
+        commit: '',
+        tree: '',
+        parent: null,
+        event,
+        label,
+        agent,
+        role,
+        round,
+        workdir: normTop,
+        created_at: new Date().toISOString(),
+        created_at_unix: unixNow,
+        head_moved: false,
+        stats: null,
+      },
+    };
+  }
+
   const currentHeadRes = await gitRun(['rev-parse', '--verify', '-q', 'HEAD'], {
     cwd: top,
     allowFailure: true,
@@ -864,6 +918,9 @@ export async function pruneCheckpoints(
   excludeRef?: string
 ): Promise<number> {
   const top = await resolveGitTopLevel(cwd);
+  if (isTestContext() && !isTestAllowedCheckpointRepo(top)) {
+    return 0;
+  }
   const listRes = await gitRun(
     [
       'for-each-ref',

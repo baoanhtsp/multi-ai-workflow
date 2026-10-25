@@ -5,6 +5,7 @@ import type { MawFeature } from '../../lib/feature.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { generateBatchId, generateHandoffId, HANDOFF_ID_REGEX } from '../agents-ws/lib/ids.ts';
 import { withS6State } from '../agents-ws/lib/mutex.ts';
+import { resolveEffectiveReplyLanguage, validateReplyLanguage } from '../agents-ws/lib/prompt.ts';
 import { appendAuditLog, readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent } from '../agents-ws/types.ts';
 import { finalizeHandoff, tick } from '../chat/tick.ts';
@@ -120,6 +121,10 @@ export const feature: MawFeature = {
           if (!task || task.length > 8000) {
             throw new ApiValidationError('Task is required and must be 1-8000 characters.', 400);
           }
+          const reqReplyLang = validateReplyLanguage(body.reply_language, {
+            allowEmpty: true,
+            fieldName: 'reply_language',
+          });
 
           const chatDir = ctx.paths.featureDataDir('chat');
           const convsFile = path.win32.join(chatDir, 'conversations.json');
@@ -237,6 +242,11 @@ export const feature: MawFeature = {
             handoffs: [],
           });
 
+          const dispatchReplyLang = resolveEffectiveReplyLanguage(
+            leadAgent.reply_language,
+            reqReplyLang || conv.reply_language
+          );
+
           const newHandoff: Handoff = {
             id: generateHandoffId(),
             team_id: teamId,
@@ -249,6 +259,7 @@ export const feature: MawFeature = {
             to_role: toRole,
             task,
             acceptance,
+            reply_language: dispatchReplyLang,
             status: 'started',
             job_id: '',
             member_conversation_id: '',
@@ -378,6 +389,10 @@ export const feature: MawFeature = {
           if (!HANDOFF_ID_REGEX.test(id)) {
             throw new ApiValidationError('Invalid handoff id.', 400);
           }
+          const retryReplyLang = validateReplyLanguage(body.reply_language, {
+            allowEmpty: true,
+            fieldName: 'reply_language',
+          });
 
           const handoffsDir = ctx.paths.featureDataDir('handoffs');
           const handoffsFile = path.win32.join(handoffsDir, 'handoffs.json');
@@ -398,6 +413,10 @@ export const feature: MawFeature = {
               `Cannot retry handoff '${id}' in status '${handoff.status}'. Must be failed, blocked, needs_review, or cancelled.`,
               409
             );
+          }
+
+          if (retryReplyLang) {
+            handoff.reply_language = retryReplyLang;
           }
 
           handoff.attempts++;

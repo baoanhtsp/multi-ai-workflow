@@ -24,6 +24,15 @@ BeforeAll {
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
     $script:GuardScript = Join-Path $script:RepoRoot "antigravity\skills\claude-leader\scripts\invoke-spec-guard.ps1"
     $script:CommonScript = Join-Path $script:RepoRoot "antigravity\skills\claude-leader\scripts\lib\maw-common.ps1"
+    $script:IsoRepo = Join-Path $script:isoTemp "spec repo"
+    New-Item -ItemType Directory -Path $script:IsoRepo -Force | Out-Null
+    & git -C $script:IsoRepo init -q 2>$null | Out-Null
+    & git -C $script:IsoRepo config core.autocrlf false
+    & git -C $script:IsoRepo config user.email "test@example.com"
+    & git -C $script:IsoRepo config user.name "Test"
+    Copy-Item -LiteralPath (Join-Path $script:RepoRoot "SPEC.md") -Destination (Join-Path $script:IsoRepo "SPEC.md") -Force
+    & git -C $script:IsoRepo add -A
+    & git -C $script:IsoRepo commit -m "initial" -q 2>$null | Out-Null
     . $script:CommonScript
 }
 
@@ -41,7 +50,7 @@ AfterAll {
 
 Describe "invoke-spec-guard.ps1" {
     It "Extracts GET /api?action=status and ownership rules from the repository SPEC.md" {
-        $raw = (& $script:GuardScript -WorkDir $script:RepoRoot -Json) -join "`n"
+        $raw = (& $script:GuardScript -WorkDir $script:IsoRepo -Json) -join "`n"
         $res = $raw | ConvertFrom-Json
         $res.ok | Should -BeTrue
         $res.has_spec | Should -BeTrue

@@ -515,3 +515,17 @@ test('S1 Checkpoints Y2: retention never prunes the newly created checkpoint eve
     cleanupTestEnv(env);
   }
 });
+
+test('S1 Checkpoints H8: createCheckpoint refuses real repo outside TEMP in test context', async () => {
+  const realRepo = path.resolve(import.meta.dirname, '..', '..');
+  const beforeRefs = await runCommand('git', ['for-each-ref', 'refs/maw'], { cwd: realRepo });
+  const res = await createCheckpoint(realRepo, {
+    jobKey: 'job_h8_should_skip',
+    event: 'job-start',
+    label: 'must be skipped in test mode',
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.created, false);
+  const afterRefs = await runCommand('git', ['for-each-ref', 'refs/maw'], { cwd: realRepo });
+  assert.equal(afterRefs.stdout, beforeRefs.stdout, 'refs/maw in real repo must not change');
+});

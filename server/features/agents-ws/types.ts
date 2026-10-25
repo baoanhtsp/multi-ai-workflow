@@ -19,6 +19,7 @@ export interface Agent {
   workdir: string;
   role: string;
   persona: string;
+  reply_language?: string;
   team_id: string;
   team_role: string;
   cli_args: string[];

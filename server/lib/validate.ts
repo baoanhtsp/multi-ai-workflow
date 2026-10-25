@@ -120,8 +120,22 @@ export function buildValidatedCommand(
   let agentProfileId: string | undefined;
   let conversationId: string | undefined;
   let resumeToken: string | undefined;
+  let replyLanguage: 'vi' | 'en' | undefined;
   let cliArgs: string[] | undefined;
   let envVars: Record<string, string> | undefined;
+
+  if (body.reply_language !== undefined && body.reply_language !== null) {
+    if (typeof body.reply_language !== 'string') {
+      throw new ApiValidationError('Invalid reply_language: must be "vi" or "en".', 400);
+    }
+    const rl = body.reply_language.trim().toLowerCase();
+    if (rl !== '') {
+      if (rl !== 'vi' && rl !== 'en') {
+        throw new ApiValidationError(`Invalid reply_language '${body.reply_language}'. Allowed: vi, en.`, 400);
+      }
+      replyLanguage = rl;
+    }
+  }
 
   if (body.resume_token !== undefined && body.resume_token !== null && String(body.resume_token).trim() !== '') {
     const rt = String(body.resume_token).trim();
@@ -415,6 +429,9 @@ export function buildValidatedCommand(
   }
   if (resumeToken !== undefined) {
     baseInfo.resume_token = resumeToken;
+  }
+  if (replyLanguage !== undefined) {
+    baseInfo.reply_language = replyLanguage;
   }
   if (cliArgs !== undefined) {
     baseInfo.cli_args = cliArgs;

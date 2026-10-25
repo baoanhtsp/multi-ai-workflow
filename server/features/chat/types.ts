@@ -4,6 +4,7 @@ export interface QueueItem {
   platform?: string;
   model?: string;
   effort?: string;
+  reply_language?: string;
   ts: string;
   attachments?: Array<{ name: string; path?: string; data_url?: string }>;
   system_generated?: boolean;
@@ -48,6 +49,7 @@ export interface Conversation {
   context: ConversationContext;
   last_status: string;
   last_error: string;
+  reply_language?: string;
   compact_error?: string;
   compact_failed_at?: string;
   retry_attempts?: number;

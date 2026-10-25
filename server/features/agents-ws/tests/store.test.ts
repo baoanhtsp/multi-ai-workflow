@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { createFeatureContext, type MawFeatureRequest } from '../../../lib/feature.ts';
+import { getProjectGitInfo } from '../../../actions/git.ts';
 import { resolveServerPaths } from '../../../lib/paths.ts';
 import { ApiValidationError } from '../../../lib/validate.ts';
 import { runCommand } from '../../../lib/proc.ts';
@@ -513,5 +514,82 @@ test('store: [Item 6] ws_platforms?refresh=1 clears cache and re-detects', async
     const freshData = JSON.parse(fs.readFileSync(toolCache, 'utf8'));
     assert.notEqual(freshData.claude, '0.0.0-dummy');
   }
+});
+
+test('H9.1 & H9.2: ws_agent_save validates reply_language, ws_state returns it, and getProjectGitInfo handles empty git init repo and detached HEAD', async () => {
+  const { makeReq, tempBase } = setupTestContext();
+  const emptyGitProj = path.join(tempBase, 'my projects', 'empty-git-repo');
+  fs.mkdirSync(emptyGitProj, { recursive: true });
+  await runCommand('git.exe', ['-C', emptyGitProj, 'init', '-b', 'master']);
+
+  // H9.2: Empty git init repo (no commits yet) returns branch "master" (never "HEAD") and 0 commits without errors
+  const emptyInfo = await getProjectGitInfo(emptyGitProj);
+  assert.equal(emptyInfo.has_git, true);
+  assert.equal(emptyInfo.current_branch, 'master');
+  assert.notEqual(emptyInfo.current_branch, 'HEAD');
+  assert.equal(emptyInfo.ahead, 0);
+  assert.equal(emptyInfo.behind, 0);
+  assert.deepEqual(emptyInfo.recent_commits, []);
+
+  // H9.1: ws_agent_save accepts "", "vi", "en" and rejects invalid reply_language with 400
+  await assert.rejects(
+    async () => {
+      const badLangReq = makeReq({
+        agent: {
+          name: 'Bad Lang Agent',
+          platform: 'claude',
+          workdir: emptyGitProj,
+          reply_language: 'fr',
+        },
+      });
+      await feature.routes['ws_agent_save']!.handler(badLangReq, badLangReq);
+    },
+    (err: any) => err instanceof ApiValidationError && err.statusCode === 400
+  );
+
+  const createReq = makeReq({
+    agent: {
+      name: 'Empty Repo Agent',
+      platform: 'claude',
+      workdir: emptyGitProj,
+      reply_language: 'en',
+    },
+  });
+  const createRes = (await feature.routes['ws_agent_save']!.handler(createReq, createReq)) as any;
+  assert.equal(createRes.ok, true);
+  assert.equal(createRes.agent.reply_language, 'en');
+
+  // Partial update to ""
+  const updReq = makeReq({
+    agent: {
+      id: createRes.agent.id,
+      reply_language: '',
+    },
+  });
+  const updRes = (await feature.routes['ws_agent_save']!.handler(updReq, updReq)) as any;
+  assert.equal(updRes.ok, true);
+  assert.equal(updRes.agent.reply_language, '');
+
+  // ws_state returns reply_language and git.branch = "master" for empty repo
+  const stateReq = makeReq();
+  const stateRes = (await feature.routes['ws_state']!.handler(stateReq, stateReq)) as any;
+  assert.equal(stateRes.ok, true);
+  const foundAgent = stateRes.agents.find((a: any) => a.id === createRes.agent.id);
+  assert.ok(foundAgent);
+  assert.equal(foundAgent.reply_language, '');
+  assert.equal(foundAgent.git.branch, 'master');
+
+  // Detached HEAD fallback returns short commit SHA
+  await runCommand('git.exe', ['-C', emptyGitProj, 'config', 'user.name', 'Tester']);
+  await runCommand('git.exe', ['-C', emptyGitProj, 'config', 'user.email', 'test@example.com']);
+  fs.writeFileSync(path.join(emptyGitProj, 'README.md'), '# init\n', 'utf8');
+  await runCommand('git.exe', ['-C', emptyGitProj, 'add', 'README.md']);
+  await runCommand('git.exe', ['-C', emptyGitProj, 'commit', '-m', 'first commit']);
+  const shortShaRes = await runCommand('git.exe', ['-C', emptyGitProj, 'rev-parse', '--short', 'HEAD']);
+  const shortSha = shortShaRes.stdout.trim();
+  await runCommand('git.exe', ['-C', emptyGitProj, 'checkout', '--detach', 'HEAD']);
+
+  const detachedInfo = await getProjectGitInfo(emptyGitProj);
+  assert.equal(detachedInfo.current_branch, shortSha);
 });
 
