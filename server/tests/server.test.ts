@@ -1390,6 +1390,44 @@ test('F0 plugin foundation: feature loader (hello fixture), route security, stat
     },
   };
 
+  // Seed fake Claude & Codex npm CLI stubs inside tempDir so status version detection is deterministic on CI runners without global CLIs
+  const fakeClaudeDir = path.win32.join(
+    tempDir,
+    'AppData',
+    'Roaming',
+    'npm',
+    'node_modules',
+    '@anthropic-ai',
+    'claude-code'
+  );
+  const fakeCodexDir = path.win32.join(
+    tempDir,
+    'AppData',
+    'Roaming',
+    'npm',
+    'node_modules',
+    '@openai',
+    'codex',
+    'bin'
+  );
+  fs.mkdirSync(fakeClaudeDir, { recursive: true });
+  fs.mkdirSync(fakeCodexDir, { recursive: true });
+  fs.writeFileSync(
+    path.win32.join(fakeClaudeDir, 'cli.js'),
+    'console.log("2.1.308 (Claude Code)");\n',
+    'utf8'
+  );
+  fs.writeFileSync(
+    path.win32.join(fakeCodexDir, 'codex.js'),
+    'console.log("codex-cli 0.163.0");\n',
+    'utf8'
+  );
+  try {
+    fs.unlinkSync(path.win32.join(os.tmpdir(), 'maw_tool_versions_cache_v4.json'));
+  } catch {
+    // Ignore if cache file does not exist
+  }
+
   const { server } = createMawHttpServer({
     repoRoot,
     projectsRoot: path.dirname(repoRoot),

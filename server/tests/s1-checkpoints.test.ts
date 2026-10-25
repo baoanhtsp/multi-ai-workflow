@@ -8,6 +8,7 @@ import { feature } from '../features/checkpoints/index.ts';
 import {
   createCheckpoint,
   diffTrees,
+  isTestAllowedCheckpointRepo,
   listCheckpoints,
   restoreTree,
   snapshotTree,
@@ -528,4 +529,13 @@ test('S1 Checkpoints H8: createCheckpoint refuses real repo outside TEMP in test
   assert.equal(res.created, false);
   const afterRefs = await runCommand('git', ['for-each-ref', 'refs/maw'], { cwd: realRepo });
   assert.equal(afterRefs.stdout, beforeRefs.stdout, 'refs/maw in real repo must not change');
+
+  // H10: long realpath inside TEMP is allowed even when TEMP/TMP uses 8.3 short name
+  const env = await setupTestEnv();
+  try {
+    const longRepoPath = fs.realpathSync.native(env.repoDir);
+    assert.equal(isTestAllowedCheckpointRepo(longRepoPath), true);
+  } finally {
+    cleanupTestEnv(env);
+  }
 });

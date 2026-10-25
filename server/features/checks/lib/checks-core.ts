@@ -286,8 +286,10 @@ export function validateChecksConfig(
         }
         if (fs.existsSync(resolvedCwd)) {
           try {
-            const realProj = fs.existsSync(projectPath) ? fs.realpathSync(projectPath) : projectPath;
-            const realCwd = fs.realpathSync(resolvedCwd);
+            const realProj = fs.existsSync(projectPath)
+              ? fs.realpathSync.native(projectPath)
+              : projectPath;
+            const realCwd = fs.realpathSync.native(resolvedCwd);
             if (!isPathInsideProject(realCwd, realProj)) {
               return {
                 config: defaults,
@@ -713,8 +715,10 @@ export async function runCheckProcess(
   }
   if (fs.existsSync(cwd)) {
     try {
-      const realProj = fs.existsSync(projectPath) ? fs.realpathSync(projectPath) : projectPath;
-      const realCwd = fs.realpathSync(cwd);
+      const realProj = fs.existsSync(projectPath)
+        ? fs.realpathSync.native(projectPath)
+        : projectPath;
+      const realCwd = fs.realpathSync.native(cwd);
       if (!isPathInsideProject(realCwd, realProj)) {
         return {
           state: 'fail',
@@ -749,8 +753,16 @@ export async function runCheckProcess(
   }
 
   // If it's a .cmd or .bat that couldn't be resolved as a shim:
+  let cmdTargetFile = resolved.file;
   if (resolved.type === 'cmd') {
-    if (!/^[A-Za-z0-9_\-.:\\/]+$/.test(resolved.file)) {
+    if (fs.existsSync(cmdTargetFile)) {
+      try {
+        cmdTargetFile = fs.realpathSync.native(cmdTargetFile);
+      } catch {
+        // Keep original resolved.file if realpath fails
+      }
+    }
+    if (!/^[A-Za-z0-9_\-.:\\/]+$/.test(cmdTargetFile)) {
       return {
         state: 'fail',
         exit_code: 1,
@@ -778,7 +790,7 @@ export async function runCheckProcess(
 
   if (resolved.type === 'cmd') {
     spawnFile = 'cmd.exe';
-    spawnArgs = ['/d', '/s', '/c', resolved.file, ...resolved.args];
+    spawnArgs = ['/d', '/s', '/c', cmdTargetFile, ...resolved.args];
   }
 
   return new Promise((resolve) => {

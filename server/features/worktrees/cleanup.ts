@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { appendActionAudit, type MawFeatureContext } from '../../lib/feature.ts';
 import { logServerError } from '../../lib/logger.ts';
-import { getTempDir, isDirectorySafe, isFileSafe, resolveProjectPath } from '../../lib/paths.ts';
+import {
+  getTempDir,
+  isDirectorySafe,
+  isFileSafe,
+  resolveLongWinPath,
+  resolveProjectPath,
+} from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { loadCheckpointsConfig } from '../checkpoints/index.ts';
 import { gitRun, snapshotTree, validateRefName } from '../checkpoints/snapshot.ts';
@@ -103,15 +109,7 @@ export function isBranchProtected(branchName: string): boolean {
  * Normalises a path to lower-case with backslashes and realpath (K1).
  */
 export function normalizePath(p: string): string {
-  const norm = p.replace(/\//g, '\\');
-  try {
-    if (fs.existsSync(norm)) {
-      return fs.realpathSync(norm).toLowerCase();
-    }
-  } catch {
-    // fallback
-  }
-  return path.win32.resolve(norm).toLowerCase();
+  return resolveLongWinPath(p).toLowerCase();
 }
 
 export function loadCleanupConfig(ctx: MawFeatureContext): CleanupConfig {

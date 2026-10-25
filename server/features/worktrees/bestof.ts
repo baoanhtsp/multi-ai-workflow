@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { handleCancelJob } from '../../actions/jobs.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
-import { isDirectorySafe, isFileSafe, resolveProjectPath } from '../../lib/paths.ts';
+import { isDirectorySafe, isFileSafe, resolveProjectPath, sameWinPath } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { gitRun, snapshotTree } from '../checkpoints/snapshot.ts';
@@ -776,7 +776,7 @@ export async function handleBestOfList(
     try {
       const run = JSON.parse(fs.readFileSync(path.win32.join(bestofDir, f), 'utf8')) as BestOfRun;
       if (run) {
-        if (!projectPath || run.project_path.toLowerCase() === projectPath.toLowerCase()) {
+        if (!projectPath || sameWinPath(run.project_path, projectPath)) {
           runs.push(run);
         }
       }

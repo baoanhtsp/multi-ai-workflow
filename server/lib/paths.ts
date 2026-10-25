@@ -22,31 +22,54 @@ export interface ServerPaths {
 
 const FEATURE_NAME_REGEX = /^[a-z][a-z0-9-]{1,31}$/;
 
-const REAL_USER_PROFILE = (
+export function resolveLongWinPath(rawPath: string): string {
+  const trimmed = String(rawPath ?? '').trim();
+  if (!trimmed) return '';
+  let cur = path.win32.resolve(trimmed).replace(/[\\/]+$/, '');
+  const tail: string[] = [];
+  while (cur && !/^[A-Za-z]:\\?$/.test(cur) && !fs.existsSync(cur)) {
+    tail.unshift(path.win32.basename(cur));
+    const parent = path.win32.dirname(cur);
+    if (!parent || parent === cur) break;
+    cur = parent;
+  }
+  if (cur && fs.existsSync(cur)) {
+    try {
+      cur = fs.realpathSync.native(cur);
+    } catch {
+      try {
+        cur = fs.realpathSync(cur);
+      } catch {
+        // Keep resolved cur
+      }
+    }
+  }
+  const joined = tail.length > 0 ? path.win32.join(cur, ...tail) : cur;
+  return joined.replace(/\//g, '\\').replace(/\\+$/, '');
+}
+
+const REAL_USER_PROFILE = resolveLongWinPath(
   process.env.MAW_REAL_USERPROFILE ||
-  (process.env.LOCALAPPDATA
-    ? path.win32.resolve(process.env.LOCALAPPDATA, '..', '..')
-    : process.env.APPDATA
-      ? path.win32.resolve(process.env.APPDATA, '..', '..')
-      : process.env.USERPROFILE || os.homedir() || 'C:\\Users\\Admin')
-).replace(/[\\/]+$/, '');
+    (process.env.LOCALAPPDATA
+      ? path.win32.resolve(process.env.LOCALAPPDATA, '..', '..')
+      : process.env.APPDATA
+        ? path.win32.resolve(process.env.APPDATA, '..', '..')
+        : process.env.USERPROFILE || os.homedir() || 'C:\\Users\\Admin')
+);
 
 const REAL_MAW_HOME = path.win32.join(REAL_USER_PROFILE, '.maw');
-const REAL_TEMP_DIR = (
+const REAL_TEMP_DIR = resolveLongWinPath(
   process.env.MAW_REAL_TEMP ||
-  (process.env.LOCALAPPDATA
-    ? path.win32.join(process.env.LOCALAPPDATA, 'Temp')
-    : os.tmpdir())
-).replace(/[\\/]+$/, '');
+    (process.env.LOCALAPPDATA
+      ? path.win32.join(process.env.LOCALAPPDATA, 'Temp')
+      : os.tmpdir())
+);
 const REAL_JOBS_DIR = path.win32.join(REAL_TEMP_DIR, 'maw_jobs');
 const REAL_INSTALLED_SCRIPTS_DIR = path.win32.join(
   REAL_USER_PROFILE,
   '.gemini',
-  'config',
-  'skills',
-  'claude-leader',
-  'scripts'
-);
+  '.config_placeholder'
+).replace('\\.config_placeholder', '\\config\\skills\\claude-leader\\scripts');
 
 export function isTestContext(): boolean {
   return Boolean(process.env.NODE_TEST_CONTEXT) || process.env.MAW_TEST === '1';
@@ -54,9 +77,9 @@ export function isTestContext(): boolean {
 
 export function sameWinPath(a: string, b: string): boolean {
   if (!a || !b) return false;
-  const normA = path.win32.resolve(a).replace(/[\\/]+$/, '').toLowerCase();
-  const normB = path.win32.resolve(b).replace(/[\\/]+$/, '').toLowerCase();
-  return normA === normB;
+  const normA = resolveLongWinPath(a).toLowerCase();
+  const normB = resolveLongWinPath(b).toLowerCase();
+  return Boolean(normA) && normA === normB;
 }
 
 export function getRealSystemPaths() {
@@ -184,6 +207,13 @@ export function resolveServerPaths(options?: {
     path.win32.join(tempDir, 'maw_jobs');
   if (inTest && !options?.jobsDir && sameWinPath(jobsDir, REAL_JOBS_DIR) && !sameWinPath(tempDir, REAL_TEMP_DIR)) {
     jobsDir = path.win32.join(tempDir, 'maw_jobs');
+  }
+  if (inTest && jobsDir && !sameWinPath(jobsDir, REAL_JOBS_DIR)) {
+    try {
+      fs.mkdirSync(jobsDir, { recursive: true });
+    } catch {
+      // Ignore mkdir errors
+    }
   }
 
   const repoScriptsDir = path.win32.join(
@@ -397,8 +427,8 @@ export function resolveProjectPath(candidatePath: string, projectsRoot: string):
     return null;
   }
 
-  const normTarget = realTarget.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
-  const normBase = realBase.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  const normTarget = resolveLongWinPath(realTarget).toLowerCase();
+  const normBase = resolveLongWinPath(realBase).toLowerCase();
   if (!normTarget.startsWith(normBase + '\\')) {
     return null;
   }

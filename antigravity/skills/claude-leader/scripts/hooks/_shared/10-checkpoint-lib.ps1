@@ -118,7 +118,51 @@ function New-MawCheckpoint {
         }
 
         $top = ($topRes.StdOut.Trim() -split "[\r\n]+")[0].Trim()
-        $normWorkDir = [System.IO.Path]::GetFullPath($top).TrimEnd('\', '/').ToLowerInvariant()
+        if (-not ("MawWin32Path" -as [type])) {
+            try {
+                Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class MawWin32Path {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern uint GetLongPathName(string lpszShortPath, StringBuilder lpszLongPath, uint cchBuffer);
+}
+"@ -ErrorAction SilentlyContinue
+            } catch {}
+        }
+        $resolveLong = {
+            param([string]$RawPath)
+            if (-not $RawPath -or -not $RawPath.Trim()) { return "" }
+            $cur = ""
+            try {
+                $cur = [System.IO.Path]::GetFullPath($RawPath.Trim()).TrimEnd('\', '/')
+            } catch {
+                return $RawPath.Trim().Replace('/', '\').TrimEnd('\')
+            }
+            $tail = New-Object System.Collections.Generic.List[string]
+            while ($cur -and ($cur -notmatch '^[A-Za-z]:\\?$') -and -not (Test-Path -LiteralPath $cur)) {
+                $tail.Insert(0, [System.IO.Path]::GetFileName($cur))
+                $parent = [System.IO.Path]::GetDirectoryName($cur)
+                if (-not $parent -or $parent -eq $cur) { break }
+                $cur = $parent
+            }
+            if ($cur -and (Test-Path -LiteralPath $cur) -and ("MawWin32Path" -as [type])) {
+                try {
+                    $sb = New-Object System.Text.StringBuilder 4096
+                    $len = [MawWin32Path]::GetLongPathName($cur, $sb, [uint32]$sb.Capacity)
+                    if ($len -gt 0 -and $len -lt $sb.Capacity) {
+                        $cur = $sb.ToString()
+                    }
+                } catch {}
+            }
+            foreach ($seg in $tail) {
+                $cur = Join-Path $cur $seg
+            }
+            return $cur.Replace('/', '\').TrimEnd('\').ToLowerInvariant()
+        }
+
+        $normWorkDir = & $resolveLong $top
 
         if ($env:MAW_TEST -eq "1") {
             $sysLocalTemp = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Temp" } else { $null }
@@ -128,7 +172,7 @@ function New-MawCheckpoint {
                 $env:TMP,
                 $sysLocalTemp
             ) | Where-Object { $_ -and $_.Trim() } | ForEach-Object {
-                try { [System.IO.Path]::GetFullPath($_.Trim()).TrimEnd('\', '/').ToLowerInvariant() } catch { $null }
+                & $resolveLong $_
             } | Where-Object { $_ } | Select-Object -Unique
 
             $inTemp = $false

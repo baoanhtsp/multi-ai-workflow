@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MawFeatureContext } from '../../lib/feature.ts';
-import { resolveProjectPath } from '../../lib/paths.ts';
+import { resolveProjectPath, sameWinPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { gitRun, validateRefName, validateWorktreeName } from '../checkpoints/snapshot.ts';
 import {
@@ -128,7 +128,7 @@ export async function createWorktreeRecord(
     }
     if (
       store.worktrees.some(
-        (w) => w.status === 'active' && w.worktree_path.toLowerCase() === wtDir.toLowerCase()
+        (w) => w.status === 'active' && sameWinPath(w.worktree_path, wtDir)
       )
     ) {
       throw new ApiValidationError(`Worktree path '${wtDir}' already exists.`, 409);

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { MawFeature } from '../../lib/feature.ts';
-import { isDirectorySafe, isFileSafe, resolveProjectPath } from '../../lib/paths.ts';
+import { isDirectorySafe, isFileSafe, resolveProjectPath, sameWinPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import {
   createCheckpoint,
@@ -307,7 +307,7 @@ export const feature: MawFeature = {
         }
 
         const filtered = store.worktrees.filter((wt) => {
-          if (projectPath && wt.project_path.toLowerCase() !== projectPath.toLowerCase()) {
+          if (projectPath && !sameWinPath(wt.project_path, projectPath)) {
             return false;
           }
           if (!includeAll && (wt.status !== 'active' && wt.status !== 'creating')) {

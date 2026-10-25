@@ -855,6 +855,58 @@ function Get-MawTokenCostUsd {
     return [Math]::Round($rawUsd, 5)
 }
 
+function ConvertTo-MawLongPath {
+    param(
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    if (-not $Path -or -not $Path.Trim()) {
+        return ""
+    }
+    if (-not ("MawWin32Path" -as [type])) {
+        try {
+            Add-Type -TypeDefinition @"
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+public static class MawWin32Path {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern uint GetLongPathName(string lpszShortPath, StringBuilder lpszLongPath, uint cchBuffer);
+}
+"@ -ErrorAction SilentlyContinue
+        } catch {}
+    }
+
+    $cur = ""
+    try {
+        $cur = [System.IO.Path]::GetFullPath($Path.Trim()).TrimEnd('\', '/')
+    } catch {
+        return $Path.Trim().Replace('/', '\').TrimEnd('\')
+    }
+    $tail = New-Object System.Collections.Generic.List[string]
+    while ($cur -and ($cur -notmatch '^[A-Za-z]:\\?$') -and -not (Test-Path -LiteralPath $cur)) {
+        $tail.Insert(0, [System.IO.Path]::GetFileName($cur))
+        $parent = [System.IO.Path]::GetDirectoryName($cur)
+        if (-not $parent -or $parent -eq $cur) { break }
+        $cur = $parent
+    }
+    if ($cur -and (Test-Path -LiteralPath $cur) -and ("MawWin32Path" -as [type])) {
+        try {
+            $sb = New-Object System.Text.StringBuilder 4096
+            $len = [MawWin32Path]::GetLongPathName($cur, $sb, [uint32]$sb.Capacity)
+            if ($len -gt 0 -and $len -lt $sb.Capacity) {
+                $cur = $sb.ToString()
+            }
+        } catch {}
+    }
+    foreach ($seg in $tail) {
+        $cur = Join-Path $cur $seg
+    }
+    return $cur.Replace('/', '\').TrimEnd('\')
+}
+
 function Resolve-MawAuditFilePath {
     param(
         [string]$AuditFileOverride = ""
@@ -876,13 +928,8 @@ function Resolve-MawAuditFilePath {
             } catch {}
         }
         if ($realProfile) {
-            $normRealGemini = ([System.IO.Path]::GetFullPath((Join-Path $realProfile ".gemini"))).TrimEnd('\', '/').ToLowerInvariant()
-            $normCandidate = ""
-            try {
-                $normCandidate = ([System.IO.Path]::GetFullPath($candidate)).TrimEnd('\', '/').ToLowerInvariant()
-            } catch {
-                $normCandidate = $candidate.Replace('/', '\').TrimEnd('\').ToLowerInvariant()
-            }
+            $normRealGemini = (ConvertTo-MawLongPath -Path (Join-Path $realProfile ".gemini")).ToLowerInvariant()
+            $normCandidate = (ConvertTo-MawLongPath -Path $candidate).ToLowerInvariant()
             if ($normCandidate -eq $normRealGemini -or $normCandidate.StartsWith("$normRealGemini\")) {
                 Write-Warning "[MAW_TEST=1] Refusing to write audit entry to real user profile path: $candidate"
                 return $null

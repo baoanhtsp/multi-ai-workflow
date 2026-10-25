@@ -101,18 +101,31 @@ export async function getDetectedToolVersions(userProfile: string): Promise<Dete
   }
 
   let claudeVer: string | null = null;
-  const claudeTry = await runCommand('claude.exe', ['--version'], { timeoutMs: 4000 });
-  claudeVer = extractSemver(claudeTry.stdout || claudeTry.stderr);
-  if (!claudeVer) {
-    for (const roam of roamingDirs) {
-      const claudeBase = path.win32.join(roam, 'Claude', 'claude-code');
-      const exes = findClaudeExecutables(claudeBase);
-      if (exes.length > 0) {
-        const r = await runCommand(exes[0]!, ['--version'], { timeoutMs: 4000 });
-        claudeVer = extractSemver(r.stdout || r.stderr);
-        if (claudeVer) break;
-      }
+  for (const roam of roamingDirs) {
+    const claudeJs = path.win32.join(
+      roam,
+      'npm',
+      'node_modules',
+      '@anthropic-ai',
+      'claude-code',
+      'cli.js'
+    );
+    if (isFileSafe(claudeJs)) {
+      const r = await runCommand(process.execPath, [claudeJs, '--version'], { timeoutMs: 4000 });
+      claudeVer = extractSemver(r.stdout || r.stderr);
+      if (claudeVer) break;
     }
+    const claudeBase = path.win32.join(roam, 'Claude', 'claude-code');
+    const exes = findClaudeExecutables(claudeBase);
+    if (exes.length > 0) {
+      const r = await runCommand(exes[0]!, ['--version'], { timeoutMs: 4000 });
+      claudeVer = extractSemver(r.stdout || r.stderr);
+      if (claudeVer) break;
+    }
+  }
+  if (!claudeVer) {
+    const claudeTry = await runCommand('claude.exe', ['--version'], { timeoutMs: 4000 });
+    claudeVer = extractSemver(claudeTry.stdout || claudeTry.stderr);
   }
 
   let codexVer: string | null = null;

@@ -10,24 +10,31 @@ import {
   isDirectorySafe,
   isFileSafe,
   isTestContext,
+  resolveLongWinPath,
   type ServerPaths,
 } from '../../lib/paths.ts';
 import { runCommand, type RunCommandOptions, type RunCommandResult } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 
-const REAL_MAW_REPO_ROOT = path.win32
-  .resolve(import.meta.dirname, '..', '..', '..')
-  .toLowerCase()
-  .replace(/\\+$/, '');
+const REAL_MAW_REPO_ROOT = resolveLongWinPath(
+  path.win32.resolve(import.meta.dirname, '..', '..', '..')
+).toLowerCase();
 
 export function isTestAllowedCheckpointRepo(repoTopPath: string): boolean {
-  const normRepo = path.win32.resolve(repoTopPath).toLowerCase().replace(/\\+$/, '');
+  const normRepo = resolveLongWinPath(repoTopPath).toLowerCase();
+  if (!normRepo) {
+    return false;
+  }
   if (normRepo === REAL_MAW_REPO_ROOT || normRepo.startsWith(REAL_MAW_REPO_ROOT + '\\')) {
     return false;
   }
-  const candidateTemps = [os.tmpdir(), getTempDir(), process.env.TEMP, process.env.TMP]
+  const sysLocalTemp = process.env.LOCALAPPDATA
+    ? path.win32.join(process.env.LOCALAPPDATA, 'Temp')
+    : '';
+  const candidateTemps = [os.tmpdir(), getTempDir(), process.env.TEMP, process.env.TMP, sysLocalTemp]
     .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
-    .map((v) => path.win32.resolve(v.trim()).toLowerCase().replace(/\\+$/, ''));
+    .map((v) => resolveLongWinPath(v.trim()).toLowerCase())
+    .filter(Boolean);
   return candidateTemps.some((t) => normRepo === t || normRepo.startsWith(t + '\\'));
 }
 

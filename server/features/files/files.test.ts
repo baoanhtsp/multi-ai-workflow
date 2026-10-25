@@ -626,7 +626,7 @@ test('openFileInEditor: substitutes placeholders, calls spawnFn, and attaches er
   assert.equal(res.ok, true);
   assert.ok(capturedExe.toLowerCase().endsWith('notepad.exe'));
   assert.equal(capturedArgs.length, 1);
-  assert.equal(path.normalize(capturedArgs[0]!), path.normalize(testFilePath));
+  assert.equal(path.normalize(capturedArgs[0]!), path.normalize(fs.realpathSync.native(testFilePath)));
 
   // Also test without spawnFn using a real executable (notepad.exe) to verify child.on('error') does not crash
   const liveRes = openFileInEditor({
