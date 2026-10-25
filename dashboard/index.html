@@ -267,6 +267,10 @@
   .page-head .page-desc { font-size: 13px; color: var(--muted); margin-top: 3px; }
   .page-head .spacer { flex: 1; }
   #tabsCard > .tabs, #tabsCard > .tab-groups { display: none; }
+  #tabsCard { display: flex; flex-direction: column; }
+  #tabsCard.hidden { display: none; }
+  #tabsCard > .companion-h { padding: 14px 16px 10px; font-size: 13px; font-weight: 650; color: var(--text); border-top: 1px solid var(--border); background: var(--surface-2); }
+  #view-dashboard > .page[data-page="agents"] + #tabsCard, #view-dashboard > .page:not(.hidden) ~ #tabsCard:not(.hidden) { margin-top: 20px; }
   .subtabs { display: flex; gap: 2px; margin: -6px 0 18px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: thin; }
   .subtabs button { flex: none; padding: 9px 12px 8px; font-size: 13.5px; font-weight: 500; color: var(--muted); white-space: nowrap; background: none; border: 0; border-bottom: 2px solid transparent; cursor: pointer; }
   .subtabs button:hover { color: var(--text); }
@@ -723,7 +727,7 @@
     <div class="grid g-kpi" id="kpiRow" aria-label="Summary"></div>
     <div class="grid g-ov">
       <div class="card">
-        <div class="card-h"><h2 data-i18n="ovRecent"></h2><span class="spacer"></span><button type="button" class="btn-link" data-goto="timeline" data-i18n="ovAllJobs"></button></div>
+        <div class="card-h"><h2 data-i18n="ovRecent"></h2><span class="spacer"></span><button type="button" class="btn-link" data-goto="audit" data-i18n="ovAllJobs"></button></div>
         <div id="ovJobs"></div>
       </div>
       <div class="stack-lg">
@@ -1030,17 +1034,18 @@ const I18N = {
     navMenu: 'Menu', navCollapse: 'Thu gọn menu', navPages: 'Trang', cmdkPh: 'Tìm nhanh…', prefsBtn: 'Giao diện', prefLang: 'Ngôn ngữ', prefTheme: 'Chủ đề',
     navGrp_work: 'Làm việc', navGrp_manage: 'Quản lý',
     hub_project: 'Dự án', hub_activity: 'Hoạt động', hub_quality: 'Chi phí & chất lượng', hub_settings: 'Cài đặt', hub_other: 'Khác',
-    sub_project: 'Tổng quan', sub_agents: 'Agent',
+    sub_project: 'Tổng quan', sub_agents: 'Agent', sub_audit: 'Nhật ký',
     nav_overview: 'Tổng quan', nav_dispatch: 'Giao việc', nav_project: 'Tổng quan dự án', nav_agents: 'Agent',
     navDesc_overview: 'Số liệu chính, job gần đây và tình trạng các AI.',
     navDesc_dispatch: 'Phân vai cho AI, mô tả việc cần làm và chạy.',
     navDesc_project: 'SPEC.md, kiểm tra phân quyền, Git và thao tác trên dự án đang chọn.',
-    navDesc_agents: 'Các AI trong registry: đã cài, phiên bản, vai trò.',
-    navDesc_audit: 'Mọi lượt gọi AI: token, chi phí, điểm và kết luận.',
+    navDesc_agents: 'Các AI trong registry: đã cài, phiên bản, vai trò; kèm các phiên Antigravity gần đây.',
+    navDesc_audit: 'Dòng thời gian các job và mọi lượt gọi AI: token, chi phí, điểm, kết luận.',
+    navDesc_scoreboard: 'Xếp hạng AI theo vai, kèm thống kê theo vai, công cụ và model.',
     navDesc_sessions: 'Các hội thoại Antigravity gần đây.',
     navDesc_stats: 'Thống kê theo vai, công cụ và model.',
     navDesc_notify: 'Thông báo Windows, webhook và Telegram khi job kết thúc.',
-    ovRecent: 'Job gần đây', ovAllJobs: 'Xem dòng thời gian', ovQuickTitle: 'Thao tác nhanh', ovAllAgents: 'Xem tất cả', ovNoJobs: 'Chưa có job nào.',
+    ovRecent: 'Job gần đây', ovAllJobs: 'Xem nhật ký', ovQuickTitle: 'Thao tác nhanh', ovAllAgents: 'Xem tất cả', ovNoJobs: 'Chưa có job nào.',
     ovNewTask: 'Giao việc mới', ovBoard: 'Mở bảng việc', ovWorkspace: 'Không gian agent', ovInbox: 'Hộp thư', ovReview: 'Review thay đổi', ovHealth: 'Kiểm tra sức khỏe',
     dockCollapse: 'Thu gọn', dockExpand: 'Mở rộng', dockClose: 'Đóng',
 
@@ -1288,17 +1293,18 @@ const I18N = {
     navMenu: 'Menu', navCollapse: 'Collapse menu', navPages: 'Pages', cmdkPh: 'Quick search…', prefsBtn: 'Display', prefLang: 'Language', prefTheme: 'Theme',
     navGrp_work: 'Work', navGrp_manage: 'Manage',
     hub_project: 'Project', hub_activity: 'Activity', hub_quality: 'Cost & quality', hub_settings: 'Settings', hub_other: 'Other',
-    sub_project: 'Overview', sub_agents: 'Agents',
+    sub_project: 'Overview', sub_agents: 'Agents', sub_audit: 'Log',
     nav_overview: 'Overview', nav_dispatch: 'New task', nav_project: 'Project overview', nav_agents: 'Agents',
     navDesc_overview: 'Key numbers, recent jobs and the state of every AI.',
     navDesc_dispatch: 'Assign roles to AIs, describe the work and run it.',
     navDesc_project: 'SPEC.md, ownership checks, Git and actions for the selected project.',
-    navDesc_agents: 'AIs in the registry: installed, version, role.',
-    navDesc_audit: 'Every AI call: tokens, cost, score and verdict.',
+    navDesc_agents: 'AIs in the registry: installed, version, role; plus recent Antigravity sessions.',
+    navDesc_audit: 'The job timeline and every AI call: tokens, cost, score, verdict.',
+    navDesc_scoreboard: 'AIs ranked per role, plus the breakdown by role, tool and model.',
     navDesc_sessions: 'Recent Antigravity conversations.',
     navDesc_stats: 'Breakdown by role, tool and model.',
     navDesc_notify: 'Windows, webhook and Telegram notifications when a job ends.',
-    ovRecent: 'Recent jobs', ovAllJobs: 'Open timeline', ovQuickTitle: 'Quick actions', ovAllAgents: 'See all', ovNoJobs: 'No jobs yet.',
+    ovRecent: 'Recent jobs', ovAllJobs: 'Open the log', ovQuickTitle: 'Quick actions', ovAllAgents: 'See all', ovNoJobs: 'No jobs yet.',
     ovNewTask: 'New task', ovBoard: 'Open the board', ovWorkspace: 'Agent workspace', ovInbox: 'Inbox', ovReview: 'Review changes', ovHealth: 'Health check',
     dockCollapse: 'Collapse', dockExpand: 'Expand', dockClose: 'Close',
 
@@ -2554,15 +2560,41 @@ $('guideBtn').onclick = () => {
 // ---------- Tab panels are pages (the hidden tab buttons stay: feature scripts click them) ----------
 const topTabs = () => [...document.querySelectorAll('#tabsCard > .tabs > [data-tab]')];
 function renderTabGroups() { scheduleNav(); }
+// Shows several panels in order; companions get a small heading above them.
+function showPanels(list, comps = []) {
+  const card = $('tabsCard');
+  topTabs().forEach(b => b.setAttribute('aria-selected', String(list.includes(b.dataset.tab))));
+  card.querySelectorAll(':scope > [data-panel]').forEach(p => {
+    const i = list.indexOf(p.dataset.panel);
+    p.classList.toggle('hidden', i < 0);
+    p.style.order = i < 0 ? '' : String(i * 2 + 1);
+  });
+  card.querySelectorAll(':scope > .companion-h').forEach(h => h.classList.add('hidden'));
+  comps.forEach(c => {
+    let h = card.querySelector(`:scope > .companion-h[data-for="${c}"]`);
+    if (!h) { h = document.createElement('div'); h.className = 'companion-h'; h.dataset.for = c; card.appendChild(h); }
+    h.textContent = tabLabel(c);
+    h.classList.remove('hidden');
+    h.style.order = String(list.indexOf(c) * 2);
+  });
+}
 function switchTabPanel(name) {
   // Only the top-level tabs / panels: feature panels may contain their own [data-tab] / [data-panel] widgets.
-  topTabs().forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
-  document.querySelectorAll('#tabsCard > [data-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
+  const comps = companionsOf(name);
+  showPanels(panelOrder(name, true, comps), comps);
 }
 // Kept for feature scripts: "select a tab" = open that page.
-function selectTab(name) { if (currentPage !== name) showPage(name); else switchTabPanel(name); }
+function selectTab(name) {
+  const host = COMPANION_HOST[name] && hostExists(COMPANION_HOST[name]) ? COMPANION_HOST[name] : name;
+  if (currentPage !== host) showPage(host);
+  else if (host === name) switchTabPanel(name);
+}
 // Delegated, so tabs added later by feature plugins work too (their click listeners still fire).
-document.querySelector('#tabsCard > .tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) selectTab(b.dataset.tab); });
+document.querySelector('#tabsCard > .tabs').addEventListener('click', e => {
+  const b = e.target.closest('[data-tab]');
+  if (!b || companionPing) return;
+  selectTab(b.dataset.tab);
+});
 
 // ---------- Feature plugins (SPEC §9.0) ----------
 // Each server feature may ship `dashboard/feat-<name>.js`; it talks to the page only through window.MAW.
@@ -2694,20 +2726,42 @@ const HUBS = [
   { id: 'workspace', group: 'work', pages: ['workspace'] },
   { id: 'board', group: 'work', pages: ['board'] },
   { id: 'project', group: 'manage', pages: ['project', 'review', 'files', 'checkpoints', 'worktrees', 'checks'] },
-  { id: 'activity', group: 'manage', pages: ['inbox', 'timeline', 'audit', 'sessions'] },
-  { id: 'quality', group: 'manage', pages: ['budget', 'scoreboard', 'stats', 'policy'] },
+  { id: 'activity', group: 'manage', pages: ['inbox', 'audit'] },
+  { id: 'quality', group: 'manage', pages: ['budget', 'scoreboard', 'policy'] },
   { id: 'settings', group: 'manage', pages: ['agents', 'health', 'mcp', 'notify'] }
 ];
 const SECTION_PAGES = ['overview', 'dispatch', 'project', 'agents'];
+// Pages merged into a host page: they render below the host's own content, with a small heading.
+// When the host page does not exist (its feature is missing) the companion stays a normal page.
+const COMPANIONS = { audit: ['timeline'], scoreboard: ['stats'], agents: ['sessions'] };
+const COMPANION_HOST = Object.fromEntries(Object.entries(COMPANIONS).flatMap(([h, cs]) => cs.map(c => [c, h])));
+let companionPing = false;
+// Companions shown above the host's own content (a summary chart before the detailed table).
+const COMPANION_FIRST = new Set(['timeline']);
+function panelOrder(id, isTab, comps) {
+  const before = comps.filter(c => COMPANION_FIRST.has(c)), after = comps.filter(c => !COMPANION_FIRST.has(c));
+  return [...before, ...(isTab ? [id] : []), ...after];
+}
 var currentPage = null;
 var pendingPage = null;
 const tabBtn = id => document.querySelector(`#tabsCard > .tabs > [data-tab="${id}"]`);
 function pageKind(id) {
+  if (COMPANION_HOST[id] && hostExists(COMPANION_HOST[id])) return null;
   if (SECTION_PAGES.includes(id)) return 'section';
   if (MAW_VIEWS && MAW_VIEWS[id]) return 'view';
   const b = tabBtn(id);
   return b && !b.classList.contains('hidden') ? 'tab' : null;
 }
+function hostExists(h) {
+  if (SECTION_PAGES.includes(h)) return true;
+  const b = tabBtn(h);
+  return !!b && !b.classList.contains('hidden');
+}
+// Companions of a page that are available right now (e.g. sessions only when Antigravity is in the registry).
+function companionsOf(id) {
+  return (COMPANIONS[id] || []).filter(c => { const b = tabBtn(c); return b && !b.classList.contains('hidden'); });
+}
+function tabLabel(id) { return tabBtn(id)?.firstElementChild?.textContent.trim() || id; }
 function pageTitle(id) {
   const k = pageKind(id);
   if (k === 'section') return t('nav_' + id);
@@ -2774,6 +2828,7 @@ function renderPageHead(id) {
 }
 // Shows a page. Unknown pages (a feature that has not loaded yet) are remembered and opened when it registers.
 function showPage(id, opts = {}) {
+  if (COMPANION_HOST[id] && hostExists(COMPANION_HOST[id])) id = COMPANION_HOST[id];
   const kind = pageKind(id);
   if (!kind) { if (opts.fromStore) pendingPage = id; id = 'overview'; }
   else if (pendingPage === id) pendingPage = null;
@@ -2783,8 +2838,12 @@ function showPage(id, opts = {}) {
   else {
     showView('dashboard', true);
     document.querySelectorAll('#view-dashboard > .page').forEach(p => p.classList.toggle('hidden', p.dataset.page !== id));
-    $('tabsCard').classList.toggle('hidden', k !== 'tab');
-    if (k === 'tab') switchTabPanel(id);
+    const comps = companionsOf(id);
+    $('tabsCard').classList.toggle('hidden', k !== 'tab' && !comps.length);
+    showPanels(panelOrder(id, k === 'tab', comps), comps);
+    // Let lazy feature panels (e.g. the timeline) load: their scripts listen for clicks on the hidden tab button.
+    companionPing = true;
+    try { comps.forEach(c => tabBtn(c).dispatchEvent(new MouseEvent('click', { bubbles: true }))); } finally { companionPing = false; }
     renderPageHead(id);
   }
   if (!opts.fromStore || !pendingPage) { store.set('maw_page', id); store.set('maw_hub_' + hubOf(id).id, id); }
