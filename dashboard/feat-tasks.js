@@ -16,7 +16,7 @@
   const POLL_MS = 3000;
 
   M.addI18n('vi', {
-    'tk.view': 'Bảng việc', 'tk.tab.board': 'Bảng', 'tk.tab.library': 'Mẫu & đội hình', 'tk.tab.autorun': 'Auto Run',
+    'tk.view': 'Bảng việc', 'tk.crumb': 'Làm việc', 'tk.desc': 'Thẻ việc theo cột, mẫu đội hình, Auto Run, lịch chạy và giới hạn chạy song song.', 'tk.tab.board': 'Bảng', 'tk.tab.library': 'Mẫu & đội hình', 'tk.tab.autorun': 'Auto Run',
     'tk.tab.schedules': 'Lịch chạy', 'tk.tab.limits': 'Giới hạn',
     'tk.st.backlog': 'Tồn đọng', 'tk.st.queued': 'Chờ chạy', 'tk.st.running': 'Đang chạy', 'tk.st.needs_input': 'Cần phản hồi',
     'tk.st.review': 'Chờ duyệt', 'tk.st.done': 'Hoàn thành', 'tk.st.failed': 'Thất bại',
@@ -68,7 +68,7 @@
     'tk.unsupported': 'Máy chủ chưa có tính năng bảng việc (S2).'
   });
   M.addI18n('en', {
-    'tk.view': 'Board', 'tk.tab.board': 'Board', 'tk.tab.library': 'Templates & presets', 'tk.tab.autorun': 'Auto Run',
+    'tk.view': 'Board', 'tk.crumb': 'Work', 'tk.desc': 'Task cards by column, team templates, Auto Run, schedules and concurrency limits.', 'tk.tab.board': 'Board', 'tk.tab.library': 'Templates & presets', 'tk.tab.autorun': 'Auto Run',
     'tk.tab.schedules': 'Schedules', 'tk.tab.limits': 'Limits',
     'tk.st.backlog': 'Backlog', 'tk.st.queued': 'Queued', 'tk.st.running': 'Running', 'tk.st.needs_input': 'Needs input',
     'tk.st.review': 'Review', 'tk.st.done': 'Done', 'tk.st.failed': 'Failed',
@@ -286,13 +286,13 @@
     render(el) {
       root = el;
       el.innerHTML = `<div class="wrap tk-wrap">
-        <div class="tk-head">
-          <h2 class="tk-h">${esc(t('tk.view'))}</h2>
-          <div class="seg tk-tabs" role="tablist"></div>
+        <div class="page-head tk-head">
+          <div><div class="crumb tk-crumb"></div><h1 class="tk-h">${esc(t('tk.view'))}</h1><div class="page-desc tk-desc"></div></div>
           <span class="spacer"></span>
           <span class="tk-sched pill"></span>
           <button type="button" class="btn btn-primary btn-sm tk-new">+ <span></span></button>
         </div>
+        <div class="subtabs tk-tabs" role="tablist"></div>
         <div class="tk-body"></div>
       </div>`;
       el.querySelector('.tk-new').onclick = () => openCard(null);
@@ -316,8 +316,10 @@
   function paintHead() {
     if (!root) return;
     root.querySelector('.tk-h').textContent = t('tk.view');
+    root.querySelector('.tk-crumb').textContent = t('tk.crumb');
+    root.querySelector('.tk-desc').textContent = t('tk.desc');
     root.querySelector('.tk-new span').textContent = t('tk.new');
-    root.querySelector('.tk-tabs').innerHTML = TABS.map(id => `<button type="button" role="tab" data-tab="${id}" aria-pressed="${S.tab === id}">${esc(t('tk.tab.' + id))}</button>`).join('');
+    root.querySelector('.tk-tabs').innerHTML = TABS.map(id => `<button type="button" role="tab" data-tab="${id}" aria-selected="${S.tab === id}">${esc(t('tk.tab.' + id))}</button>`).join('');
     const sc = S.scheduler, pill = root.querySelector('.tk-sched');
     const running = S.tasks.filter(c => c.status === 'running').length;
     const state = !sc ? 'off' : S.config.paused ? 'paused' : sc.active === false ? 'passive' : 'active';

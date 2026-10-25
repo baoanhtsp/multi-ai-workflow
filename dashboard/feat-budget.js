@@ -260,6 +260,9 @@
         </section>
       </div>`;
     if (!panel.dataset.s4bound) { panel.dataset.s4bound = '1'; panel.addEventListener('click', onClick); }
+    // Placeholders until the live numbers arrive (budget_spend can take a few seconds on a big audit log).
+    if (S.spend) { paintKpis(); paintDays(); paintAgents(); paintQueue(); }
+    else for (const k of ['kpis', 'days', 'agents', 'running', 'queue', 'cool', 'budget']) { const b = R(k); if (b) b.innerHTML = '<div class="sub">…</div>'; }
     loadConfigs();
   }
   function R(name) { return S.panel?.querySelector(`[data-r="${name}"]`); }

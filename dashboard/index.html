@@ -42,7 +42,7 @@
     --focus: 0 0 0 3px rgba(68, 147, 248, .3);
   }
   * { box-sizing: border-box; }
-  html { -webkit-text-size-adjust: 100%; }
+  html { -webkit-text-size-adjust: 100%; scrollbar-gutter: stable; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, Roboto, "Helvetica Neue", Arial, sans-serif;
@@ -106,9 +106,13 @@
     .topbar .wrap { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "brand tools" "proj search"; }
   }
   @media (max-width: 640px) {
-    .topbar .wrap { grid-template-columns: minmax(0, 1fr); grid-template-areas: "brand" "tools" "proj" "search"; }
+    /* Three rows on a phone: brand, status pills, project + search side by side. */
+    .topbar .wrap { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "brand brand" "tools tools" "proj search"; }
     .tools { justify-content: flex-start; flex-wrap: wrap; }
-    .tools .sep { display: none; }
+    .tools .sep, .tools .btn-group, #projLbl { display: none; }
+    .proj-pick, .proj-anchor, .proj-btn { min-width: 0; width: 100%; }
+    .cmdk-btn { min-width: 0; }
+    .cmdk-btn kbd { display: none; }
   }
   main.wrap { padding-top: 22px; padding-bottom: 40px; }
   main > section + section { margin-top: 20px; }
@@ -260,7 +264,8 @@
   .nav-backdrop { display: none; }
   .app-main { min-width: 0; }
   body.has-dock .app-main { padding-bottom: calc(var(--dock-h, 0px) + 16px); }
-  #view-dashboard { max-width: 1320px; margin: 0 auto; padding: 22px 24px 40px; }
+  /* Left-aligned next to the menu: centring made the edge jump whenever a page got a scrollbar. */
+  #view-dashboard { max-width: 1320px; margin: 0; padding: 22px 24px 40px; }
   .page-head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 16px; margin-bottom: 18px; }
   .page-head .crumb { font-size: 12px; color: var(--faint); }
   .page-head h1 { font-size: 21px; font-weight: 650; letter-spacing: -.01em; margin-top: 2px; }
@@ -349,6 +354,7 @@
   .council-pick { margin-top: 8px; gap: 6px; }
   .agent-row.is-missing { opacity: .7; }
   .agent-extra { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+  .agents-sub { padding: 12px 16px 2px; font-size: 11.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
   #featHeader:empty, #jobActions:empty, #projActions:empty { display: none; }
   .maw-view { min-height: calc(100vh - 57px); }
   .agents-hint { border-top: 1px solid var(--border); font-size: 12px; }
@@ -1064,6 +1070,16 @@ const I18N = {
     navDesc_sessions: 'Các hội thoại Antigravity gần đây.',
     navDesc_stats: 'Thống kê theo vai, công cụ và model.',
     navDesc_notify: 'Thông báo Windows, webhook và Telegram khi job kết thúc.',
+    navDesc_board: 'Thẻ việc theo cột, mẫu đội hình, Auto Run, lịch chạy và giới hạn chạy song song.',
+    navDesc_review: 'Xem diff theo working tree, nhánh, job hoặc commit; chấp nhận/từ chối từng phần và chấm điểm.',
+    navDesc_files: 'Duyệt và sửa tệp của dự án, xem lịch sử thay đổi.',
+    navDesc_checkpoints: 'Ảnh chụp trước mỗi job để so sánh hoặc khôi phục.',
+    navDesc_worktrees: 'Worktree cô lập cho từng job, Best-of-N, Git và dọn dẹp nhánh.',
+    navDesc_checks: 'Cổng chất lượng trước khi merge và các lệnh kiểm tra của dự án.',
+    navDesc_inbox: 'Việc cần bạn xử lý: job lỗi, chờ phê duyệt, gợi ý chạy lại.',
+    navDesc_budget: 'Chi phí theo ngày và theo agent, ngân sách, định tuyến dự phòng và tự phục hồi.',
+    navDesc_policy: 'Luật lệnh bị cấm / cần phê duyệt, đường dẫn bảo vệ và các vi phạm.',
+    navDesc_mcp: 'Máy chủ MCP dùng chung cho các agent.',
     ovRecent: 'Job gần đây', ovAllJobs: 'Xem nhật ký', ovQuickTitle: 'Thao tác nhanh', ovAllAgents: 'Xem tất cả', ovNoJobs: 'Chưa có job nào.',
     ovNewTask: 'Giao việc mới', ovBoard: 'Mở bảng việc', ovWorkspace: 'Không gian agent', ovInbox: 'Hộp thư', ovReview: 'Review thay đổi', ovHealth: 'Kiểm tra sức khỏe',
     dockCollapse: 'Thu gọn', dockExpand: 'Mở rộng', dockClose: 'Đóng',
@@ -1076,6 +1092,7 @@ const I18N = {
     councilLbl: 'Người chấm:',
     councilTip: 'Bấm để thêm / bỏ AI khỏi lượt chấm chéo',
     councilMin: 'Cần ít nhất một AI chấm.',
+    agentsBridgeH: 'Cầu nối Antigravity',
     agentsHint: 'Thêm AI mới: khai báo trong <code>~/.maw/agents.json</code> (lệnh CLI, model, vai) — không cần sửa code.',
     kReady: 'AI sẵn sàng', kReadySub: 'đã cài trên máy · {n} AI trong registry',
     statsTitle: 'Thống kê',
@@ -1325,6 +1342,16 @@ const I18N = {
     navDesc_sessions: 'Recent Antigravity conversations.',
     navDesc_stats: 'Breakdown by role, tool and model.',
     navDesc_notify: 'Windows, webhook and Telegram notifications when a job ends.',
+    navDesc_board: 'Task cards by column, team templates, Auto Run, schedules and concurrency limits.',
+    navDesc_review: 'Diff of the working tree, a branch, a job or a commit; accept/reject hunks and score it.',
+    navDesc_files: 'Browse and edit project files, with their change history.',
+    navDesc_checkpoints: 'Snapshots taken before each job, to compare or restore.',
+    navDesc_worktrees: 'Isolated worktrees per job, Best-of-N, Git and branch cleanup.',
+    navDesc_checks: 'Pre-merge quality gate and the check commands of the project.',
+    navDesc_inbox: 'Things that need you: failed jobs, approvals, suggested re-runs.',
+    navDesc_budget: 'Spend per day and per agent, budgets, fallback routing and auto-recovery.',
+    navDesc_policy: 'Blocked / approval-required commands, protected paths and violations.',
+    navDesc_mcp: 'MCP servers shared by the agents.',
     ovRecent: 'Recent jobs', ovAllJobs: 'Open the log', ovQuickTitle: 'Quick actions', ovAllAgents: 'See all', ovNoJobs: 'No jobs yet.',
     ovNewTask: 'New task', ovBoard: 'Open the board', ovWorkspace: 'Agent workspace', ovInbox: 'Inbox', ovReview: 'Review changes', ovHealth: 'Health check',
     dockCollapse: 'Collapse', dockExpand: 'Expand', dockClose: 'Close',
@@ -1337,6 +1364,7 @@ const I18N = {
     councilLbl: 'Reviewers:',
     councilTip: 'Click to add / remove this AI from the cross review',
     councilMin: 'Keep at least one reviewer.',
+    agentsBridgeH: 'Antigravity bridge',
     agentsHint: 'Add an AI: declare it in <code>~/.maw/agents.json</code> (CLI command, models, roles) — no code changes.',
     kReady: 'AI ready', kReadySub: 'installed here · {n} AIs in the registry',
     statsTitle: 'Statistics',
@@ -2138,7 +2166,9 @@ function renderAgentsCard(d) {
   const ready = ids.filter(id => AGENTS[id].installed).length;
   $('agentsCount').textContent = `${ready} / ${ids.length}`;
   const compact = (d.features || []).includes('health');
-  $('agents').innerHTML = ids.filter(id => !compact || cap(id, 'sessions')).map(id => {
+  const shown = ids.filter(id => !compact || cap(id, 'sessions'));
+  // With the health feature the full agent grid lives below; this card keeps only the bridge controls.
+  $('agents').innerHTML = (compact && shown.length ? `<div class="agents-sub">${esc(t('agentsBridgeH'))}</div>` : '') + shown.map(id => {
     const a = AGENTS[id], tool = tools[id];
     const summary = tool?.role_summary || (BUILTIN[id] ? t({ claude: 'roleCl', antigravity: 'roleAg', codex: 'roleCx' }[id]) : t('cliAgent'));
     const ver = a.version ? 'v' + String(a.version).replace(/^v/, '') : (id === 'antigravity' && b.ls_version ? b.ls_version : '—');
@@ -2624,6 +2654,7 @@ document.querySelector('#tabsCard > .tabs').addEventListener('click', e => {
 var MAW_EVENTS = {};
 var MAW_JOB_ACTIONS = [];
 var MAW_PROJECT_ACTIONS = [];
+var MAW_TAB_PAINT = {};
 var loadedFeatures = new Set();
 function emit(ev, data) {
   for (const fn of (MAW_EVENTS && MAW_EVENTS[ev]) || []) {
@@ -2653,6 +2684,7 @@ window.MAW = {
       try { render?.(panel); } catch (e) { console.error(`[feature tab ${id}]`, e); }
     };
     MAW.on('data', paint); MAW.on('lang', paint);
+    MAW_TAB_PAINT[id] = paint;
     if (state.data) paint();
     if (pendingPage === id) showPage(id); else scheduleNav();
     return { button: btn, panel, setCount: n => { btn.lastElementChild.textContent = n || ''; renderTabGroups(); } };
@@ -2855,6 +2887,7 @@ function renderNav() {
     }).join('')}</div>`;
   }).join('') + `<div class="nav-foot"><button type="button" class="nav-item" data-act="collapse">${esc(t('navCollapse'))}</button></div>`;
   if (currentPage && pageKind(currentPage) !== 'view') renderSubTabs(currentPage);
+  renderOvQuick();
   syncPaletteSource();
 }
 function renderSubTabs(id) {
@@ -2896,6 +2929,8 @@ function showPage(id, opts = {}) {
     // Let lazy feature panels (e.g. the timeline) load: their scripts listen for clicks on the hidden tab button.
     companionPing = true;
     try { comps.forEach(c => tabBtn(c).dispatchEvent(new MouseEvent('click', { bubbles: true }))); } finally { companionPing = false; }
+    // Feature tabs only load while visible: repaint them now, whatever opened the page (deep link, palette, back).
+    [...(k === 'tab' ? [id] : []), ...comps].forEach(p => MAW_TAB_PAINT[p]?.());
     renderPageHead(id);
   }
   if (!opts.fromStore || !pendingPage) { store.set('maw_page', id); store.set('maw_hub_' + hubOf(id).id, id); }
@@ -2962,9 +2997,16 @@ function renderOverview(d) {
     </button>`).join('') : `<div class="empty">${esc(t('ovNoJobs'))}</div>`;
   const ids = Object.keys(AGENTS);
   $('ovAgents').innerHTML = ids.map(id => `<div class="ov-agent"><span class="dot" style="background:${AGENTS[id].color}"></span><span>${esc(agentLabel(id))}</span><span class="spacer"></span>${AGENTS[id].installed ? badge(t('agentInstalled'), 'b-ok') : badge(t('agentMissing'), '')}</div>`).join('');
+  renderOvQuick();
+}
+// Feature pages arrive after the first render, so renderNav() calls this again.
+function renderOvQuick() {
+  const box = $('ovQuick');
+  if (!box) return;
   const quick = [['dispatch', 'ovNewTask'], ['board', 'ovBoard'], ['workspace', 'ovWorkspace'], ['inbox', 'ovInbox'], ['review', 'ovReview'], ['health', 'ovHealth']]
-    .filter(([id]) => pageKind(id));
-  $('ovQuick').innerHTML = quick.map(([id, k]) => `<button type="button" class="btn" data-goto="${id}">${esc(t(k))}</button>`).join('');
+    .filter(([id]) => pageKind(id) || (COMPANION_HOST[id] && tabBtn(id)));
+  const html = quick.map(([id, k]) => `<button type="button" class="btn" data-goto="${id}">${esc(t(k))}</button>`).join('');
+  if (box.innerHTML !== html) box.innerHTML = html;
 }
 $('ovJobs').addEventListener('click', e => { const b = e.target.closest('[data-job]'); if (b) MAW.openJob(b.dataset.job); });
 
@@ -3000,6 +3042,8 @@ function loadFeatureUis(d) {
 }
 
 {
+  // Pages decide their own scroll; a reload must not jump to the old offset of another page.
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
   const fromHash = location.hash.replace(/^#\/?/, '');
   showPage(fromHash || store.get('maw_page') || 'overview', { fromStore: true });
 }

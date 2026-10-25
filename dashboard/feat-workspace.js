@@ -24,7 +24,7 @@
       'ws.queued': 'Đã thêm vào hàng đợi ({n}).', 'ws.steered': 'Đã gửi vào phiên Antigravity đang chạy.',
       'ws.ctx': 'Ngữ cảnh {pct}% · {used}/{win} token', 'ws.compact': 'Nén ngay', 'ws.compactStarted': 'Đang nén ngữ cảnh…',
       'ws.cost': 'Chi phí cuộc trò chuyện', 'ws.files': '{n} tệp đổi', 'ws.noGit': 'không có git',
-      'ws.ready': 'Sẵn sàng?', 'ws.log': 'Xem log', 'ws.you': 'Bạn', 'ws.system': 'Hệ thống',
+      'ws.ready': 'Kiểm tra sẵn sàng', 'ws.title': 'Không gian agent', 'ws.log': 'Xem log', 'ws.you': 'Bạn', 'ws.system': 'Hệ thống',
       'ws.tab.handoffs': 'Handoff', 'ws.tab.files': 'Tệp', 'ws.tab.history': 'Lịch sử', 'ws.tab.autorun': 'Auto Run',
       'ws.placeholder': 'Chưa có — cần luồng {s}. Khi tính năng đó được gộp, bảng này tự hiện.',
       'ws.pending': 'ĐANG CHỜ ({n})', 'ws.done': 'Đã xong', 'ws.noHandoffs': 'Chưa có handoff nào cho cuộc trò chuyện này.',
@@ -78,7 +78,7 @@
       'ws.queued': 'Queued ({n}).', 'ws.steered': 'Sent into the running Antigravity session.',
       'ws.ctx': 'Context {pct}% · {used}/{win} tokens', 'ws.compact': 'Compact now', 'ws.compactStarted': 'Compacting the context…',
       'ws.cost': 'Conversation cost', 'ws.files': '{n} files changed', 'ws.noGit': 'no git',
-      'ws.ready': 'Ready?', 'ws.log': 'Show log', 'ws.you': 'You', 'ws.system': 'System',
+      'ws.ready': 'Readiness check', 'ws.title': 'Agent workspace', 'ws.log': 'Show log', 'ws.you': 'You', 'ws.system': 'System',
       'ws.tab.handoffs': 'Handoffs', 'ws.tab.files': 'Files', 'ws.tab.history': 'History', 'ws.tab.autorun': 'Auto Run',
       'ws.placeholder': 'Not available yet — needs stream {s}. This panel appears once that feature is merged.',
       'ws.pending': 'PENDING ({n})', 'ws.done': 'Finished', 'ws.noHandoffs': 'No handoffs for this conversation yet.',
@@ -515,7 +515,8 @@
     const pct = Math.round((Number(ctx.pct) || 0) * 100);
     const meterCls = pct >= 70 ? 'err' : pct >= 60 ? 'warn' : 'ok';
     const plat = platformById(a?.platform);
-    const html = `
+    // No agents yet: a plain title instead of an empty, disabled picker (the columns explain how to start).
+    const html = !S.agents.length ? `<strong class="ws-top-title">${esc(t('ws.title'))}</strong>` : `
       <select id="wsTopAgent" class="ws-top-agent" aria-label="${esc(t('ws.agents'))}" ${S.agents.length ? '' : 'disabled'}>${opts || `<option>${esc(t('ws.agents'))}</option>`}</select>
       ${a ? `<span class="pill ws-plat" title="${esc(plat?.label || a.platform)}"><span class="dot" style="background:${esc(plat?.color || 'var(--faint)')}"></span>${esc(plat?.label || a.platform)}${a.model ? ' · ' + esc(a.model) : ''}</span>` : ''}
       ${a ? (g?.branch ? `<span class="pill mono" title="${esc(a.workdir)}">⎇ ${esc(g.branch)}${g.ahead ? ` ↑${+g.ahead}` : ''}${g.behind ? ` ↓${+g.behind}` : ''}</span>` : `<span class="pill faint">${esc(g && g.has_git === false ? t('ws.noGit') : '⎇ …')}</span>`) : ''}
@@ -527,6 +528,7 @@
     if (box._html === html) return;
     box._html = html;
     box.innerHTML = html;
+    if (!S.agents.length) return;
     qs('#wsTopAgent', box).onchange = e => selectAgent(e.target.value);
     qs('#wsReady', box).onclick = () => M.ws.readiness ? M.ws.readiness(a?.team_id ? S.agents.filter(x => x.team_id === a.team_id) : S.agents) : M.toast('feat-teams.js', 'warn');
     const meter = qs('#wsMeter', box);

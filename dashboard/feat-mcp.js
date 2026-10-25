@@ -76,7 +76,7 @@
     const list = (p.servers || []).map(s => `<div class="s3-m-srv">
         <div class="row" style="gap:6px;min-width:0"><b class="mono truncate">${esc(s.name)}</b><span class="badge">${esc(s.transport || 'stdio')}</span></div>
         <div class="mono sub t-muted s3-wrap">${esc(serverSummary(s))}</div>
-        ${Object.keys(s.env || {}).length ? `<div class="sub t-muted">env: <span class="mono">${esc(Object.keys(s.env).join(', '))}</span></div>` : ''}
+        ${Object.keys(s.env || {}).length ? `<div class="sub t-muted" title="${esc(Object.keys(s.env).join('\n'))}">env: <span class="mono">${esc(Object.keys(s.env).slice(0, 3).join(', '))}${Object.keys(s.env).length > 3 ? ` +${Object.keys(s.env).length - 3}` : ''}</span></div>` : ''}
         <div class="s3-item-a"><button type="button" class="btn btn-sm" data-edit="${esc(p.platform)}|${esc(s.name)}">${esc(t('s3mEdit'))}</button>
           <button type="button" class="btn btn-sm" data-all="${esc(p.platform)}|${esc(s.name)}">${esc(t('s3mToAll'))}</button>
           <button type="button" class="btn btn-sm btn-danger" data-rm="${esc(p.platform)}|${esc(s.name)}">${esc(t('s3mRemove'))}</button></div>

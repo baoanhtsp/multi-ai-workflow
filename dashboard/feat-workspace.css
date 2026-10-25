@@ -6,8 +6,9 @@
 .ws-root .t-ok { color: var(--ok); } .ws-root .t-err, .ws-dlg .t-err { color: var(--err); } .ws-root .t-warn { color: var(--warn); }
 
 /* top bar */
-.ws-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.ws-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 8px 24px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .ws-top-agent { max-width: 220px; font-weight: 600; }
+.ws-top-title { font-size: 15px; font-weight: 650; padding: 4px 2px; }
 .ws-top .pill { padding: 3px 9px; }
 .ws-plat .dot { width: 7px; height: 7px; }
 .ws-meter { cursor: pointer; gap: 6px; background: transparent; font: inherit; font-size: 12px; }

@@ -1,8 +1,7 @@
 /* S2 board (feat-tasks.js). Every class is prefixed tk- so nothing collides with index.html. */
-.tk-wrap { padding-top: 18px; padding-bottom: 40px; max-width: none; }
-.tk-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin-bottom: 14px; }
-.tk-h { font-size: 18px; }
-.tk-tabs { flex-wrap: wrap; }
+/* Same frame as the dashboard pages: 24px gutter, page head, underline sub-tabs. */
+.tk-wrap { max-width: none; margin: 0; padding: 22px 24px 40px; }
+.tk-head { align-items: center; }
 .tk-sched { max-width: 340px; }
 .tk-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 12px; }
 .tk-toolbar .tk-q { width: 220px; padding: 4px 10px; font-size: 12px; }
@@ -135,7 +134,7 @@ details > summary { cursor: pointer; }
 
 /* mobile */
 @media (max-width: 760px) {
-  .tk-wrap { padding-top: 12px; }
+  .tk-wrap { padding: 16px 16px 32px; }
   .tk-cols { grid-auto-columns: 82vw; }
   .tk-board { scroll-snap-type: x mandatory; }
   .tk-toolbar .tk-q { width: 100%; }
