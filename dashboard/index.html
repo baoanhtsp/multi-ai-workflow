@@ -2899,7 +2899,7 @@ const HUBS = [
 const SECTION_PAGES = ['start', 'overview', 'dispatch', 'project', 'agents'];
 // Pages merged into a host page: they render below the host's own content, with a small heading.
 // When the host page does not exist (its feature is missing) the companion stays a normal page.
-const COMPANIONS = { audit: ['timeline'], scoreboard: ['stats'], agents: ['health', 'sessions'] };
+const COMPANIONS = { audit: ['timeline'], scoreboard: ['stats'], agents: ['health', 'accounts', 'sessions'] };
 const COMPANION_HOST = Object.fromEntries(Object.entries(COMPANIONS).flatMap(([h, cs]) => cs.map(c => [c, h])));
 let companionPing = false;
 // Companions shown above the host's own content (a summary chart before the detailed table).

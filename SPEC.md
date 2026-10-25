@@ -399,3 +399,17 @@ What the videos show, and where it lands:
 | N14 | **MCP**: one MCP config pushed to all agents, and the dashboard itself exposed as an MCP server, so the Lead delegates through tools | S3 |
 
 Priority inside each stream: the A items first (they make the core flow reliable), then the B items in the order listed.
+
+## 10. v6.0 — Accounts, quota and limit handoff (S7, user request 2026-10-25)
+Full design: [`specs/s7-design.md`](specs/s7-design.md). Summary:
+- **Several accounts per AI** (`~/.maw/accounts.json`, paths only, never credentials): a run selects an account by setting the CLI's own config-home variable (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, …) for that process only; every installed agent keeps an implicit `default` account.
+- **Quota per account** (5h / 7d windows where the provider reports them, else errors and estimates), refreshed cheaply in the background and before every routing decision.
+- **Proactive routing** in the server before a job is spawned: below `switch_at` (default 85 %) on the requested account, else another account of the same agent, else a role fallback; modes `auto` / `suggest` / `off`.
+- **Limit handoff** for chats: switch to an account / agent with room and carry a handoff letter (summary or last 10 messages).
+
+| Part | Owner | Paths |
+| :--- | :--- | :--- |
+| Server, scripts, tests | Antigravity | `server/features/{accounts,quota}/**`, the S4 fallback / recovery and S6 chat changes listed in the design, `invoke-agent.ps1` / `invoke-cli-agent.ps1` `-Account`, `scripts/lib/**`, `tests/**` |
+| UI and spec | Claude | `dashboard/**`, `specs/s7-design.md`, this section |
+
+Out of scope: browser profiles, copying cookies or credentials, macros on provider websites, pooling or stretching any provider's quota.
