@@ -11,6 +11,7 @@
     s1Truncated: 'Diff quá lớn, chỉ hiện một phần.', s1PickProject: 'Chọn một dự án trước.', s1HeadMoved: 'HEAD đã đổi',
     s1Confirm: 'Xác nhận', s1Files: '{n} tệp',
     cpTab: 'Checkpoint', cpNow: 'Tạo checkpoint', cpLabel: 'Nhãn (tuỳ chọn)', cpKeep: 'Giữ', cpKeepSave: 'Lưu',
+    cpEmptyT: 'Chưa có checkpoint nào',
     cpEmpty: 'Chưa có checkpoint. Checkpoint được tạo tự động trước mỗi job, mỗi vòng Auto-Gate và mỗi lần gọi agent.',
     cpNotGit: 'Dự án này không phải git repo, nên không có checkpoint.',
     cpVsNow: 'So với hiện tại', cpStep: 'Thay đổi ở bước này', cpRestore: 'Khôi phục', cpRollbackJob: 'Rollback về trước job này',
@@ -28,6 +29,7 @@
     s1Truncated: 'The diff is too large; only part of it is shown.', s1PickProject: 'Pick a project first.', s1HeadMoved: 'HEAD moved',
     s1Confirm: 'Confirm', s1Files: '{n} files',
     cpTab: 'Checkpoints', cpNow: 'Checkpoint now', cpLabel: 'Label (optional)', cpKeep: 'Keep', cpKeepSave: 'Save',
+    cpEmptyT: 'No checkpoints yet',
     cpEmpty: 'No checkpoints yet. They are taken automatically before every job, every Auto-Gate round and every agent call.',
     cpNotGit: 'This project is not a git repository, so it has no checkpoints.',
     cpVsNow: 'Compare with now', cpStep: 'Changes in this step', cpRestore: 'Restore', cpRollbackJob: 'Rollback to before this job',
@@ -223,7 +225,7 @@
     if (!st.project) { tl.innerHTML = `<div class="empty">${esc(t('s1PickProject'))}</div>`; return; }
     if (st.error) { tl.innerHTML = `<div class="s1-errbox" style="margin-top:10px">${esc(st.error)}</div>`; return; }
     if (st.notGit) { tl.innerHTML = `<div class="empty">${esc(t('cpNotGit'))}</div>`; return; }
-    if (!st.list.length) { tl.innerHTML = `<div class="empty">${esc(st.at ? t('cpEmpty') : t('s1Loading'))}</div>`; return; }
+    if (!st.list.length) { tl.innerHTML = st.at && M.emptyGuide ? M.emptyGuide({ icon: 'clock', title: t('cpEmptyT'), text: t('cpEmpty'), actions: [{ label: t('cpNow'), attrs: 'data-cp="now"', primary: true }] }) : `<div class="empty">${esc(st.at ? t('cpEmpty') : t('s1Loading'))}</div>`; return; }
     const idx = new Map(st.list.map((c, i) => [c.id, i]));
     tl.innerHTML = groups(st.list).map(g => {
       const first = g.items[g.items.length - 1];

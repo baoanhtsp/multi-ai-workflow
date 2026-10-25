@@ -24,7 +24,7 @@
     clSettings: 'Cài đặt dọn dẹp', clKeepDays: 'Giữ worktree sau khi merge (ngày, 0 = xoá ngay)', clStaleDays: 'Coi là lâu không dùng sau (ngày)', clSave: 'Lưu', clSaved: 'Đã lưu cài đặt dọn dẹp.',
     clTrash: 'Thùng rác (bản sao lưu nhánh)', clTrashEmpty: 'Thùng rác trống.', clRestore: 'Khôi phục', clRestored: 'Đã khôi phục nhánh {b}.', clExpires: 'hết hạn {t}',
     clRestoreQ: 'Tạo lại nhánh {b} từ bản sao lưu {r}?', clProject: 'Dọn dẹp…',
-    wtNew: 'Worktree mới', wtRunIso: 'Chạy cô lập', wtShowAll: 'Cả đã merge / huỷ', wtEmpty: 'Chưa có worktree nào cho dự án này.',
+    wtNew: 'Worktree mới', wtRunIso: 'Chạy cô lập', wtShowAll: 'Cả đã merge / huỷ', wtEmpty: 'Chưa có worktree nào cho dự án này.', wtEmptyX: 'Worktree là bản sao riêng của repo trên một nhánh riêng: AI làm trong đó mà không đụng code chính, xong bạn xem diff rồi merge hoặc bỏ. “Chạy cô lập” tạo worktree và giao việc cho AI trong một bước.',
     wtBase: 'Nhánh gốc', wtName: 'Tên (tuỳ chọn)', wtNameHint: 'chữ thường, số, . _ -', wtCreate: 'Tạo',
     wtCreated: 'Đã tạo {branch}.', wtCopied: 'Đã chép {n} tệp từ .worktreeinclude.', wtSetupFail: 'Script .maw/setup.ps1 lỗi (exit {code}).',
     wtAhead: '↑{n}', wtBehind: '↓{n}', wtDirty: '{n} chưa commit', wtPort: 'cổng {n}', wtMissing: 'thư mục đã mất',
@@ -43,7 +43,7 @@
     fkInfo: 'Job mới chạy trong một worktree riêng, cùng yêu cầu cũ cộng với tóm tắt kết quả lần trước.',
     boNew: 'Chạy Best-of-N mới', boPrompt: 'Yêu cầu (giao cho mọi ứng viên)', boCands: 'Ứng viên (2–4)', boAdd: '+ Thêm ứng viên', boRemove: 'Bỏ',
     boJudge: 'Giám khảo', boJudgeCouncil: 'Council', boJudgeTests: 'Test', boJudgeBoth: 'Cả hai', boReviewers: 'Reviewer của Council', boStart: 'Chạy {n} ứng viên',
-    boStarted: 'Đã chạy Best-of-N {id} với {n} ứng viên.', boEmpty: 'Chưa có lượt Best-of-N nào.', boNeed: 'Cần 2–4 ứng viên và một yêu cầu.',
+    boStarted: 'Đã chạy Best-of-N {id} với {n} ứng viên.', boEmpty: 'Chưa có lượt Best-of-N nào.', boEmptyX: 'Best-of-N cho 2–4 AI làm cùng một việc, mỗi AI trong một worktree riêng, rồi chấm (bằng test hoặc bằng AI review) để bạn giữ bản tốt nhất. Mở khung phía trên để bắt đầu.', boNeed: 'Cần 2–4 ứng viên và một yêu cầu.',
     boState_running: 'đang chạy', boState_judging: 'đang chấm', boState_done: 'xong', boState_picked: 'đã chọn', boState_cancelled: 'đã huỷ',
     boJob: 'Job', boTests: 'Test', boCouncil: 'Council', boCost: 'Chi phí', boTime: 'Thời gian', boSize: 'Diff', boWinner: 'Thắng', boPick: 'Merge bản này',
     boPickQ: 'Merge ứng viên #{i} ({agent}) vào {base}?', boDiscardOthers: 'Huỷ các worktree còn lại', boPicked: 'Đã merge ứng viên #{i}.', boCancel: 'Dừng lượt này',
@@ -68,7 +68,7 @@
     clSettings: 'Cleanup settings', clKeepDays: 'Keep worktrees after merge (days, 0 = remove at once)', clStaleDays: 'Stale after (days)', clSave: 'Save', clSaved: 'Cleanup settings saved.',
     clTrash: 'Trash (branch backups)', clTrashEmpty: 'Trash is empty.', clRestore: 'Restore', clRestored: 'Restored branch {b}.', clExpires: 'expires {t}',
     clRestoreQ: 'Recreate branch {b} from backup {r}?', clProject: 'Clean up…',
-    wtNew: 'New worktree', wtRunIso: 'Run isolated', wtShowAll: 'Include merged / discarded', wtEmpty: 'No worktrees for this project yet.',
+    wtNew: 'New worktree', wtRunIso: 'Run isolated', wtShowAll: 'Include merged / discarded', wtEmpty: 'No worktrees for this project yet.', wtEmptyX: 'A worktree is a separate copy of the repo on its own branch: the AI works there without touching the main code, then you review the diff and merge or discard it. “Run isolated” creates one and hands the task to an AI in one step.',
     wtBase: 'Base branch', wtName: 'Name (optional)', wtNameHint: 'lower-case letters, digits, . _ -', wtCreate: 'Create',
     wtCreated: 'Created {branch}.', wtCopied: 'Copied {n} files from .worktreeinclude.', wtSetupFail: '.maw/setup.ps1 failed (exit {code}).',
     wtAhead: '↑{n}', wtBehind: '↓{n}', wtDirty: '{n} uncommitted', wtPort: 'port {n}', wtMissing: 'folder missing',
@@ -87,7 +87,7 @@
     fkInfo: 'The new job runs in its own worktree with the same prompt plus a summary of the previous result.',
     boNew: 'New best-of-N run', boPrompt: 'Prompt (given to every candidate)', boCands: 'Candidates (2–4)', boAdd: '+ Add candidate', boRemove: 'Remove',
     boJudge: 'Judge', boJudgeCouncil: 'Council', boJudgeTests: 'Tests', boJudgeBoth: 'Both', boReviewers: 'Council reviewers', boStart: 'Run {n} candidates',
-    boStarted: 'Best-of-N {id} started with {n} candidates.', boEmpty: 'No best-of-N runs yet.', boNeed: 'Needs 2–4 candidates and a prompt.',
+    boStarted: 'Best-of-N {id} started with {n} candidates.', boEmpty: 'No best-of-N runs yet.', boEmptyX: 'Best-of-N lets 2–4 AIs do the same task, each in its own worktree, then judges them (with tests or an AI review) so you keep the best one. Open the panel above to start.', boNeed: 'Needs 2–4 candidates and a prompt.',
     boState_running: 'running', boState_judging: 'judging', boState_done: 'done', boState_picked: 'picked', boState_cancelled: 'cancelled',
     boJob: 'Job', boTests: 'Tests', boCouncil: 'Council', boCost: 'Cost', boTime: 'Time', boSize: 'Diff', boWinner: 'Winner', boPick: 'Merge this one',
     boPickQ: 'Merge candidate #{i} ({agent}) into {base}?', boDiscardOthers: 'Discard the other worktrees', boPicked: 'Merged candidate #{i}.', boCancel: 'Stop this run',
@@ -359,7 +359,9 @@
 
   function paintList() {
     if (W.error) return `<div class="s1-errbox">${esc(W.error)}</div>`;
-    if (!W.list.length) return `<div class="empty">${esc(W.at ? t('wtEmpty') : t('s1Loading'))}</div>`;
+    if (!W.list.length) return W.at && M.emptyGuide
+      ? M.emptyGuide({ icon: 'branch', title: t('wtEmpty'), text: t('wtEmptyX'), actions: [{ label: t('wtRunIso'), attrs: 'data-wt="iso"', primary: true }, { label: t('wtNew'), attrs: 'data-wt="new"' }] })
+      : `<div class="empty">${esc(W.at ? t('wtEmpty') : t('s1Loading'))}</div>`;
     return `<div class="s1-cards">${W.list.map(w => {
       const L = w.live || {}, on = w.status === 'active';
       const facts = [
@@ -468,7 +470,7 @@
     const out = body.lastElementChild;
     const B = W.bo;
     if (B.error) { out.innerHTML = `<div class="s1-errbox">${esc(B.error)}</div>`; return; }
-    if (!B.runs.length) { out.innerHTML = `<div class="empty">${esc(B.at ? t('boEmpty') : t('s1Loading'))}</div>`; return; }
+    if (!B.runs.length) { out.innerHTML = B.at && M.emptyGuide ? M.emptyGuide({ icon: 'users', title: t('boEmpty'), text: t('boEmptyX') }) : `<div class="empty">${esc(B.at ? t('boEmpty') : t('s1Loading'))}</div>`; return; }
     out.innerHTML = B.runs.map(run => {
       const cands = Array.isArray(run.candidates) ? run.candidates : [];
       const live = ['running', 'judging'].includes(run.state);

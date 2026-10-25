@@ -12,7 +12,7 @@
       'ws.view': 'Không gian agent',
       'ws.agents': 'Agent', 'ws.chat': 'Trò chuyện', 'ws.panel': 'Bảng phụ',
       'ws.filter': 'Lọc agent…', 'ws.newAgent': '+ Agent', 'ws.newGroup': '+ Nhóm', 'ws.team': 'Thiết lập đội',
-      'ws.ungrouped': 'Chưa có nhóm', 'ws.noAgents': 'Chưa có agent nào. Tạo một agent hoặc thiết lập đội.',
+      'ws.ungrouped': 'Chưa có nhóm', 'ws.noAgents': 'Chưa có agent nào. Tạo một agent hoặc thiết lập đội.', 'ws.noAgentsShort': 'Chưa có agent.', 'ws.noProjAgents': 'Dự án {p} chưa có agent.', 'ws.allProj': 'Mọi dự án ({n} agent khác)', 'ws.otherProj': 'agent này làm việc ở dự án khác với dự án đang chọn', 'ws.projGuideT': 'Dự án {p} chưa có agent', 'ws.projGuideX': 'Agent làm việc trong thư mục của một dự án. {n} agent hiện có thuộc dự án khác. Thiết lập đội để tạo agent làm việc trong {p}, hoặc xem agent của dự án khác.', 'ws.showAll': 'Xem agent dự án khác ({n})', 'ws.ed.lang': 'Ngôn ngữ trả lời', 'ws.ed.lang.auto': 'Theo giao diện dashboard', 'ws.ed.lang.vi': 'Tiếng Việt', 'ws.ed.lang.en': 'English', 'ws.guideT': 'Tạo đội agent đầu tiên', 'ws.guideX': 'Mỗi agent là một AI có tên, vai trò, thư mục làm việc và lịch sử chat riêng (ví dụ Lead, Worker, Tester). “Thiết lập đội” tạo cả nhóm từ một mẫu; sau đó chọn agent ở cột trái để trò chuyện và chuyển việc (handoff) giữa các agent.',
       'ws.pickAgent': 'Chọn một agent ở cột trái để bắt đầu trò chuyện.',
       'ws.noConv': 'Agent này chưa có cuộc trò chuyện.', 'ws.newConv': 'Cuộc trò chuyện mới',
       'ws.st.idle': 'Rảnh', 'ws.st.thinking': 'Đang suy nghĩ', 'ws.st.waiting': 'Đang chờ', 'ws.st.error': 'Lỗi', 'ws.st.needs-login': 'Cần đăng nhập',
@@ -24,7 +24,7 @@
       'ws.queued': 'Đã thêm vào hàng đợi ({n}).', 'ws.steered': 'Đã gửi vào phiên Antigravity đang chạy.',
       'ws.ctx': 'Ngữ cảnh {pct}% · {used}/{win} token', 'ws.compact': 'Nén ngay', 'ws.compactStarted': 'Đang nén ngữ cảnh…',
       'ws.cost': 'Chi phí cuộc trò chuyện', 'ws.files': '{n} tệp đổi', 'ws.noGit': 'không có git',
-      'ws.ready': 'Kiểm tra sẵn sàng', 'ws.title': 'Không gian agent', 'ws.log': 'Xem log', 'ws.you': 'Bạn', 'ws.system': 'Hệ thống',
+      'ws.ready': 'Kiểm tra sẵn sàng', 'ws.help': 'Hướng dẫn', 'ws.help.tip': 'Trang này dùng để làm gì? (phím ?)', 'ws.title': 'Không gian agent', 'ws.log': 'Xem log', 'ws.you': 'Bạn', 'ws.system': 'Hệ thống',
       'ws.tab.handoffs': 'Handoff', 'ws.tab.files': 'Tệp', 'ws.tab.history': 'Lịch sử', 'ws.tab.autorun': 'Auto Run',
       'ws.placeholder': 'Chưa có — cần luồng {s}. Khi tính năng đó được gộp, bảng này tự hiện.',
       'ws.pending': 'ĐANG CHỜ ({n})', 'ws.done': 'Đã xong', 'ws.noHandoffs': 'Chưa có handoff nào cho cuộc trò chuyện này.',
@@ -66,7 +66,7 @@
       'ws.view': 'Workspace',
       'ws.agents': 'Agents', 'ws.chat': 'Chat', 'ws.panel': 'Panel',
       'ws.filter': 'Filter agents…', 'ws.newAgent': '+ Agent', 'ws.newGroup': '+ Group', 'ws.team': 'Team setup',
-      'ws.ungrouped': 'Ungrouped', 'ws.noAgents': 'No agents yet. Create one or set up a team.',
+      'ws.ungrouped': 'Ungrouped', 'ws.noAgents': 'No agents yet. Create one or set up a team.', 'ws.noAgentsShort': 'No agents yet.', 'ws.noProjAgents': '{p} has no agents yet.', 'ws.allProj': 'All projects ({n} other agents)', 'ws.otherProj': 'this agent works in another project than the selected one', 'ws.projGuideT': '{p} has no agents yet', 'ws.projGuideX': 'An agent works in the folder of one project. The {n} existing agents belong to other projects. Set up a team to create agents that work in {p}, or look at the agents of other projects.', 'ws.showAll': 'Show other projects ({n})', 'ws.ed.lang': 'Reply language', 'ws.ed.lang.auto': 'Follow the dashboard language', 'ws.ed.lang.vi': 'Tiếng Việt', 'ws.ed.lang.en': 'English', 'ws.guideT': 'Create your first agent team', 'ws.guideX': 'Each agent is an AI with a name, a role, a working folder and its own chat history (for example Lead, Worker, Tester). “Team setup” creates a whole team from a template; then pick an agent on the left to chat and hand work between agents.',
       'ws.pickAgent': 'Pick an agent on the left to start chatting.',
       'ws.noConv': 'This agent has no conversation yet.', 'ws.newConv': 'New conversation',
       'ws.st.idle': 'Idle', 'ws.st.thinking': 'Thinking', 'ws.st.waiting': 'Waiting', 'ws.st.error': 'Error', 'ws.st.needs-login': 'Needs login',
@@ -78,7 +78,7 @@
       'ws.queued': 'Queued ({n}).', 'ws.steered': 'Sent into the running Antigravity session.',
       'ws.ctx': 'Context {pct}% · {used}/{win} tokens', 'ws.compact': 'Compact now', 'ws.compactStarted': 'Compacting the context…',
       'ws.cost': 'Conversation cost', 'ws.files': '{n} files changed', 'ws.noGit': 'no git',
-      'ws.ready': 'Readiness check', 'ws.title': 'Agent workspace', 'ws.log': 'Show log', 'ws.you': 'You', 'ws.system': 'System',
+      'ws.ready': 'Readiness check', 'ws.help': 'Help', 'ws.help.tip': 'What is this page for? (press ?)', 'ws.title': 'Agent workspace', 'ws.log': 'Show log', 'ws.you': 'You', 'ws.system': 'System',
       'ws.tab.handoffs': 'Handoffs', 'ws.tab.files': 'Files', 'ws.tab.history': 'History', 'ws.tab.autorun': 'Auto Run',
       'ws.placeholder': 'Not available yet — needs stream {s}. This panel appears once that feature is merged.',
       'ws.pending': 'PENDING ({n})', 'ws.done': 'Finished', 'ws.noHandoffs': 'No handoffs for this conversation yet.',
@@ -232,12 +232,19 @@
     convs: [], conv: null, messages: [], lastSeq: 0, running: null,
     handoffs: [], hSeen: new Map(), hInit: false,
     panel: ls.get('ws_panel') || 'handoffs', mtab: 'chat',
-    filter: '', attachments: [], panels: [], gitCache: new Map(),
+    filter: '', attachments: [], panels: [], gitCache: new Map(), allProj: ls.get('ws_all_projects') === '1',
     pollTimer: 0, tickTimer: 0, inflight: false, logOpen: false,
   };
   const agentById = id => S.agents.find(a => a.id === id) || null;
   const platformById = id => S.platforms.find(p => p.id === id) || null;
   const curAgent = () => agentById(S.selAgent);
+  // Agents belong to a project through their workdir. The tree shows the selected project's agents
+  // (workdir equal to it or inside it, e.g. a worktree); the "all projects" toggle shows every agent.
+  const normPath = p => String(p || '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  const inProject = a => { const p = normPath(M.project()?.path); const w = normPath(a?.workdir); return !p || w === p || w.startsWith(p + '\\'); };
+  const scoped = () => (S.allProj ? S.agents : S.agents.filter(inProject));
+  const projName = w => String(w || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || w;
+  const replyLang = () => (M.lang === 'en' ? 'en' : 'vi');
   const visible = () => S.el && !S.el.classList.contains('hidden') && !document.hidden;
 
   // ---------- public API for other streams (specs/s6-design.md §8.4) ----------
@@ -280,7 +287,8 @@
       <div class="ws-top" id="wsTop"></div>
       <div class="ws-cols">
         <aside class="ws-left" aria-label="Agents">
-          <div class="ws-left-h"><input id="wsFilter" class="input" type="search" autocomplete="off"></div>
+          <div class="ws-left-h"><input id="wsFilter" class="input" type="search" autocomplete="off">
+            <label class="ws-scope hidden" id="wsScope"><input type="checkbox"><span></span></label></div>
           <div id="wsTree" class="ws-tree" role="tree"></div>
           <div class="ws-left-f">
             <button type="button" class="btn btn-sm" id="wsNewAgent"></button>
@@ -313,8 +321,15 @@
       </div>`;
     qsa('[data-mtab]', el).forEach(b => b.onclick = () => { S.mtab = b.dataset.mtab; el.dataset.mtab = S.mtab; paintStatic(); });
     qs('#wsFilter', el).oninput = e => { S.filter = e.target.value; renderTree(); };
+    qs('#wsScope input', el).onchange = e => setAllProjects(e.target.checked);
     qs('#wsNewAgent', el).onclick = () => openAgentEditor(null);
     qs('#wsNewGroup', el).onclick = newGroup;
+    el.addEventListener('click', e => {
+      const g = e.target.closest('[data-ws-guide]');
+      if (!g) return;
+      if (g.dataset.wsGuide === 'all') setAllProjects(true);
+      else qs(g.dataset.wsGuide === 'team' ? '#wsTeamBtn' : '#wsNewAgent', el)?.click();
+    });
     qs('#wsTeamBtn', el).onclick = () => M.ws.openTeamBuilder ? M.ws.openTeamBuilder() : M.toast('feat-teams.js', 'warn');
     qs('#wsSend', el).onclick = send;
     const input = qs('#wsInput', el);
@@ -349,6 +364,7 @@
     paintStatic(); renderTop(); renderTree(); renderConvTabs(); renderMessages(true); renderStatus(); renderComposer(); renderRightTabs(); renderRight();
   }
   M.on('lang', renderAll);
+  M.on('project-change', () => { if (S.ready) refreshState(); });
   M.on('data', () => { if (visible()) refreshState(); });
   document.addEventListener('visibilitychange', () => { if (visible()) schedule(0); });
 
@@ -374,8 +390,11 @@
       const d = await get('ws_state', { project_path: M.project()?.path });
       S.agents = d.agents || []; S.groups = d.groups || []; S.deleted = d.deleted || []; S.platforms = d.platforms || []; S.wsFeatures = d.features || {};
       S.loadErr = '';
-      if (S.selAgent && !agentById(S.selAgent)) { S.selAgent = ''; S.conv = null; S.convs = []; }
-      if (!S.selAgent && S.agents.length) { await selectAgent(S.agents[0].id, true); return; }
+      let cleared = false;
+      if (S.selAgent && (!agentById(S.selAgent) || !scoped().some(a => a.id === S.selAgent))) { S.selAgent = ''; S.selConv = ''; S.conv = null; S.convs = []; S.messages = []; S.lastSeq = 0; cleared = true; }
+      if (!S.selAgent && scoped().length) { await selectAgent(scoped()[0].id, true); return; }
+      // The selection left the project scope: every column must drop the old agent, not just the tree.
+      if (cleared || (!S.selAgent && S.ready)) { renderAll(); return; }
       // First load with an agent remembered from last time: load its conversations once.
       if (S.selAgent && S.convsFor !== S.selAgent) { await selectAgent(S.selAgent, true); return; }
     } catch (e) {
@@ -507,7 +526,7 @@
     const box = qs('#wsTop', S.el); if (!box) return;
     const a = curAgent();
     if (S.loadErr && !S.agents.length) { box.innerHTML = `<span class="pill err">${esc(t('ws.noBackend', { e: S.loadErr }))}</span>`; return; }
-    const opts = S.agents.map(x => `<option value="${esc(x.id)}" ${x.id === S.selAgent ? 'selected' : ''}>${esc(x.name)}</option>`).join('');
+    const opts = scoped().map(x => `<option value="${esc(x.id)}" ${x.id === S.selAgent ? 'selected' : ''}>${esc(x.name)}${S.allProj && !inProject(x) ? ' · ' + esc(projName(x.workdir)) : ''}</option>`).join('');
     const c = S.conv;
     const g = a ? (a.git || S.gitCache.get(a.workdir)?.v) : null;
     if (a && !g) gitOf(a);
@@ -516,19 +535,21 @@
     const meterCls = pct >= 70 ? 'err' : pct >= 60 ? 'warn' : 'ok';
     const plat = platformById(a?.platform);
     // No agents yet: a plain title instead of an empty, disabled picker (the columns explain how to start).
-    const html = !S.agents.length ? `<strong class="ws-top-title">${esc(t('ws.title'))}</strong>` : `
+    const html = !a ? `<strong class="ws-top-title">${esc(t('ws.title'))}</strong><span class="ws-grow"></span><button type="button" class="help-btn" data-help="workspace" title="${esc(t('ws.help.tip'))}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.3-2.4 3.8"/><path d="M12 17.2h.01"/></svg><span>${esc(t('ws.help'))}</span></button>` : `
       <select id="wsTopAgent" class="ws-top-agent" aria-label="${esc(t('ws.agents'))}" ${S.agents.length ? '' : 'disabled'}>${opts || `<option>${esc(t('ws.agents'))}</option>`}</select>
+      ${a ? `<span class="pill ws-projpill${inProject(a) ? '' : ' warn'}" title="${esc(a.workdir + (inProject(a) ? '' : ' — ' + t('ws.otherProj')))}"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>${esc(projName(a.workdir))}</span>` : ''}
       ${a ? `<span class="pill ws-plat" title="${esc(plat?.label || a.platform)}"><span class="dot" style="background:${esc(plat?.color || 'var(--faint)')}"></span>${esc(plat?.label || a.platform)}${a.model ? ' · ' + esc(a.model) : ''}</span>` : ''}
       ${a ? (g?.branch ? `<span class="pill mono" title="${esc(a.workdir)}">⎇ ${esc(g.branch)}${g.ahead ? ` ↑${+g.ahead}` : ''}${g.behind ? ` ↓${+g.behind}` : ''}</span>` : `<span class="pill faint">${esc(g && g.has_git === false ? t('ws.noGit') : '⎇ …')}</span>`) : ''}
       ${a && g && g.modified !== undefined ? `<span class="pill ws-diffstat"><span class="t-ok">+</span><span class="t-err">−</span> ${esc(t('ws.files', { n: +g.modified || 0 }))}</span>` : ''}
       ${c ? `<span class="pill" title="${esc(t('ws.cost'))}">${esc(money(c.cost_usd))}</span>` : ''}
       ${c ? `<button type="button" class="pill ws-meter ${meterCls}" id="wsMeter" title="${esc(t('ws.ctx', { pct, used: kfmt(ctx.used_tokens), win: kfmt(ctx.window_tokens) }))}"><span class="ws-meter-bar"><i style="width:${Math.min(100, pct)}%"></i></span>${pct}%</button>` : ''}
       <span class="ws-grow"></span>
-      <button type="button" class="btn btn-sm" id="wsReady">${esc(t('ws.ready'))}</button>`;
+      <button type="button" class="btn btn-sm" id="wsReady">${esc(t('ws.ready'))}</button>
+      <button type="button" class="help-btn" data-help="workspace" title="${esc(t('ws.help.tip'))}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.3-2.4 3.8"/><path d="M12 17.2h.01"/></svg><span>${esc(t('ws.help'))}</span></button>`;
     if (box._html === html) return;
     box._html = html;
     box.innerHTML = html;
-    if (!S.agents.length) return;
+    if (!a) return;
     qs('#wsTopAgent', box).onchange = e => selectAgent(e.target.value);
     qs('#wsReady', box).onclick = () => M.ws.readiness ? M.ws.readiness(a?.team_id ? S.agents.filter(x => x.team_id === a.team_id) : S.agents) : M.toast('feat-teams.js', 'warn');
     const meter = qs('#wsMeter', box);
@@ -547,7 +568,10 @@
   // ---------- left: groups → agents ----------
   function renderTree() {
     const box = qs('#wsTree', S.el); if (!box) return;
-    if (!S.agents.length) { box._html = ''; box.innerHTML = `<div class="empty">${esc(S.loadErr ? t('ws.noBackend', { e: S.loadErr }) : t('ws.noAgents'))}</div>`; return; }
+    renderScopeToggle();
+    if (!S.agents.length) { box._html = ''; box.innerHTML = `<div class="empty">${esc(S.loadErr ? t('ws.noBackend', { e: S.loadErr }) : t('ws.noAgentsShort'))}</div>`; return; }
+    const pool = scoped();
+    if (!pool.length) { box._html = ''; box.innerHTML = `<div class="empty">${esc(t('ws.noProjAgents', { p: M.project()?.name || '' }))}</div>`; return; }
     const f = S.filter.trim().toLowerCase();
     const match = a => !f || [a.name, a.platform, a.team_role, a.model].some(x => String(x || '').toLowerCase().includes(f));
     const groups = [...S.groups].sort((x, y) => (x.order ?? 0) - (y.order ?? 0) || x.name.localeCompare(y.name));
@@ -555,7 +579,7 @@
     const order = (x, y) => (y.bookmark ? 1 : 0) - (x.bookmark ? 1 : 0) || (x.order ?? 0) - (y.order ?? 0) || x.name.localeCompare(y.name);
     let html = '';
     for (const { g, id } of sections) {
-      const list = S.agents.filter(a => (a.group_id || '') === id && match(a)).sort(order);
+      const list = pool.filter(a => (a.group_id || '') === id && match(a)).sort(order);
       if (!id && !list.length && S.groups.length && !f) continue;
       if (f && !list.length) continue;
       const open = f ? true : !g.collapsed;
@@ -575,6 +599,18 @@
     box.innerHTML = html;
     if (key) qs(key, box)?.focus();
   }
+  // "All projects (n)" switch under the filter; hidden when every agent already belongs to the project.
+  function renderScopeToggle() {
+    const box = qs('#wsScope', S.el); if (!box) return;
+    const others = S.agents.filter(a => !inProject(a)).length;
+    box.classList.toggle('hidden', !others && !S.allProj);
+    box.querySelector('span').textContent = t('ws.allProj', { n: others });
+    box.querySelector('input').checked = S.allProj;
+  }
+  function setAllProjects(on) {
+    S.allProj = on; ls.set('ws_all_projects', on ? '1' : '0');
+    refreshState();
+  }
   function agentRow(a) {
     const st = STATUSES.includes(a.status) ? a.status : 'idle';
     const plat = platformById(a.platform);
@@ -583,7 +619,7 @@
     return `<div class="ws-agent ws-drop ${sel ? 'is-sel' : ''}" role="treeitem" tabindex="${sel ? 0 : -1}" aria-selected="${sel}" draggable="true" data-agent="${esc(a.id)}">
       <span class="ws-dot ws-${st}" title="${esc(t('ws.st.' + st))}" aria-label="${esc(t('ws.st.' + st))}"></span>
       <span class="ws-agent-main">
-        <span class="ws-agent-name">${esc(a.name)}${a.team_role ? ` <span class="ws-role">${esc(a.team_role)}</span>` : ''}</span>
+        <span class="ws-agent-name">${esc(a.name)}${a.team_role ? ` <span class="ws-role">${esc(a.team_role)}</span>` : ''}${S.allProj && !inProject(a) ? ` <span class="ws-proj" title="${esc(a.workdir)}">${esc(projName(a.workdir))}</span>` : ''}</span>
         <span class="ws-agent-sub"><span class="dot" style="background:${esc(plat?.color || 'var(--faint)')}"></span>${esc(plat?.label || a.platform)}${plat && plat.installed === false ? ' ⚠' : ''}
           ${g?.branch ? `<span class="ws-git mono">⎇ ${esc(clip(g.branch, 18))}${g.modified ? ` ●${+g.modified}` : ''}</span>` : ''}
           ${a.queue_len ? `<span class="badge b-warn">${+a.queue_len}</span>` : ''}</span>
@@ -818,6 +854,7 @@
       </div>
       <label class="ws-f"><span>${esc(t('ws.ed.workdir'))}</span><input class="input mono" name="workdir" list="wsProjList" required value="${esc(cur.workdir)}"><datalist id="wsProjList">${projects.map(p => `<option value="${esc(p.path)}">${esc(p.name)}</option>`).join('')}</datalist></label>
       <label class="ws-f"><span>${esc(t('ws.ed.persona'))}</span><textarea name="persona" rows="3" maxlength="4000">${esc(cur.persona || '')}</textarea></label>
+      <label class="ws-f"><span>${esc(t('ws.ed.lang'))}</span><select name="reply_language">${['', 'vi', 'en'].map(v => `<option value="${v}" ${(cur.reply_language || '') === v ? 'selected' : ''}>${esc(t('ws.ed.lang.' + (v || 'auto')))}</option>`).join('')}</select></label>
       <label class="ws-check"><input type="checkbox" name="bookmark" ${cur.bookmark ? 'checked' : ''}> ${esc(t('ws.ed.bm'))}</label>
       <details class="ws-adv"><summary>${esc(t('ws.ed.advanced'))}</summary>
         <div class="ws-f2">
@@ -852,7 +889,7 @@
           for (const line of f.env.value.split(/\r?\n/)) { const m = /^\s*([^=\s]+)\s*=(.*)$/.exec(line); if (m) env[m[1]] = m[2]; }
           const agent = {
             name: f.name.value.trim(), group_id: f.group_id.value, platform: f.platform.value, model: f.model.value, effort: f.effort.value,
-            workdir: f.workdir.value.trim(), role: f.role.value, persona: f.persona.value, bookmark: f.bookmark.checked,
+            workdir: f.workdir.value.trim(), role: f.role.value, persona: f.persona.value, reply_language: f.reply_language.value, bookmark: f.bookmark.checked,
             hooks: { before: f.before.value, after: f.after.value },
             retry_policy: { max_attempts: +f.max_attempts.value || 0, backoff_sec: +f.backoff_sec.value || 30 },
             cli_args: f.cli_args.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean), env,
@@ -980,7 +1017,15 @@
   function renderMessages(full, appended) {
     const box = qs('#wsMsgs', S.el); if (!box) return;
     const a = curAgent();
-    if (!a) { box.innerHTML = `<div class="empty">${esc(S.agents.length ? t('ws.pickAgent') : t('ws.noAgents'))}</div>`; return; }
+    if (!a) {
+      const others = S.agents.filter(x => !inProject(x)).length;
+      box.innerHTML = scoped().length || !M.emptyGuide ? `<div class="empty">${esc(scoped().length ? t('ws.pickAgent') : t('ws.noAgents'))}</div>`
+        : S.agents.length
+          ? M.emptyGuide({ icon: 'users', title: t('ws.projGuideT', { p: M.project()?.name || '' }), text: t('ws.projGuideX', { p: M.project()?.name || '', n: others }),
+              actions: [{ label: t('ws.team'), attrs: 'data-ws-guide="team"', primary: true }, { label: t('ws.newAgent'), attrs: 'data-ws-guide="agent"' }, { label: t('ws.showAll', { n: others }), attrs: 'data-ws-guide="all"' }] })
+          : M.emptyGuide({ icon: 'users', title: t('ws.guideT'), text: t('ws.guideX'), actions: [{ label: t('ws.team'), attrs: 'data-ws-guide="team"', primary: true }, { label: t('ws.newAgent'), attrs: 'data-ws-guide="agent"' }] });
+      return;
+    }
     if (!S.selConv) { box.innerHTML = `<div class="empty">${esc(t('ws.noConv'))}<br><br><button type="button" class="btn btn-primary" id="wsFirstConv">${esc(t('ws.newConv'))}</button></div>`; qs('#wsFirstConv', box).onclick = newConversation; return; }
     const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
     box.innerHTML = S.messages.length ? S.messages.map(msgHtml).join('') : `<div class="empty">…</div>`;
@@ -1092,7 +1137,7 @@
     const input = qs('#wsInput', el);
     const text = input.value.trim();
     if (!text) { input.focus(); return; }
-    const body = { conversation_id: c.id, text, platform: qs('#wsPlat', el).value, model: qs('#wsModel', el).value, effort: qs('#wsEffort', el).value };
+    const body = { conversation_id: c.id, text, platform: qs('#wsPlat', el).value, model: qs('#wsModel', el).value, effort: qs('#wsEffort', el).value, reply_language: replyLang() };
     if (S.attachments.length) body.attachments = S.attachments;
     const btn = qs('#wsSend', el);
     btn.disabled = true;
@@ -1254,7 +1299,7 @@
       ${done.length ? summaryTable(list) : ''}`;
     qs('#wsManual', box)?.addEventListener('click', manualDispatch);
     qsa('[data-hcancel]', box).forEach(b => b.onclick = async () => { if (await confirmDlg(t('ws.cCancelH', { id: b.dataset.hcancel }), { danger: true })) { await post('handoff_cancel', { id: b.dataset.hcancel }).catch(fail); refreshHandoffs(); } });
-    qsa('[data-hretry]', box).forEach(b => b.onclick = async () => { await post('handoff_retry', { id: b.dataset.hretry }).catch(fail); refreshHandoffs(); });
+    qsa('[data-hretry]', box).forEach(b => b.onclick = async () => { await post('handoff_retry', { id: b.dataset.hretry, reply_language: replyLang() }).catch(fail); refreshHandoffs(); });
     qsa('[data-haccept]', box).forEach(b => b.onclick = async () => { if (await confirmDlg(t('ws.cAccept', { id: b.dataset.haccept }))) { await post('handoff_accept', { id: b.dataset.haccept }).catch(fail); refreshHandoffs(); } });
     qsa('[data-hopen]', box).forEach(b => b.onclick = () => openConversationById(b.dataset.hopen));
     qsa('[data-hmerge]', box).forEach(b => b.onclick = async () => {
@@ -1302,7 +1347,7 @@
       title: t('ws.h.manual'), body: f,
       actions: [{ label: t('ws.cancel'), submit: true }, { label: t('ws.h.dispatch'), primary: true, run: async () => {
         if (!f.reportValidity()) return false;
-        await post('handoff_dispatch', { lead_conversation_id: c.id, to: f.to.value, task: f.task.value.trim() });
+        await post('handoff_dispatch', { lead_conversation_id: c.id, to: f.to.value, task: f.task.value.trim(), reply_language: replyLang() });
         refreshHandoffs();
       } }],
     });

@@ -63,6 +63,7 @@ Files: `agents-ws/agents.json` `{ version: 1, agents: Agent[] }`, `agents-ws/gro
   "workdir": "C:\\laragon\\www\\proj", // resolveProjectPath; required
   "role": "backend",                   // exec role for the runner: architect|backend|frontend|reviewer|tester (default backend)
   "persona": "",                       // ≤ 4000 chars, prepended to every brief
+  "reply_language": "",                // "" = follow the dashboard language sent with each message | "vi" | "en"
   "team_id": "", "team_role": "",      // set by team_apply (lead|deputy|planner|worker|testing|hacker|<custom key>)
   "cli_args": [],                      // ≤ 20 strings × ≤ 200 chars, no NUL / CR / LF (stored; applied when the runner supports it, §9)
   "env": {},                           // ≤ 30 keys ^[A-Z_][A-Z0-9_]{0,63}$, values ≤ 1000 chars; PATH, SYSTEMROOT, COMSPEC, MAW_* refused
@@ -82,6 +83,8 @@ Live status (computed, never stored) added to each agent in `ws_state`:
 ### Actions
 - `GET ws_state?project_path=<opt>` → `{ ok, agents: Agent+live[], groups: Group[], deleted: Agent[] (soft-deleted in the last 24 h, newest first, max 20), platforms: Platform[], features: { isolate: bool, resume: bool } }`.
   - `project_path` given ⇒ agents whose `workdir` equals it come first (no filtering, the UI filters).
+  - UI (Claude): shows only the agents of the selected project (workdir equal to it or inside it); a "Mọi dự án" toggle shows the others grouped by project. The top bar always names the agent's project and warns when it differs from the selected one.
+  - `git.branch` is the current branch name even on a repository without commits (`git branch --show-current`; detached HEAD ⇒ the short commit id).
   - `Platform` = `{ id, label, color, installed, version, models, efforts, capabilities }` from `ctx.registry` + `detectRegistryAgents` (its cache).
 - `GET ws_platforms?refresh=1` → `{ ok, platforms }`. `refresh=1` re-runs detection (bypasses the cache when `detectRegistryAgents` allows it; otherwise returns the cached data with `cached: true`).
 - `POST ws_agent_save { agent }` → `{ ok, agent }`. No `id` ⇒ create; with `id` ⇒ partial update of the given fields. 404 unknown id.
@@ -157,6 +160,15 @@ In this order, total ≤ 17 000 chars (trim the history first, then memory, neve
 4. `# Recent messages` — newest-first selection of messages after `summary_seq`, rendered oldest-first as `User:` / `<Agent name>:` / `[Handoff …]`, each ≤ 2500 chars.
 5. `# Message` — `hooks.before` + the new text + `hooks.after` (+ attachment lines).
 6. For a Lead (team role with `may_delegate`): the **dispatch tool** instructions (§5.1).
+7. `# Language` (never trimmed, always last) — one line from the effective reply language (§3.4).
+
+### 3.4 Reply language (2026-10-25)
+The prompt skeleton stays in English, so without an instruction the agents answer in English even when the dashboard is in Vietnamese.
+- Effective language = `agent.reply_language` if set, else the `reply_language` of the request, else `"vi"` (the dashboard default). Allowed: `"vi"`, `"en"`; anything else ⇒ 400.
+- `vi` ⇒ `# Language\nAlways reply in Vietnamese (tiếng Việt), whatever language the message or the history uses. Keep code, commands, file paths and identifiers as they are.`
+- `en` ⇒ `# Language\nAlways reply in English. Keep code, commands, file paths and identifiers as they are.`
+- Handoffs: a member brief uses the member agent's own `reply_language`, else the language of the Lead conversation turn that dispatched it (stored on the handoff as `reply_language`).
+- Requests that carry it: `chat_send`, `handoff_dispatch`, `handoff_retry`, and the core `run_job` (passed to `invoke-agent.ps1 -ReplyLanguage vi|en`, which appends the same line to the role brief).
 
 ### 3.2 Log parser (shared, `agents-ws/lib/logparse.ts`, unit-tested)
 Input: the job log text. Output `{ reply, actual_model, cost_usd, tokens_in, tokens_out, resume_token, auth_error }`.
@@ -181,7 +193,7 @@ Input: the job log text. Output `{ reply, actual_model, cost_usd, tokens_in, tok
 - `POST chat_create { agent_id, title? }` → `{ ok, conversation }`.
 - `POST chat_rename { conversation_id, title }` → `{ ok, conversation }`.
 - `POST chat_delete { conversation_id }` → `{ ok }` (soft; 409 while busy).
-- `POST chat_send { conversation_id, text, platform?, model?, effort?, attachments? }` → see lifecycle. Text 1–15 000 chars (the prompt must fit the runner's 20 000 limit). Model / effort validated against the platform.
+- `POST chat_send { conversation_id, text, platform?, model?, effort?, attachments?, reply_language? }` → see lifecycle. Text 1–15 000 chars (the prompt must fit the runner's 20 000 limit). Model / effort validated against the platform.
 - `POST chat_queue_remove { conversation_id, queue_id }` → `{ ok, queue }`.
 - `POST chat_stop { conversation_id }` → cancels the active job through `handleCancelJob({ job_id }, paths)`; the running message becomes `cancelled`; the queue is kept. `{ ok, cancelled: job_id }`.
 - `POST chat_compact { conversation_id }` → `{ ok, job_id }`.
@@ -330,7 +342,7 @@ The member brief ends with: "Finish with exactly one fenced ```json block:" and 
 
 ### 5.6 Actions
 - `GET handoff_list?conversation_id=&team_id=&status=&limit=100` → `{ ok, handoffs, counts: { started, running, completed, failed, blocked, needs_review, cancelled } }` (`conversation_id` matches the Lead or member conversation).
-- `POST handoff_dispatch { lead_conversation_id, to, task, acceptance? }` → `{ ok, handoff }` (manual dispatch; 400 if the conversation's agent has no team).
+- `POST handoff_dispatch { lead_conversation_id, to, task, acceptance?, reply_language? }` → `{ ok, handoff }` (manual dispatch; 400 if the conversation's agent has no team).
 - `POST handoff_cancel { id }` → cancels the job if running, status `cancelled`.
 - `POST handoff_retry { id }` → new attempt (same record, `attempts++`, status `started`).
 - `POST handoff_accept { id, note? }` → `needs_review` ⇒ `completed` (user override, audited).

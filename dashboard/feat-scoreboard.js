@@ -9,7 +9,7 @@
     s4sTab: 'Bảng xếp hạng', s4sTitle: 'Hiệu quả agent theo vai trò', s4sDays: '{n} ngày', s4sAllRoles: 'Mọi vai trò', s4sThisProject: 'Chỉ dự án đang chọn',
     s4sAgent: 'Agent', s4sRole: 'Vai trò', s4sTasks: 'Việc', s4sApproval: 'Tỉ lệ duyệt', s4sScore: 'Điểm TB', s4sRounds: 'Vòng sửa TB',
     s4sCostApproved: '$ / việc được duyệt', s4sCost: 'Tổng $', s4sMedian: 'Thời gian (trung vị)', s4sFail: 'Tỉ lệ lỗi', s4sLast: 'Gần nhất',
-    s4sGiven: 'cho (reviewer)', s4sEmpty: 'Chưa có dữ liệu — chạy vài job / review để có bảng xếp hạng.',
+    s4sGiven: 'cho (reviewer)', s4sEmpty: 'Chưa có dữ liệu — chạy vài job / review để có bảng xếp hạng.', s4sEmptyX: 'Bảng xếp hạng dựa trên các lượt AI đã chạy trong khoảng thời gian đang chọn: điểm review, tỷ lệ được duyệt, chi phí. Chạy vài job có review (vai reviewer) để có dữ liệu so sánh.', s4sEmptyA: 'Giao việc',
     s4sTeam: 'Đội đề xuất', s4sTeamHint: 'Agent tốt nhất cho từng vai trò theo dữ liệu {n} ngày (hoà thì chọn agent rẻ hơn).',
     s4sConf: 'độ tin cậy {n}%', s4sTotals: '{jobs} job · {approved} được duyệt · {cost}', s4sRefresh: 'Làm mới', s4sCopy: 'Sao chép -Team',
     s4sCopied: 'Đã sao chép: {v}', s4sCandidates: 'Ứng viên',
@@ -18,7 +18,7 @@
     s4sTab: 'Scoreboard', s4sTitle: 'Agent performance by role', s4sDays: '{n} days', s4sAllRoles: 'All roles', s4sThisProject: 'Selected project only',
     s4sAgent: 'Agent', s4sRole: 'Role', s4sTasks: 'Tasks', s4sApproval: 'Approval', s4sScore: 'Avg score', s4sRounds: 'Avg fix rounds',
     s4sCostApproved: '$ / approved', s4sCost: 'Total $', s4sMedian: 'Median time', s4sFail: 'Failure', s4sLast: 'Last',
-    s4sGiven: 'given (reviewer)', s4sEmpty: 'No data yet — run a few jobs / reviews to build the scoreboard.',
+    s4sGiven: 'given (reviewer)', s4sEmpty: 'No data yet — run a few jobs / reviews to build the scoreboard.', s4sEmptyX: 'The ranking uses the AI runs in the selected period: review score, approval rate, cost. Run a few jobs with a review (reviewer role) to get data to compare.', s4sEmptyA: 'New task',
     s4sTeam: 'Suggested team', s4sTeamHint: 'Best agent per role over {n} days (ties go to the cheaper agent).',
     s4sConf: 'confidence {n}%', s4sTotals: '{jobs} jobs · {approved} approved · {cost}', s4sRefresh: 'Refresh', s4sCopy: 'Copy -Team',
     s4sCopied: 'Copied: {v}', s4sCandidates: 'Candidates',
@@ -159,7 +159,7 @@
     const tot = b.totals || {};
     R('totals').textContent = t('s4sTotals', { jobs: M.fmt(tot.jobs), approved: M.fmt(tot.approved), cost: money(tot.cost_usd || 0) });
     const rows = [...(b.rows || [])];
-    if (!rows.length) { box.innerHTML = `<div class="empty">${esc(t('s4sEmpty'))}</div>`; return; }
+    if (!rows.length) { box.innerHTML = M.emptyGuide ? M.emptyGuide({ icon: 'chart', title: t('s4sEmpty'), text: t('s4sEmptyX'), actions: [{ label: t('s4sEmptyA'), goto: 'dispatch' }] }) : `<div class="empty">${esc(t('s4sEmpty'))}</div>`; return; }
     const { k, dir } = S.sort;
     const col = COLS.find(c => c.k === k) || COLS[3];
     rows.sort((a, c) => {

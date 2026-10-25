@@ -10,7 +10,7 @@
     s3iTab: 'Hộp thư',
     s3iBell: 'Cần bạn xử lý: {n}',
     s3iDrawer: 'Cần bạn xử lý',
-    s3iEmpty: 'Không có gì cần xử lý. 🎉',
+    s3iEmpty: 'Không có gì cần xử lý. 🎉', s3iEmptyX: 'Khi một job lỗi, bị chặn, cần bạn phê duyệt lệnh hoặc một AI bị giới hạn lượt, mục sẽ hiện ở đây kèm nút xử lý (thử lại, mở, bỏ qua).',
     s3iAll: 'Tất cả', s3iOpen: 'Đang mở',
     s3iKindAll: 'Mọi loại',
     s3iClear: 'Xoá mục đã bỏ qua', s3iClearAsk: 'Xoá vĩnh viễn mọi mục đã bỏ qua / đã xong?',
@@ -40,7 +40,7 @@
     s3iTab: 'Inbox',
     s3iBell: 'Waiting for you: {n}',
     s3iDrawer: 'Waiting for you',
-    s3iEmpty: 'Nothing needs you right now. 🎉',
+    s3iEmpty: 'Nothing needs you right now. 🎉', s3iEmptyX: 'When a job fails, gets blocked, needs you to approve a command or an AI hits its rate limit, an item shows up here with buttons to handle it (retry, open, dismiss).',
     s3iAll: 'All', s3iOpen: 'Open',
     s3iKindAll: 'All kinds',
     s3iClear: 'Clear dismissed', s3iClearAsk: 'Permanently remove every dismissed / done item?',
@@ -170,6 +170,10 @@
     if (it) runAction(it, b.dataset.a, b);
   }
 
+  const emptyInbox = () => M.emptyGuide
+    ? M.emptyGuide({ icon: 'inbox', title: t('s3iEmpty'), text: t('s3iEmptyX') })
+    : `<div class="empty">${esc(t('s3iEmpty'))}</div>`;
+
   // ---------- header bell + drawer ----------
   const bell = document.createElement('button');
   bell.type = 'button';
@@ -206,7 +210,7 @@
     const open = items.filter(i => i.status === 'open');
     drawer.innerHTML = `<div class="s3-drawer-h"><h2>${esc(t('s3iDrawer'))} <span class="badge">${esc(counts.open ?? open.length)}</span></h2>
       <button type="button" class="btn btn-sm" data-more>${esc(t('s3iMore'))}</button><button type="button" class="btn btn-sm" data-close aria-label="${esc(t('s3Close') || 'Close')}">✕</button></div>
-      <div class="s3-drawer-b">${open.length ? open.slice(0, 30).map(i => itemHtml(i, true)).join('') : `<div class="empty">${esc(t('s3iEmpty'))}</div>`}</div>`;
+      <div class="s3-drawer-b">${open.length ? open.slice(0, 30).map(i => itemHtml(i, true)).join('') : emptyInbox()}</div>`;
   }
 
   function paintBell() {
@@ -272,7 +276,7 @@
     ks.innerHTML = `<option value="">${esc(t('s3iKindAll'))}</option>` + kinds.map(k => `<option value="${esc(k)}"${filter.kind === k ? ' selected' : ''}>${esc(kindLabel(k))}${counts.by_kind?.[k] ? ' (' + counts.by_kind[k] + ')' : ''}</option>`).join('');
     panel.querySelector('[data-reload]').textContent = t('s3iReload');
     panel.querySelector('[data-clear]').textContent = t('s3iClear');
-    panel.querySelector('[data-list]').innerHTML = items.length ? items.map(i => itemHtml(i, false)).join('') : `<div class="empty">${esc(t('s3iEmpty'))}</div>`;
+    panel.querySelector('[data-list]').innerHTML = items.length ? items.map(i => itemHtml(i, false)).join('') : emptyInbox();
     paintTg();
   }
 

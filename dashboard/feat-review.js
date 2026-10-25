@@ -15,7 +15,7 @@
     'rv.notGit': 'Dự án này không phải git repo.', 'rv.none': 'Không có mục nào.',
     'rv.title': 'Review diff', 'rv.close': 'Đóng', 'rv.reload': 'Tải lại',
     'rv.unified': 'Gộp', 'rv.split': 'Song song', 'rv.ignoreWs': 'Bỏ qua khoảng trắng', 'rv.context': 'Ngữ cảnh',
-    'rv.files': 'Tệp', 'rv.filter': 'Lọc tệp…', 'rv.empty': 'Không có thay đổi nào.',
+    'rv.files': 'Tệp', 'rv.filter': 'Lọc tệp…', 'rv.empty': 'Không có thay đổi nào.', 'rv.emptyX': 'Nguồn này không có gì khác so với bản gốc. Working tree là các thay đổi chưa commit; chọn Nhánh, Job hoặc Commit ở trên để xem lại việc AI đã làm trước đó.', 'rv.emptyA': 'Giao việc cho AI',
     'rv.accept': 'Chấp nhận', 'rv.reject': 'Từ chối', 'rv.reset': 'Bỏ đánh dấu',
     'rv.acceptFile': 'Chấp nhận tệp', 'rv.rejectFile': 'Từ chối tệp',
     'rv.accepted': 'Đã chấp nhận', 'rv.rejected': 'Đã từ chối',
@@ -48,7 +48,7 @@
     'rv.notGit': 'This project is not a git repository.', 'rv.none': 'Nothing here.',
     'rv.title': 'Diff review', 'rv.close': 'Close', 'rv.reload': 'Reload',
     'rv.unified': 'Unified', 'rv.split': 'Split', 'rv.ignoreWs': 'Ignore whitespace', 'rv.context': 'Context',
-    'rv.files': 'Files', 'rv.filter': 'Filter files…', 'rv.empty': 'No changes.',
+    'rv.files': 'Files', 'rv.filter': 'Filter files…', 'rv.empty': 'No changes.', 'rv.emptyX': 'This source has nothing different from its base. Working tree means uncommitted changes; pick a Branch, Job or Commit above to review earlier AI work.', 'rv.emptyA': 'Hand a task to an AI',
     'rv.accept': 'Accept', 'rv.reject': 'Reject', 'rv.reset': 'Clear mark',
     'rv.acceptFile': 'Accept file', 'rv.rejectFile': 'Reject file',
     'rv.accepted': 'Accepted', 'rv.rejected': 'Rejected',
@@ -312,7 +312,7 @@
 
   function renderFiles() {
     const main = V.el.querySelector('.rv-main');
-    if (!V.data.files.length) { main.innerHTML = `<div class="empty">${esc(t('rv.empty'))}</div>`; return; }
+    if (!V.data.files.length) { main.innerHTML = MAW.emptyGuide ? MAW.emptyGuide({ icon: 'check', title: t('rv.empty'), text: t('rv.emptyX'), actions: [{ label: t('rv.emptyA'), goto: 'dispatch' }] }) : `<div class="empty">${esc(t('rv.empty'))}</div>`; return; }
     main.innerHTML = V.data.files.map(fileHtml).join('');
   }
 

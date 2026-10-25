@@ -16,7 +16,7 @@
   const POLL_MS = 3000;
 
   M.addI18n('vi', {
-    'tk.view': 'Bảng việc', 'tk.crumb': 'Làm việc', 'tk.desc': 'Thẻ việc theo cột, mẫu đội hình, Auto Run, lịch chạy và giới hạn chạy song song.', 'tk.tab.board': 'Bảng', 'tk.tab.library': 'Mẫu & đội hình', 'tk.tab.autorun': 'Auto Run',
+    'tk.view': 'Bảng việc', 'tk.guideT': 'Bảng việc đang trống', 'tk.guideX': 'Mỗi thẻ là một việc cho AI. Tạo thẻ rồi kéo sang “Chờ chạy”: bộ lập lịch tự giao cho AI (theo giới hạn chạy song song), thẻ xong sẽ sang “Cần duyệt” hoặc “Hoàn thành”. Dùng mẫu để tạo nhanh, hoặc lịch để chạy định kỳ.', 'tk.help': 'Hướng dẫn', 'tk.help.tip': 'Trang này dùng để làm gì? (phím ?)', 'tk.crumb': 'Làm việc', 'tk.desc': 'Thẻ việc theo cột, mẫu đội hình, Auto Run, lịch chạy và giới hạn chạy song song.', 'tk.tab.board': 'Bảng', 'tk.tab.library': 'Mẫu & đội hình', 'tk.tab.autorun': 'Auto Run',
     'tk.tab.schedules': 'Lịch chạy', 'tk.tab.limits': 'Giới hạn',
     'tk.st.backlog': 'Tồn đọng', 'tk.st.queued': 'Chờ chạy', 'tk.st.running': 'Đang chạy', 'tk.st.needs_input': 'Cần phản hồi',
     'tk.st.review': 'Chờ duyệt', 'tk.st.done': 'Hoàn thành', 'tk.st.failed': 'Thất bại',
@@ -57,7 +57,7 @@
     'tk.sc.new': 'Lịch mới', 'tk.sc.when': 'Khi nào', 'tk.sc.daily': 'Hằng ngày', 'tk.sc.weekly': 'Hằng tuần', 'tk.sc.every': 'Mỗi N phút',
     'tk.sc.time': 'Giờ', 'tk.sc.day': 'Thứ', 'tk.sc.minutes': 'Số phút', 'tk.sc.action': 'Việc cần làm', 'tk.sc.card': 'Tạo thẻ', 'tk.sc.playbook': 'Chạy playbook',
     'tk.sc.file': 'File playbook', 'tk.sc.skip': 'Bỏ qua nếu lần trước còn đang chạy', 'tk.sc.enabled': 'Bật', 'tk.sc.next': 'Lần tới', 'tk.sc.last': 'Lần trước',
-    'tk.sc.runNow': 'Chạy ngay', 'tk.sc.empty': 'Chưa có lịch. Lịch chỉ chạy khi máy chủ đang chạy; lần bị lỡ sẽ được chạy bù một lần khi khởi động.',
+    'tk.sc.runNow': 'Chạy ngay', 'tk.sc.emptyT': 'Chưa có lịch chạy nào', 'tk.sc.empty': 'Chưa có lịch. Lịch chỉ chạy khi máy chủ đang chạy; lần bị lỡ sẽ được chạy bù một lần khi khởi động.',
     'tk.sc.qNightly': 'Council review đêm', 'tk.sc.qSecurity': 'Kiểm tra bảo mật hằng tuần',
     'tk.sc.nightlyPrompt': 'Review toàn bộ thay đổi chưa commit trong dự án. Liệt kê lỗi, rủi ro bảo mật và chỗ lệch SPEC.md.',
     'tk.sc.securityPrompt': 'Kiểm tra bảo mật và phụ thuộc của dự án: lỗ hổng đã biết, secret lộ, quyền truy cập, input chưa kiểm tra. Đề xuất cách sửa theo mức độ.',
@@ -68,7 +68,7 @@
     'tk.unsupported': 'Máy chủ chưa có tính năng bảng việc (S2).'
   });
   M.addI18n('en', {
-    'tk.view': 'Board', 'tk.crumb': 'Work', 'tk.desc': 'Task cards by column, team templates, Auto Run, schedules and concurrency limits.', 'tk.tab.board': 'Board', 'tk.tab.library': 'Templates & presets', 'tk.tab.autorun': 'Auto Run',
+    'tk.view': 'Board', 'tk.guideT': 'The board is empty', 'tk.guideX': 'Each card is a task for an AI. Create a card and move it to “Queued”: the scheduler hands it to an AI (within the concurrency limits) and it moves to “Needs review” or “Done” when finished. Use templates to create cards quickly, or schedules for recurring work.', 'tk.help': 'Help', 'tk.help.tip': 'What is this page for? (press ?)', 'tk.crumb': 'Work', 'tk.desc': 'Task cards by column, team templates, Auto Run, schedules and concurrency limits.', 'tk.tab.board': 'Board', 'tk.tab.library': 'Templates & presets', 'tk.tab.autorun': 'Auto Run',
     'tk.tab.schedules': 'Schedules', 'tk.tab.limits': 'Limits',
     'tk.st.backlog': 'Backlog', 'tk.st.queued': 'Queued', 'tk.st.running': 'Running', 'tk.st.needs_input': 'Needs input',
     'tk.st.review': 'Review', 'tk.st.done': 'Done', 'tk.st.failed': 'Failed',
@@ -109,7 +109,7 @@
     'tk.sc.new': 'New schedule', 'tk.sc.when': 'When', 'tk.sc.daily': 'Daily', 'tk.sc.weekly': 'Weekly', 'tk.sc.every': 'Every N minutes',
     'tk.sc.time': 'Time', 'tk.sc.day': 'Day', 'tk.sc.minutes': 'Minutes', 'tk.sc.action': 'Action', 'tk.sc.card': 'Create a card', 'tk.sc.playbook': 'Run a playbook',
     'tk.sc.file': 'Playbook file', 'tk.sc.skip': 'Skip while the previous run is still going', 'tk.sc.enabled': 'Enabled', 'tk.sc.next': 'Next run', 'tk.sc.last': 'Last run',
-    'tk.sc.runNow': 'Run now', 'tk.sc.empty': 'No schedules. Schedules run only while the server runs; a run missed during downtime is caught up once at start.',
+    'tk.sc.runNow': 'Run now', 'tk.sc.emptyT': 'No schedules yet', 'tk.sc.empty': 'No schedules. Schedules run only while the server runs; a run missed during downtime is caught up once at start.',
     'tk.sc.qNightly': 'Nightly council review', 'tk.sc.qSecurity': 'Weekly security audit',
     'tk.sc.nightlyPrompt': 'Review all uncommitted changes in the project. List bugs, security risks and anything that contradicts SPEC.md.',
     'tk.sc.securityPrompt': 'Audit the project\'s security and dependencies: known vulnerabilities, leaked secrets, access control, unchecked input. Propose fixes by severity.',
@@ -291,6 +291,7 @@
           <span class="spacer"></span>
           <span class="tk-sched pill"></span>
           <button type="button" class="btn btn-primary btn-sm tk-new">+ <span></span></button>
+          <button type="button" class="help-btn" data-help="board" title="${esc(t('tk.help.tip'))}"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9.5"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.3-2.4 3.8"/><path d="M12 17.2h.01"/></svg><span>${esc(t('tk.help'))}</span></button>
         </div>
         <div class="subtabs tk-tabs" role="tablist"></div>
         <div class="tk-body"></div>
@@ -366,13 +367,24 @@
           <input class="input tk-q" type="search">
           <span class="tk-ext row-wrap"></span>
         </div>
+        <div class="tk-guide"></div>
         <div class="tk-board"><div class="tk-cols"><svg class="tk-arrows" aria-hidden="true"></svg></div></div>`;
       bar = body.querySelector('.tk-toolbar');
       bar.querySelector('.tk-scope').onchange = e => { S.scope = e.target.value; store.set('tk_scope', S.scope); paint(); };
       bar.querySelector('.tk-agentf').onchange = e => { S.agent = e.target.value; paint(); };
       bar.querySelector('.tk-q').oninput = e => { S.q = e.target.value; paintBoard(body); };
       wireBoard(body.querySelector('.tk-cols'));
+      body.querySelector('.tk-guide').addEventListener('click', e => {
+        const g = e.target.closest('[data-tk-guide]');
+        if (!g) return;
+        if (g.dataset.tkGuide === 'new') openCard(null);
+        else { S.tab = g.dataset.tkGuide; store.set('tk_tab', S.tab); paint(); }
+      });
     }
+    // No card anywhere yet: explain how the board works instead of seven empty columns only.
+    const guide = body.querySelector('.tk-guide');
+    guide.innerHTML = !S.tasks.length && M.emptyGuide ? M.emptyGuide({ icon: 'board', title: t('tk.guideT'), text: t('tk.guideX'),
+      actions: [{ label: t('tk.new'), attrs: 'data-tk-guide="new"', primary: true }, { label: t('tk.tab.library'), attrs: 'data-tk-guide="library"' }, { label: t('tk.tab.schedules'), attrs: 'data-tk-guide="schedules"' }] }) : '';
     const cp = curProject();
     bar.querySelector('.tk-scope').innerHTML = opt('cur', cp ? `${t('tk.curProject')}: ${cp.name}` : t('tk.curProject'), S.scope === 'cur') + opt('all', t('tk.allProjects'), S.scope === 'all');
     bar.querySelector('.tk-agentf').innerHTML = opt('', t('tk.allAgents'), !S.agent) + ids.map(id => opt(id, agentLabel(id), S.agent === id)).join('');
@@ -1033,7 +1045,7 @@
           <td>${s.action?.type === 'playbook' ? `<span class="badge">playbook</span> <span class="sub">${esc(String(s.action.file || '').split(/[\\/]/).pop())}</span>` : `<span class="badge">${esc(s.action?.card?.mode || 'task')}</span> <span class="sub">${esc(s.action?.card?.title || '')}</span>`} <span class="faint sub">${esc(projName(s.action?.project_path || s.action?.card?.project_path))}</span></td>
           <td title="${esc(absTime(s.next_run_at))}">${s.enabled ? esc(rel(s.next_run_at)) : '—'}</td><td title="${esc(s.last_result || '')}"><span class="sub">${esc(rel(s.last_run_at))}</span>${s.last_result ? `<div class="faint sub truncate tk-lr">${esc(s.last_result)}</div>` : ''}</td>
           <td class="num"><button type="button" class="btn btn-sm" data-sr="${esc(s.id)}">${esc(t('tk.sc.runNow'))}</button> <button type="button" class="btn btn-sm" data-se="${esc(s.id)}">${esc(t('tk.edit'))}</button> <button type="button" class="btn btn-sm btn-danger" data-sd="${esc(s.id)}">${esc(t('tk.delete'))}</button></td></tr>`).join('')}
-      </tbody></table></div>` : `<div class="empty">${esc(t('tk.sc.empty'))}</div>`}</section>`;
+      </tbody></table></div>` : (M.emptyGuide ? M.emptyGuide({ icon: 'clock', title: t('tk.sc.emptyT'), text: t('tk.sc.empty') }) : `<div class="empty">${esc(t('tk.sc.empty'))}</div>`)}</section>`;
     const reload = async () => { S.schedules = null; paint(); };
     body.querySelectorAll('[data-sq]').forEach(b => b.onclick = () => {
       const p = curProject()?.path || projects()[0]?.path || '';
