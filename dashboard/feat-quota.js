@@ -72,7 +72,9 @@
     return d ? `${d}d ${h}h` : h ? `${h}h ${String(mm).padStart(2, '0')}m` : `${mm}m`;
   }
   const modal = () => window.MAWS1?.openModal;
-  const confirmBox = (msg) => window.MAWS1?.confirmBox ? window.MAWS1.confirmBox(msg) : Promise.resolve(window.confirm(msg));
+  const confirmBox = msg => window.MAWS1?.confirmBox
+    ? window.MAWS1.confirmBox({ title: t('q7Delete'), html: `<p>${esc(msg)}</p>`, ok: t('q7Delete'), danger: true })
+    : Promise.resolve(window.confirm(msg));
 
   // ---------- header pill: the most used account ----------
   const pill = document.createElement('button');
@@ -128,8 +130,8 @@
     const supported = S.adapters[a.agent]?.supported !== false;
     return `<div class="q7-row${a.enabled === false ? ' is-off' : ''}">
       <div class="q7-who"><span class="dot" style="background:${esc(agentColor(a.agent))}"></span>
-        <div class="q7-who-t"><b>${esc(agentLabel(a.agent))}</b> · ${esc(accLabel(a))}${a.is_default || a.id === 'default' ? ` <span class="q7-tag">${esc(t('q7Default'))}</span>` : ''}${a.enabled === false ? ` <span class="q7-tag">${esc(t('q7Disabled'))}</span>` : ''}
-          <div class="sub">${loginBadge}${snap?.level ? ` ${M.badge(t('q7Lvl_' + snap.level), snap.level === 'ok' ? 'b-ok' : snap.level === 'warn' ? 'b-warn' : 'b-err')}` : ''}${cooling ? ` <span class="t-err">${esc(t('q7Cooling', { t: new Date(snap.cooldown_until).toLocaleTimeString() }))}</span>` : ''}</div></div></div>
+        <div class="q7-who-t"><b>${esc(agentLabel(a.agent))}</b>${a.id === 'default' ? (a.label ? ` · ${esc(a.label)}` : '') + ` <span class="q7-tag">${esc(t('q7Default'))}</span>` : ` · ${esc(accLabel(a))}`}${a.enabled === false ? ` <span class="q7-tag">${esc(t('q7Disabled'))}</span>` : ''}
+          <div class="sub">${loginBadge}${snap?.level && (snap.windows?.length || snap.cooldown_until) ? ` ${M.badge(t('q7Lvl_' + snap.level), snap.level === 'ok' ? 'b-ok' : snap.level === 'warn' ? 'b-warn' : 'b-err')}` : ''}${cooling ? ` <span class="t-err">${esc(t('q7Cooling', { t: new Date(snap.cooldown_until).toLocaleTimeString() }))}</span>` : ''}</div></div></div>
       <div class="q7-wins">${snap ? WINDOWS.map(w => bar(w, snap)).join('') : `<span class="sub faint">${esc(t('q7NoData'))}</span>`}</div>
       <div class="q7-acts">
         ${supported ? `<button type="button" class="btn btn-sm" data-q7="login" data-agent="${esc(a.agent)}" data-acc="${esc(a.id)}">${esc(t('q7Login'))}</button>` : ''}
@@ -157,7 +159,8 @@
     if (!has()) { panel.innerHTML = `<div class="empty">${esc(t('q7Missing'))}</div>`; return; }
     if (!S.at) { panel.innerHTML = `<div class="empty">…</div>`; return; }
     // Accounts grouped by agent; the implicit default account of each installed agent comes first.
-    const ids = [...new Set([...Object.keys(agents()).filter(id => agents()[id].installed), ...S.accounts.map(a => a.agent)])];
+    // Installed agents, plus any agent that already has an extra (non-default) account.
+    const ids = [...new Set([...Object.keys(agents()).filter(id => agents()[id].installed), ...S.accounts.filter(a => a.id !== 'default').map(a => a.agent)])];
     const groups = ids.map(id => {
       const list = S.accounts.filter(a => a.agent === id);
       if (!list.some(a => a.id === 'default')) list.unshift({ agent: id, id: 'default', label: '', enabled: true, is_default: true });

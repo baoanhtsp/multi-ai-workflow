@@ -308,6 +308,8 @@
   .page-head h1 { font-size: 21px; font-weight: 650; letter-spacing: -.01em; margin-top: 2px; }
   .page-head .page-desc { font-size: 13px; color: var(--muted); margin-top: 3px; }
   .page-head .spacer { flex: 1; }
+  .route-preview { margin-top: 8px; font-size: 12.5px; color: var(--muted); }
+  .route-preview.is-warn { color: var(--warn); }
   .help-btn { display: inline-flex; align-items: center; gap: 6px; flex: none; height: 30px; padding: 0 11px 0 9px; font-size: 12.5px; font-weight: 500; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 999px; cursor: pointer; transition: color .12s, border-color .12s, background .12s; }
   .help-btn:hover, .help-btn[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
   .help-btn:focus-visible { outline: none; box-shadow: var(--focus); }
@@ -895,7 +897,12 @@
               <div id="newSessWrap" class="hidden" style="align-self:end;padding-bottom:6px">
                 <label class="check"><input type="checkbox" id="newSessChk"> <span data-i18n="newSession"></span></label>
               </div>
+              <div id="acctWrap" class="hidden">
+                <label class="lbl" for="acctSel" data-i18n="lblAccount"></label>
+                <select id="acctSel"></select>
+              </div>
             </div>
+            <div id="routePreview" class="route-preview hidden" aria-live="polite"></div>
           </details>
           <details id="cmdDetails" class="cmd">
             <summary data-i18n="lblPreview"></summary>
@@ -1097,7 +1104,9 @@ const I18N = {
     needV22: '(Tổ hợp này cần backend v2.2 — đang được cập nhật.)',
     runSingle: 'Chạy · {role} → {agent}',
     runTeam: 'Chạy nhóm · Leader {leader} + {n} thành viên',
-    advTitle: 'Tùy chọn nâng cao (model, mức suy luận)',
+    advTitle: 'Tùy chọn nâng cao (model, mức suy luận, tài khoản)',
+    lblAccount: 'Tài khoản', acctAuto: 'Tự chọn theo hạn mức', acctDefault: 'mặc định',
+    routeOk: 'Sẽ chạy bằng {who}.', routeSwitch: 'Tài khoản này sắp hết lượt, sẽ chuyển sang {who}.', routeSuggest: 'Tài khoản này sắp hết lượt; nên chuyển sang {who}.', routeWait: 'Mọi tài khoản đều hết lượt; job sẽ chờ tới lúc mở lại.', routeFull: 'Mọi tài khoản đều gần hết; sẽ chạy bằng {who}.',
     newSession: 'Mở phiên Antigravity mới',
     flowsLbl: 'Quy trình có sẵn',
     flowCouncil: 'Chấm chéo',
@@ -1372,7 +1381,9 @@ const I18N = {
     needV22: '(This combination needs backend v2.2 — update in progress.)',
     runSingle: 'Run · {role} → {agent}',
     runTeam: 'Run team · Leader {leader} + {n} members',
-    advTitle: 'Advanced options (model, reasoning effort)',
+    advTitle: 'Advanced options (model, reasoning effort, account)',
+    lblAccount: 'Account', acctAuto: 'Pick by quota', acctDefault: 'default',
+    routeOk: 'Will run on {who}.', routeSwitch: 'This account is nearly out; the job goes to {who}.', routeSuggest: 'This account is nearly out; consider {who}.', routeWait: 'Every account is out; the job waits until one resets.', routeFull: 'Every account is nearly out; the job runs on {who}.',
     newSession: 'Open a new Antigravity session',
     flowsLbl: 'Ready-made workflows',
     flowCouncil: 'Cross review',
@@ -2456,7 +2467,55 @@ function populateOverrides() {
   // Antigravity only accepts a model tier when it opens a new conversation.
   fill('modelSel', t('autoModel'), a.adapter === 'antigravity' && !$('newSessChk').checked ? [] : models);
   fill('effortSel', t('autoEffort'), efforts);
+  populateAccounts(agent);
 }
+
+// ---------- S7: account picker and routing preview (specs/s7-design.md §6) ----------
+const acctCache = { at: 0, list: [], snaps: [] };
+async function loadAccounts(force) {
+  if (!force && Date.now() - acctCache.at < 30000) return acctCache;
+  try {
+    const [a, q] = await Promise.all([api('account_list'), api('quota_get')]);
+    acctCache.list = a.accounts || []; acctCache.snaps = q.snapshots || [];
+  } catch { acctCache.list = []; acctCache.snaps = []; }
+  acctCache.at = Date.now();
+  return acctCache;
+}
+const quotaPct = (agent, acc) => {
+  const s = acctCache.snaps.find(x => x.agent === agent && x.account === acc);
+  const w = (s?.windows || []).reduce((m, x) => Math.max(m, Number(x.used_percent) || 0), -1);
+  return w < 0 ? null : Math.round(w);
+};
+async function populateAccounts(agent) {
+  const on = (state.data?.features || []).includes('accounts');
+  $('acctWrap').classList.toggle('hidden', !on);
+  if (!on) { $('routePreview').classList.add('hidden'); return; }
+  await loadAccounts(false);
+  const sel = $('acctSel'), prev = sel.value;
+  const list = acctCache.list.filter(a => a.agent === agent && a.enabled !== false);
+  if (!list.some(a => a.id === 'default')) list.unshift({ agent, id: 'default', label: '' });
+  const label = a => (a.id === 'default' ? (a.label || t('acctDefault')) : (a.label || a.id)) + (quotaPct(agent, a.id) != null ? ` · ${quotaPct(agent, a.id)}%` : '');
+  sel.innerHTML = `<option value="">${esc(t('acctAuto'))}</option>` + list.map(a => `<option value="${esc(a.id)}">${esc(label(a))}</option>`).join('');
+  sel.value = list.some(a => a.id === prev) ? prev : '';
+  previewRoute();
+}
+let routeSeq = 0;
+async function previewRoute() {
+  const box = $('routePreview');
+  if (!(state.data?.features || []).includes('quota')) { box.classList.add('hidden'); return; }
+  const p = payload(false), seq = ++routeSeq;
+  try {
+    const r = await api(`quota_route_preview&agent=${encodeURIComponent(p.agent)}&role=${encodeURIComponent(p.role || 'backend')}&account=${encodeURIComponent($('acctSel').value || 'default')}`);
+    if (seq !== routeSeq) return;
+    // The percentage only when the account has real windows (no data is not 0 %).
+    const d = r.decision || {}, c = d.chosen || {}, q = quotaPct(c.agent || p.agent, c.account || 'default');
+    const who = `${agentLabel(c.agent || p.agent)} · ${c.account === 'default' || !c.account ? t('acctDefault') : c.account}${q != null ? ` (${q}%)` : ''}`;
+    const key = d.reason === 'switched' ? 'routeSwitch' : d.reason === 'suggested' ? 'routeSuggest' : d.reason === 'waiting' ? 'routeWait' : d.reason === 'all-full' ? 'routeFull' : 'routeOk';
+    box.textContent = t(key, { who });
+    box.className = 'route-preview' + (key === 'routeOk' ? '' : ' is-warn');
+  } catch { box.classList.add('hidden'); }
+}
+$('acctSel').onchange = () => { resetCmd(); previewRoute(); };
 $('newSessChk').onchange = () => { populateOverrides(); resetCmd(); };
 
 // Request body for the board (SPEC §5.3).
@@ -2464,6 +2523,7 @@ function boardPayload(exec) {
   const b = state.board;
   const base = {
     agent: execAgent(), model: $('modelSel').value, effort: $('effortSel').value,
+    ...($('acctSel').value ? { account: $('acctSel').value } : {}),
     new_session: cap(execAgent(), 'new_session') && $('newSessChk').checked,
     project_path: $('projectSel').value, prompt: $('promptTxt').value.trim(),
     execute_antigravity: !!exec
