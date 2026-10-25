@@ -243,8 +243,7 @@ test('S1 Checkpoints: restoreTree restores modified files, removes added files, 
       async () => {
         await restoreTree(env.repoDir, cpRes.checkpoint.id, {
           confirm: false,
-          auditFile: env.paths.auditFile,
-          checkpointsAuditFile: path.win32.join(env.mawHome, 'audit.jsonl'),
+          paths: env.paths,
         });
       },
       (err: unknown) => err instanceof ApiValidationError && err.statusCode === 400
@@ -253,8 +252,7 @@ test('S1 Checkpoints: restoreTree restores modified files, removes added files, 
     // Perform valid restore
     const restoreRes = await restoreTree(env.repoDir, cpRes.checkpoint.id, {
       confirm: true,
-      auditFile: env.paths.auditFile,
-      checkpointsAuditFile: path.win32.join(env.mawHome, 'audit.jsonl'),
+      paths: env.paths,
     });
 
     assert.equal(restoreRes.ok, true);
@@ -389,8 +387,7 @@ test('S1 Checkpoints: delta restore preserves mtime of unchanged files', async (
 
     const restoreRes = await restoreTree(env.repoDir, cpRes.checkpoint.id, {
       confirm: true,
-      auditFile: env.paths.auditFile,
-      checkpointsAuditFile: path.win32.join(env.mawHome, 'audit.jsonl'),
+      paths: env.paths,
     });
 
     assert.equal(restoreRes.ok, true);

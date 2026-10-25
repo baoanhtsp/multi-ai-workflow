@@ -165,13 +165,9 @@ export const feature: MawFeature = {
           throw new ApiValidationError('Confirmation required.', 400);
         }
 
-        const dataDir = ctx.paths.featureDataDir('checkpoints');
-        const checkpointsAuditFile = path.win32.join(dataDir, 'audit.jsonl');
-
         const restoreRes = await restoreTree(projectPath, checkpointId, {
           confirm: true,
-          auditFile: ctx.paths.auditFile,
-          checkpointsAuditFile,
+          paths: ctx.paths,
         });
 
         return restoreRes;

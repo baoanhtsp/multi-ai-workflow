@@ -216,9 +216,10 @@ test('schedules: delete schedule and audit logging', async () => {
     const list = await getSchedules(ctx);
     assert.equal(list.length, 0);
 
-    // Check audit file
-    assert.ok(fs.existsSync(ctx.paths.auditFile));
-    const auditText = fs.readFileSync(ctx.paths.auditFile, 'utf8');
+    // Check action audit file ($MAW_HOME/audit.jsonl)
+    const actionAuditFile = path.win32.join(ctx.paths.mawHome, 'audit.jsonl');
+    assert.ok(fs.existsSync(actionAuditFile));
+    const auditText = fs.readFileSync(actionAuditFile, 'utf8');
     assert.ok(auditText.includes('schedule_delete'));
   } finally {
     cleanup();

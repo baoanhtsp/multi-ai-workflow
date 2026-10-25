@@ -4,6 +4,7 @@ import { handleCancelJob, refreshJobMetaStatus, type JobMeta } from '../../actio
 import { loadInternalNotifyConfig } from '../../actions/notify.ts';
 import { getAuditStats } from '../../lib/audit.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
+import { logServerError } from '../../lib/logger.ts';
 import type { ServerPaths } from '../../lib/paths.ts';
 import { isDirectorySafe, isFileSafe } from '../../lib/paths.ts';
 import { isProcessRunning } from '../../lib/proc.ts';
@@ -432,19 +433,33 @@ export class TelegramPoller {
 
       // Start 20s heartbeat timer
       this.heartbeatTimer = setInterval(() => {
-        refreshPollerHeartbeat(this.paths);
+        try {
+          refreshPollerHeartbeat(this.paths);
+        } catch (err) {
+          logServerError('telegram:heartbeat', err, this.paths.mawHome);
+        }
       }, 20000);
       this.heartbeatTimer.unref();
 
       // Start 60s digest check timer
       this.digestTimer = setInterval(() => {
-        void this.checkDigest();
-        void this.pushNewInboxItems();
+        try {
+          void this.checkDigest().catch((err) => {
+            logServerError('telegram:checkDigest', err, this.paths.mawHome);
+          });
+          void this.pushNewInboxItems().catch((err) => {
+            logServerError('telegram:pushNewInboxItems', err, this.paths.mawHome);
+          });
+        } catch (err) {
+          logServerError('telegram:digestTimer', err, this.paths.mawHome);
+        }
       }, 60000);
       this.digestTimer.unref();
 
       if (tgCfg.push_inbox) {
-        void this.pushNewInboxItems();
+        void this.pushNewInboxItems().catch((err) => {
+          logServerError('telegram:initialPushInbox', err, this.paths.mawHome);
+        });
       }
     }
 
@@ -452,7 +467,9 @@ export class TelegramPoller {
     if (needsInbound && !this.isRunning) {
       this.isRunning = true;
       this.abortController = new AbortController();
-      void this.pollLoop();
+      void this.pollLoop().catch((err) => {
+        logServerError('telegram:pollLoop', err, this.paths.mawHome);
+      });
     } else if (!needsInbound && this.isRunning) {
       this.isRunning = false;
       if (this.abortController) {
@@ -746,7 +763,11 @@ export class TelegramPoller {
         }
       }
       try {
-        await handleCancelJob({ job_id: jobId }, this.paths);
+        if (this.ctx?.cancelJob) {
+          await this.ctx.cancelJob(jobId);
+        } else {
+          await handleCancelJob({ job_id: jobId }, this.paths);
+        }
         await this.client?.sendMessage(chatId, `Job ${jobId} cancelled ✓`);
       } catch (err) {
         await this.client?.sendMessage(chatId, `Cancel failed: ${(err as Error)?.message}`);
@@ -757,10 +778,10 @@ export class TelegramPoller {
         return;
       }
       // Call task_create on local server
-      const host = getCapturedHost();
+      const baseUrl = this.ctx?.serverUrl || `http://${getCapturedHost()}`;
       const title = arg.slice(0, 80);
       try {
-        const resp = await globalThis.fetch(`http://${host}/api?action=task_create`, {
+        const resp = await globalThis.fetch(`${baseUrl}/api?action=task_create`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

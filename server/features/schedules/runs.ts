@@ -187,7 +187,7 @@ export async function deleteSchedule(
       throw notFound(`Schedule not found: ${id}`);
     }
     writeJsonAtomic(file, data);
-    appendAudit(ctx.paths.auditFile, 'schedule_delete', { id });
+    appendAudit(ctx.paths, 'schedule_delete', { id }, 'schedules');
     return id;
   });
 }

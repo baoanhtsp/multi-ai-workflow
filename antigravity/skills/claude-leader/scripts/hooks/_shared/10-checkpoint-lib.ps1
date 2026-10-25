@@ -46,10 +46,15 @@ function New-MawCheckpoint {
         }
 
         # Resolve mawHome and check config.json
+        $userProf = if ($env:USERPROFILE -and $env:USERPROFILE.Trim()) {
+            $env:USERPROFILE.Trim()
+        } else {
+            [Environment]::GetFolderPath('UserProfile')
+        }
         $mawHome = if ($env:MAW_HOME -and $env:MAW_HOME.Trim()) {
             $env:MAW_HOME.Trim()
         } else {
-            Join-Path ([Environment]::GetFolderPath('UserProfile')) ".maw"
+            Join-Path $userProf ".maw"
         }
         $cfgFile = Join-Path $mawHome "data\checkpoints\config.json"
         $effectiveRetention = 50
@@ -85,8 +90,8 @@ function New-MawCheckpoint {
             if (Get-Variable -Name "scriptsDir" -Scope Script -ErrorAction SilentlyContinue) {
                 $candidatePaths += Join-Path $script:scriptsDir "lib\maw-common.ps1"
             }
-            $candidatePaths += Join-Path ([Environment]::GetFolderPath('UserProfile')) ".gemini\config\skills\claude-leader\scripts\lib\maw-common.ps1"
-            $candidatePaths += Join-Path ([Environment]::GetFolderPath('UserProfile')) ".maw\scripts\lib\maw-common.ps1"
+            $candidatePaths += Join-Path $userProf ".gemini\config\skills\claude-leader\scripts\lib\maw-common.ps1"
+            $candidatePaths += Join-Path $userProf ".maw\scripts\lib\maw-common.ps1"
 
             foreach ($cPath in $candidatePaths) {
                 if ($cPath -and (Test-Path -LiteralPath $cPath -PathType Leaf)) {
@@ -123,7 +128,7 @@ function New-MawCheckpoint {
         $cleanAgent = if ($Agent -match '^[a-zA-Z0-9-]{0,32}$') { $Agent.ToLowerInvariant() } else { "" }
         $cleanRole = if ($Role -match '^[a-zA-Z0-9-]{0,32}$') { $Role.ToLowerInvariant() } else { "" }
 
-        $tempDir = [System.IO.Path]::GetTempPath()
+        $tempDir = if ($env:TEMP -and $env:TEMP.Trim()) { $env:TEMP.Trim() } else { [System.IO.Path]::GetTempPath() }
         $randHex = [System.Guid]::NewGuid().ToString('N').Substring(0, 12)
         $tmpIndex = Join-Path $tempDir "maw-cp-$randHex.idx"
         $msgFile = Join-Path $tempDir "maw-cp-msg-$randHex.txt"

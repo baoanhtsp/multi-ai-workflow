@@ -40,7 +40,7 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $scripts = Get-ChildItem -Path . -Recurse -Filter "*.ps1" -File | Where-Object { $_.FullName -notmatch '\\node_modules\\' }
+          $scripts = Get-ChildItem -Path . -Recurse -Filter "*.ps1" -File | Where-Object { $_.FullName -notmatch '\\(node_modules|\.claude)\\' }
           if (-not $scripts) {
               throw "No PowerShell (*.ps1) scripts found in repository."
           }
@@ -156,7 +156,8 @@ jobs:
               Install-Module Pester -MinimumVersion 5.5 -Force -SkipPublisherCheck -Scope CurrentUser
           }
           Import-Module Pester -MinimumVersion 5.5 -Force
-          Invoke-Pester -Path .\tests -CI
+          $pesterPaths = @(".\tests") + @(Get-ChildItem -Path .\server\features -Recurse -Filter "*.Tests.ps1" -File -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+          Invoke-Pester -Path $pesterPaths -CI
 
       - name: Run Node.js Backend API Smoke Tests
         shell: powershell

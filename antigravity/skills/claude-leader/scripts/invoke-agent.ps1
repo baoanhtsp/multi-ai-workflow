@@ -25,6 +25,9 @@ param(
     [string]$EffortOverride = "",
 
     [Parameter(Mandatory=$false)]
+    [string]$ResumeId = "",
+
+    [Parameter(Mandatory=$false)]
     [switch]$NewSession,
 
     [Parameter(Mandatory=$false)]
@@ -154,15 +157,32 @@ if ($normRole -eq "reviewer") {
 }
 
 # 4b. Invoke before-agent hooks (SPEC §9.0: block exits 5 with reason)
-$beforeHookRes = Invoke-MawHooks -Event "before-agent" -Context @{
-    agent   = $normAgent
-    role    = $normRole
-    workdir = $WorkDir
-    model   = $ModelOverride
-    effort  = $EffortOverride
+$rawBeforeHookItems = @(Invoke-MawHooks -Event "before-agent" -Context @{
+    agent       = $normAgent
+    role        = $normRole
+    workdir     = $WorkDir
+    model       = $ModelOverride
+    effort      = $EffortOverride
+    job_id      = [string]$env:MAW_JOB_ID
+    prompt_file = $PromptFile
+    team        = (($teamMap.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ",")
+})
+$beforeHookRes = $null
+foreach ($hi in $rawBeforeHookItems) {
+    if ($hi -is [string]) {
+        Write-Output $hi
+    } elseif ($null -ne $hi) {
+        $beforeHookRes = $hi
+    }
+}
+if ($beforeHookRes -and $beforeHookRes.PrependPrompt) {
+    $fullPrompt = "$($beforeHookRes.PrependPrompt)`n`n$fullPrompt"
 }
 if ($beforeHookRes -and $beforeHookRes.Block) {
     Write-Output "HOOK_BLOCKED (before-agent): $($beforeHookRes.Reason)"
+    if ($beforeHookRes.Suggest) {
+        Write-Output "HOOK_BLOCKED_SUGGEST: $($beforeHookRes.Suggest)"
+    }
     exit 5
 }
 
@@ -196,6 +216,10 @@ switch ($agentEntry.adapter) {
             $childArgs.Add("-EffortOverride")
             $childArgs.Add($EffortOverride)
         }
+        if ($ResumeId) {
+            $childArgs.Add("-ResumeId")
+            $childArgs.Add($ResumeId)
+        }
     }
     "codex" {
         $targetScript = Join-Path $PSScriptRoot "invoke-codex.ps1"
@@ -212,12 +236,23 @@ switch ($agentEntry.adapter) {
             $childArgs.Add("-EffortOverride")
             $childArgs.Add($EffortOverride)
         }
+        if ($ResumeId) {
+            $childArgs.Add("-ResumeId")
+            $childArgs.Add($ResumeId)
+        }
     }
     "antigravity" {
         $targetScript = Join-Path $PSScriptRoot "invoke-antigravity.ps1"
-        $agyAction = if ($NewSession) { "new" } else { "send-latest" }
-        $childArgs.Add("-Action")
-        $childArgs.Add($agyAction)
+        if ($ResumeId) {
+            $childArgs.Add("-Action")
+            $childArgs.Add("send")
+            $childArgs.Add("-ConversationId")
+            $childArgs.Add($ResumeId)
+        } else {
+            $agyAction = if ($NewSession) { "new" } else { "send-latest" }
+            $childArgs.Add("-Action")
+            $childArgs.Add($agyAction)
+        }
         $childArgs.Add("-WorkDir")
         $childArgs.Add($WorkDir)
         $childArgs.Add("-Title")
@@ -247,6 +282,10 @@ switch ($agentEntry.adapter) {
         if ($EffortOverride) {
             $childArgs.Add("-EffortOverride")
             $childArgs.Add($EffortOverride)
+        }
+        if ($ResumeId) {
+            $childArgs.Add("-ResumeId")
+            $childArgs.Add($ResumeId)
         }
         $childArgs.Add("-TimeoutSeconds")
         $childArgs.Add([string]$TimeoutSeconds)
@@ -305,11 +344,6 @@ try {
 
     if ($agentEntry.adapter -eq "antigravity") {
         try {
-            $auditFile = Join-Path $env:USERPROFILE ".gemini\antigravity\multi-ai-audit.jsonl"
-            $auditDir = Split-Path -Parent $auditFile
-            if (-not (Test-Path -LiteralPath $auditDir)) {
-                New-Item -ItemType Directory -Path $auditDir -Force | Out-Null
-            }
             $fullOut = ($outputLines -join "`n")
             $vr = Get-ReviewVerdict -Text $fullOut
             $verdict = if ($exitCode -ne 0) {
@@ -324,7 +358,7 @@ try {
             $costUsd   = [Math]::Round(($inTokens * 1.25 + $outTokens * 5.0) / 1000000.0, 5)
             $agyModel  = if ($NewSession -and $ModelOverride) { $ModelOverride } else { "gemini-4-argon" }
 
-            [ordered]@{
+            $auditEntry = [ordered]@{
                 Timestamp    = (Get-Date).ToString("o")
                 Tool         = $normAgent
                 Agent        = $normAgent
@@ -339,7 +373,8 @@ try {
                 CostUsd      = $costUsd
                 Score        = $vr.Score
                 Verdict      = $verdict
-            } | ConvertTo-Json -Compress | Add-Content -Path $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue
+            }
+            Write-MawAuditEntry -Entry $auditEntry | Out-Null
         } catch {}
     }
 

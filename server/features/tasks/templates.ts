@@ -270,7 +270,7 @@ export async function deleteTemplate(
       throw notFound(`Template not found: ${id}`);
     }
     writeJsonAtomic(file, data);
-    appendAudit(ctx.paths.auditFile, 'template_delete', { id });
+    appendAudit(ctx.paths, 'template_delete', { id }, 'tasks');
     return id;
   });
 }

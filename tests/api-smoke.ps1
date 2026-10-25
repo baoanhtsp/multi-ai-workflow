@@ -17,12 +17,18 @@ $nodeExe = $nodeCmd.Source
 $origTmp  = $env:TMP
 $origTemp = $env:TEMP
 $origMawHome = $env:MAW_HOME
+$origUserProfile = $env:USERPROFILE
+$origMawTest = $env:MAW_TEST
+$origSkipHealth = $env:MAW_SKIP_HEALTH
 $baseTemp = if ($origTemp) { $origTemp } else { [System.IO.Path]::GetTempPath() }
 $spaceTempDir = Join-Path $baseTemp ("maw smoke space " + [guid]::NewGuid().ToString("N").Substring(0, 8))
 New-Item -ItemType Directory -Path $spaceTempDir -Force | Out-Null
 
 $smokeMawHome = Join-Path $spaceTempDir ".maw"
+$smokeUserProfile = Join-Path $spaceTempDir "user-profile"
 New-Item -ItemType Directory -Path $smokeMawHome -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $smokeUserProfile "AppData\Local\Microsoft\Windows\PowerShell\ScheduledJobs") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $smokeUserProfile "AppData\Roaming\Microsoft\Windows\PowerShell") -Force | Out-Null
 $smokeUserRegistry = @{
     version = 1
     agents  = @(
@@ -78,9 +84,12 @@ function Start-SmokeNodeServer {
     param(
         [string]$ProjectsRootArg = ""
     )
-    $env:TMP      = $spaceTempDir
-    $env:TEMP     = $spaceTempDir
-    $env:MAW_HOME = $smokeMawHome
+    $env:TMP             = $spaceTempDir
+    $env:TEMP            = $spaceTempDir
+    $env:MAW_HOME        = $smokeMawHome
+    $env:USERPROFILE     = $smokeUserProfile
+    $env:MAW_TEST        = "1"
+    $env:MAW_SKIP_HEALTH = "1"
     try {
         $qMain = if ($serverMain -match '\s') { '"' + $serverMain + '"' } else { $serverMain }
         $argList = @($qMain, "--port", "$port")
@@ -90,9 +99,12 @@ function Start-SmokeNodeServer {
         }
         return Start-Process -FilePath $nodeExe -ArgumentList $argList -WorkingDirectory $repoRoot -PassThru -WindowStyle Hidden
     } finally {
-        $env:TMP      = $origTmp
-        $env:TEMP     = $origTemp
-        $env:MAW_HOME = $origMawHome
+        $env:TMP         = $origTmp
+        $env:TEMP        = $origTemp
+        $env:MAW_HOME    = $origMawHome
+        $env:USERPROFILE = $origUserProfile
+        if ($null -eq $origMawTest) { Remove-Item Env:\MAW_TEST -ErrorAction SilentlyContinue } else { $env:MAW_TEST = $origMawTest }
+        if ($null -eq $origSkipHealth) { Remove-Item Env:\MAW_SKIP_HEALTH -ErrorAction SilentlyContinue } else { $env:MAW_SKIP_HEALTH = $origSkipHealth }
     }
 }
 
@@ -422,11 +434,19 @@ try {
     $serverProc = Start-SmokeNodeServer -ProjectsRootArg $spaceTempDir
     Wait-SmokeServerReady
 
-    $rj13 = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=job_status&job_id=$surviveJobId&offset=0"
-    if ($rj13.StatusCode -ne 200) {
-        throw "Test 13 failed: job_status after restart returned HTTP $($rj13.StatusCode) ($($rj13.Body))"
+    $rj13 = $null
+    $jj13 = $null
+    for ($poll = 0; $poll -lt 40; $poll++) {
+        $rj13 = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=job_status&job_id=$surviveJobId&offset=0"
+        if ($rj13.StatusCode -ne 200) {
+            throw "Test 13 failed: job_status after restart returned HTTP $($rj13.StatusCode) ($($rj13.Body))"
+        }
+        $jj13 = $rj13.Body | ConvertFrom-Json
+        if ($jj13.status -ne "RUNNING") {
+            break
+        }
+        Start-Sleep -Milliseconds 300
     }
-    $jj13 = $rj13.Body | ConvertFrom-Json
     if ($jj13.status -ne "DONE" -or $jj13.exit_code -ne 0) {
         throw "Test 13 failed (C2): job $surviveJobId did not survive server restart! Expected DONE/0, got status=$($jj13.status) exit_code=$($jj13.exit_code) log=$($jj13.log_chunk)"
     }
@@ -582,15 +602,77 @@ try {
     }
     Write-Host "  [PASS] 17. v4.0 Real Council run with fake CLI reviewer in temp MAW_HOME -> DONE (exit 0) + COUNCIL_RESULT line (no hang)" -ForegroundColor Green
 
-    Write-Host "[api-smoke] All 20 v4.0 Node.js API security, Registry, C1/C2 runner survival, real Council & SSE assertions PASSED!" -ForegroundColor Cyan
+    # 18. v5.0 S1 Git Isolation & Checkpoints smoke block (checkpoint_list, worktree_list, git_log on temp repo)
+    $encFailRepo = [System.Uri]::EscapeDataString($failRepoDir)
+    $rCpList = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=checkpoint_list&project_path=$encFailRepo"
+    if ($rCpList.StatusCode -ne 200) { throw "Test 18a failed: checkpoint_list expected 200, got $($rCpList.StatusCode) ($($rCpList.Body))" }
+    $jCpList = $rCpList.Body | ConvertFrom-Json
+    if (-not $jCpList.ok -or $null -eq $jCpList.checkpoints) { throw "Test 18a failed: checkpoint_list missing checkpoints array" }
+
+    $rWtList = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=worktree_list&project_path=$encFailRepo"
+    if ($rWtList.StatusCode -ne 200) { throw "Test 18b failed: worktree_list expected 200, got $($rWtList.StatusCode) ($($rWtList.Body))" }
+    $jWtList = $rWtList.Body | ConvertFrom-Json
+    if (-not $jWtList.ok -or $null -eq $jWtList.worktrees) { throw "Test 18b failed: worktree_list missing worktrees array" }
+
+    $rGitLog = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=git_log&project_path=$encFailRepo"
+    if ($rGitLog.StatusCode -ne 200) { throw "Test 18c failed: git_log expected 200, got $($rGitLog.StatusCode) ($($rGitLog.Body))" }
+    $jGitLog = $rGitLog.Body | ConvertFrom-Json
+    if (-not $jGitLog.ok -or $null -eq $jGitLog.commits) { throw "Test 18c failed: git_log missing commits array" }
+    Write-Host "  [PASS] 18. v5.0 S1 smoke: checkpoint_list, worktree_list, git_log -> 200" -ForegroundColor Green
+
+    # 19. v5.0 S3 Attention, Health, Timeline & MCP smoke block
+    $rHealth = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=health_check"
+    if ($rHealth.StatusCode -ne 200) { throw "Test 19a failed: health_check expected 200, got $($rHealth.StatusCode) ($($rHealth.Body))" }
+    $jHealth = $rHealth.Body | ConvertFrom-Json
+    if (-not $jHealth.ok) { throw "Test 19a failed: health_check ok is false" }
+
+    $inboxAddBody = (@{
+        kind     = "custom"
+        severity = "info"
+        title    = "Smoke inbox test"
+        summary  = "Verify inbox_add -> inbox_list -> inbox_act dismiss"
+    } | ConvertTo-Json -Compress)
+    $rInboxAdd = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=inbox_add" -Headers @{ "X-MAW-Request" = "1" } -Body $inboxAddBody
+    if ($rInboxAdd.StatusCode -ne 200) { throw "Test 19b failed: inbox_add expected 200, got $($rInboxAdd.StatusCode) ($($rInboxAdd.Body))" }
+    $jInboxAdd = $rInboxAdd.Body | ConvertFrom-Json
+    $inboxItemId = [string]$jInboxAdd.item.id
+    if (-not $inboxItemId) { throw "Test 19b failed: inbox_add did not return item.id" }
+
+    $rInboxList = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=inbox_list"
+    if ($rInboxList.StatusCode -ne 200) { throw "Test 19c failed: inbox_list expected 200, got $($rInboxList.StatusCode)" }
+    $jInboxList = $rInboxList.Body | ConvertFrom-Json
+    $foundInbox = @($jInboxList.items | Where-Object { $_.id -eq $inboxItemId })
+    if ($foundInbox.Count -eq 0) { throw "Test 19c failed: inbox_list did not include newly added item $inboxItemId" }
+
+    $inboxActBody = (@{ id = $inboxItemId; action = "dismiss" } | ConvertTo-Json -Compress)
+    $rInboxAct = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=inbox_act" -Headers @{ "X-MAW-Request" = "1" } -Body $inboxActBody
+    if ($rInboxAct.StatusCode -ne 200) { throw "Test 19d failed: inbox_act dismiss expected 200, got $($rInboxAct.StatusCode) ($($rInboxAct.Body))" }
+
+    $rTimeline = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=timeline"
+    if ($rTimeline.StatusCode -ne 200) { throw "Test 19e failed: timeline expected 200, got $($rTimeline.StatusCode) ($($rTimeline.Body))" }
+    $jTimeline = $rTimeline.Body | ConvertFrom-Json
+    if (-not $jTimeline.ok -or $null -eq $jTimeline.lanes) { throw "Test 19e failed: timeline missing lanes array" }
+
+    $rMcpCfg = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=mcp_config"
+    if ($rMcpCfg.StatusCode -ne 200) { throw "Test 19f failed: mcp_config expected 200, got $($rMcpCfg.StatusCode) ($($rMcpCfg.Body))" }
+
+    $mcpUnconfirmedBody = (@{ targets = @("claude") } | ConvertTo-Json -Compress)
+    $rMcpApply = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=mcp_apply" -Headers @{ "X-MAW-Request" = "1" } -Body $mcpUnconfirmedBody
+    if ($rMcpApply.StatusCode -ne 400) { throw "Test 19g failed: mcp_apply without confirm expected 400, got $($rMcpApply.StatusCode) ($($rMcpApply.Body))" }
+    Write-Host "  [PASS] 19. v5.0 S3 smoke: health_check, inbox_add/list/act, timeline, mcp_config, mcp_apply unconfirmed -> 400" -ForegroundColor Green
+
+    Write-Host "[api-smoke] All v4.0 + v5.0 Node.js API security, Registry, C1/C2 runner survival, Council, S1 & S3 smoke assertions PASSED!" -ForegroundColor Cyan
     exit 0
 } catch {
     Write-Error "[api-smoke] FAILED: $($_.Exception.Message)"
     exit 1
 } finally {
-    $env:TMP      = $origTmp
-    $env:TEMP     = $origTemp
-    $env:MAW_HOME = $origMawHome
+    $env:TMP         = $origTmp
+    $env:TEMP        = $origTemp
+    $env:MAW_HOME    = $origMawHome
+    $env:USERPROFILE = $origUserProfile
+    if ($null -eq $origMawTest) { Remove-Item Env:\MAW_TEST -ErrorAction SilentlyContinue } else { $env:MAW_TEST = $origMawTest }
+    if ($null -eq $origSkipHealth) { Remove-Item Env:\MAW_SKIP_HEALTH -ErrorAction SilentlyContinue } else { $env:MAW_SKIP_HEALTH = $origSkipHealth }
     $httpClient.Dispose()
     if ($serverProc -and -not $serverProc.HasExited) {
         try { Stop-Process -Id $serverProc.Id -Force -ErrorAction SilentlyContinue } catch {}

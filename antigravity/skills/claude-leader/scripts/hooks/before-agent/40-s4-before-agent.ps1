@@ -78,8 +78,28 @@ try {
         }
     }
 
+    $prependPrompt = if ($parsed.prepend_prompt) { [string]$parsed.prepend_prompt } else { "" }
+    $suggestAgent  = if ($parsed.suggest) { [string]$parsed.suggest } else { "" }
+    if (-not $suggestAgent -and $parsed.reason -and ([string]$parsed.reason -match '\bfallback=([a-z0-9-]+)\b')) {
+        if ($Matches[1] -ne "none") {
+            $suggestAgent = $Matches[1]
+        }
+    }
+
     if ($parsed.block) {
-        return @{ Block = $true; Reason = [string]$parsed.reason }
+        return @{
+            Block         = $true
+            Reason        = [string]$parsed.reason
+            Suggest       = $suggestAgent
+            PrependPrompt = $prependPrompt
+        }
+    }
+    if ($prependPrompt) {
+        return @{
+            Block         = $false
+            Reason        = ""
+            PrependPrompt = $prependPrompt
+        }
     }
 } catch {
     Write-Host "[S4] hook error: $($_.Exception.Message)"

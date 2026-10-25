@@ -98,23 +98,24 @@ Order matters: blocked → usage_limit → auth → transient → timeout → ot
 ```jsonc
 {
   "version": 1,
-  "enabled": true,
+  "enabled": false,                                // opt-in: a fresh install never blocks an agent
   "caps": {
-    "job":      { "usd": { "warn": 1.0,  "block": 2.0 },  "tokens": { "warn": 0, "block": 0 } },
-    "team_run": { "usd": { "warn": 3.0,  "block": 5.0 } },
-    "day":      { "usd": { "warn": 10.0, "block": 20.0 }, "tokens": { "warn": 0, "block": 4000000 } },
+    "job":      { "usd": { "warn": 5.0,  "block": 15.0 },  "tokens": { "warn": 0, "block": 0 } },
+    "team_run": { "usd": { "warn": 15.0, "block": 40.0 } },
+    "day":      { "usd": { "warn": 50.0, "block": 150.0 }, "tokens": { "warn": 0, "block": 0 } },
     "project":  { "usd": { "warn": 0,    "block": 0 }, "period": "month" },   // "day" | "week" | "month" | "all"
     "agent_day": { "usd": { "warn": 0,   "block": 0 } }                       // per agent per day, makes fallback meaningful
   },
   "projects": {                                    // per-project overrides (key = normalised absolute path, lower-case)
     "c:\\laragon\\www\\shop": { "project": { "usd": { "warn": 20, "block": 30 }, "period": "month" } }
   },
-  "estimate_next_call": true                       // add the agent's average cost per call before comparing with block
+  "estimate_next_call": false                      // add the agent's average cost per call before comparing with block
 }
 ```
 - `0` means "no cap". Each threshold is a number ≥ 0 with at most 4 decimals; `warn` must be ≤ `block` when both are > 0.
 - Tokens = `in_tokens + out_tokens`.
-- Missing scopes use these defaults: everything is 0 (off), except `day.usd = { warn: 10, block: 0 }`.
+- Missing scopes use these defaults: everything is 0 (off), except `day.usd = { warn: 50, block: 0 }`.
+- **Defaults rationale (integration round, 2026-10-25):** a single `codex review-diff` on a large diff costs $1–8 and 0.3–3.2 M tokens, so the first defaults ($2 per job, $20 and 4 M tokens per day, enabled) blocked real work on day one. Budgets are now opt-in with caps sized for real reviews; a token cap is off unless the user sets one. An existing `budgets.json` is never rewritten.
 
 ### 1.2 Where the spend comes from
 - Rows come from `multi-ai-audit.jsonl` (`paths.auditFile`). Cost and tokens come from `estimateEntryTelemetry()` in `server/lib/audit.ts` (import only, no edit), so the numbers match the dashboard stats.
@@ -267,7 +268,7 @@ The UI shows **"Đang chờ hồi phục (đến 14:05)"** in the job header fro
     { "id": "phpunit",   "label": "phpunit",           "command": ["vendor/bin/phpunit"],       "timeout_s": 900, "required": false, "cwd": "." }
   ],
   "todo_patterns": ["TODO", "FIXME", "XXX", "HACK"],   // default
-  "todo_max": 0,                                       // -1 = report only; n ≥ 0 = red when more than n
+  "todo_max": -1,                                      // default -1 = report only; n ≥ 0 = red when more than n
   "require_clean_git": false,
   "min_review_score": 8.5,                             // 0 = ignore the review score
   "spec_guard": true
@@ -302,7 +303,7 @@ The UI shows **"Đang chờ hồi phục (đến 14:05)"** in the job header fro
 | each check `<id>` | exit 0 in the last run, and that run happened at the **current `HEAD` + current dirty-file signature** | exit ≠ 0, timeout, cannot start. A result from older code ⇒ `stale`; never run ⇒ `pending`. For a `required` check both count as **not green** (a gate is only green when every required check passed on the current code). A `required: false` failure / stale / pending ⇒ `warn` |
 | `spec_guard` | SPEC Guard verdict ok (reuse `server/actions/specGuard.ts` `handleSpecGuard` with `owner: ""`; never edit it) | violations. No `SPEC.md` ⇒ `skip` |
 | `review` | the last reviewer score for this project (ledger `review`, else the last audit reviewer row with `WorkDir` inside the project) ≥ `min_review_score` and verdict APPROVED | below the threshold / CHANGES_REQUESTED. No review yet ⇒ `warn` |
-| `todo` | count of `todo_patterns` matches (word boundary) in **tracked** text files (`git ls-files`, skip files > 512 KB and binaries, max 5000 files) ≤ `todo_max` | above it. `todo_max = -1` ⇒ `warn`/`pass`, report only. Shows the top 20 `file:line` |
+| `todo` | count of `todo_patterns` matches **in comments** in **tracked** text files (`git ls-files`, skip files > 512 KB and binaries, max 5000 files) ≤ `todo_max`. A match counts only when a comment marker (`//`, `#`, `/*`, `*`, `<!--`, `--`, `;`, `'` for .ps1/.vb, `REM`) comes before it on the same line, outside a string literal; text like the UI label `'TODO còn mở'` never counts | above it. `todo_max = -1` ⇒ `warn`/`pass`, report only. Shows the top 20 `file:line` |
 
 `green` = no item is in `fail` / `timeout` / `untrusted` / `running`, and no required check is `stale` / `pending`. Item states: `pass | fail | warn | skip | running | untrusted | timeout | stale | pending`.
 

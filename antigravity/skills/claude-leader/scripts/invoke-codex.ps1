@@ -20,6 +20,8 @@ param(
     [ValidateSet("", "low", "medium", "high", "xhigh")]
     [string]$EffortOverride = "",
 
+    [string]$ResumeId = "",
+
     [switch]$UseWorktree
 )
 
@@ -100,13 +102,26 @@ try {
         $Prompt = Add-ReviewerContract -Prompt $Prompt
     }
 
-    $argsList = @(
-        "exec",
-        "--ephemeral",
-        "--json",
-        "--skip-git-repo-check",
-        "-C", $WorkDir
-    )
+    if ($ResumeId) {
+        $argsList = @(
+            "exec",
+            "resume",
+            $ResumeId,
+            "--json",
+            "--skip-git-repo-check",
+            "-C", $WorkDir
+        )
+    } else {
+        $argsList = @("exec")
+        if ($Role -in @("review-diff", "critic") -or $env:MAW_PERSIST_SESSION -ne "1") {
+            $argsList += "--ephemeral"
+        }
+        $argsList += @(
+            "--json",
+            "--skip-git-repo-check",
+            "-C", $WorkDir
+        )
+    }
 
     if ($Role -in @("review-diff", "critic")) {
         $argsList += @("-s", "read-only")
@@ -128,9 +143,10 @@ try {
     $effectiveEffort = if ($EffortOverride) { $EffortOverride } else { "high" }
     Write-Output "[$(Get-Date -Format 'HH:mm:ss')] Invoking OpenAI Codex (Role: $Role | Model: $effectiveModel | Effort: $effectiveEffort | WorkDir: $WorkDir)..."
 
-    $capturedText  = [System.Collections.Generic.List[string]]::new()
-    $realInTokens  = 0
-    $realOutTokens = 0
+    $capturedText       = [System.Collections.Generic.List[string]]::new()
+    $realInTokens       = 0
+    $realCachedInTokens = 0
+    $realOutTokens      = 0
 
     $Prompt | & $codexExe @argsList - 2>&1 | ForEach-Object {
         $rawLine = $_.ToString()
@@ -165,9 +181,16 @@ try {
                     if ($ev.usage) {
                         $realInTokens  = [int]$ev.usage.input_tokens
                         $realOutTokens = [int]$ev.usage.output_tokens
+                        $realCachedInTokens = if ($null -ne $ev.usage.cached_input_tokens) {
+                            [int]$ev.usage.cached_input_tokens
+                        } elseif ($ev.usage.input_tokens_details -and $null -ne $ev.usage.input_tokens_details.cached_tokens) {
+                            [int]$ev.usage.input_tokens_details.cached_tokens
+                        } else {
+                            0
+                        }
                     }
-                    $estCost = [Math]::Round(($realInTokens * 2.5 + $realOutTokens * 10.0) / 1000000.0, 5)
-                    Write-Output "`n[Completed | Tokens: $realInTokens in / $realOutTokens out | Cost: `$$estCost]"
+                    $estCost = Get-MawTokenCostUsd -Model $effectiveModel -Tool "codex" -InputTokens $realInTokens -CachedInputTokens $realCachedInTokens -OutputTokens $realOutTokens
+                    Write-Output "`n[Completed | Tokens: $realInTokens in ($realCachedInTokens cached) / $realOutTokens out | Cost: `$$estCost]"
                 }
             }
         } catch {
@@ -176,11 +199,6 @@ try {
     }
 
     try {
-        $auditFile = Join-Path $env:USERPROFILE ".gemini\antigravity\multi-ai-audit.jsonl"
-        $auditDir = Split-Path -Parent $auditFile
-        if (-not (Test-Path -LiteralPath $auditDir)) {
-            New-Item -ItemType Directory -Path $auditDir -Force | Out-Null
-        }
         $fullOut = ($capturedText -join "`n")
         $vr = Get-ReviewVerdict -Text $fullOut
         $effectiveRole = if ($env:MAW_ROLE) { $env:MAW_ROLE } else { $Role }
@@ -194,26 +212,27 @@ try {
         $score = $vr.Score
         if ($realInTokens -le 0)  { $realInTokens  = [Math]::Max(1, [int][Math]::Ceiling($Prompt.Length / 3.8)) }
         if ($realOutTokens -le 0) { $realOutTokens = [Math]::Max(1, [int][Math]::Ceiling($fullOut.Length / 3.8)) }
-        $costUsd = [Math]::Round(($realInTokens * 2.5 + $realOutTokens * 10.0) / 1000000.0, 5)
+        $costUsd = Get-MawTokenCostUsd -Model $effectiveModel -Tool "codex" -InputTokens $realInTokens -CachedInputTokens $realCachedInTokens -OutputTokens $realOutTokens
         $auditEntry = [ordered]@{
-            Timestamp    = (Get-Date).ToString("o")
-            Tool         = "codex"
-            Role         = $effectiveRole
-            Model        = $effectiveModel
-            Effort       = $effectiveEffort
-            WorkDir      = $WorkDir
-            PromptChars  = $Prompt.Length
-            OutputChars  = $fullOut.Length
-            InputTokens  = $realInTokens
-            OutputTokens = $realOutTokens
-            CostUsd      = $costUsd
-            Score        = $score
-            Verdict      = $verdict
+            Timestamp         = (Get-Date).ToString("o")
+            Tool              = "codex"
+            Role              = $effectiveRole
+            Model             = $effectiveModel
+            Effort            = $effectiveEffort
+            WorkDir           = $WorkDir
+            PromptChars       = $Prompt.Length
+            OutputChars       = $fullOut.Length
+            InputTokens       = $realInTokens
+            CachedInputTokens = $realCachedInTokens
+            OutputTokens      = $realOutTokens
+            CostUsd           = $costUsd
+            Score             = $score
+            Verdict           = $verdict
         }
         if ($env:MAW_AGENT) {
             $auditEntry["Agent"] = $env:MAW_AGENT
         }
-        $auditEntry | ConvertTo-Json -Compress | Add-Content -Path $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue
+        Write-MawAuditEntry -Entry $auditEntry | Out-Null
     } catch {}
 } finally {
     Pop-Location

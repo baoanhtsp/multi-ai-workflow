@@ -1,4 +1,28 @@
 BeforeAll {
+    $script:origMawHome = $env:MAW_HOME
+    $script:origUserProfile = $env:USERPROFILE
+    $script:origTemp = $env:TEMP
+    $script:origTmp = $env:TMP
+    $script:origMawTest = $env:MAW_TEST
+    $script:origSkipHealth = $env:MAW_SKIP_HEALTH
+    $script:origRuntime = $env:MAW_S4_RUNTIME
+
+    $script:isolatedBase = Join-Path ([System.IO.Path]::GetTempPath()) ("maw-invagent-iso-" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+    $script:isoMaw = Join-Path $script:isolatedBase ".maw"
+    $script:isoUser = Join-Path $script:isolatedBase "user"
+    $script:isoTemp = Join-Path $script:isolatedBase "tmp"
+    New-Item -ItemType Directory -Path $script:isoMaw -Force | Out-Null
+    New-Item -ItemType Directory -Path $script:isoUser -Force | Out-Null
+    New-Item -ItemType Directory -Path $script:isoTemp -Force | Out-Null
+
+    $env:MAW_HOME = $script:isoMaw
+    $env:USERPROFILE = $script:isoUser
+    $env:TEMP = $script:isoTemp
+    $env:TMP = $script:isoTemp
+    $env:MAW_TEST = "1"
+    $env:MAW_SKIP_HEALTH = "1"
+    $env:MAW_S4_RUNTIME = Join-Path $script:isolatedBase "nonexistent-runtime.json"
+
     $repoRoot = Split-Path -Parent $PSScriptRoot
     $script:invokeAgentPath = Join-Path $repoRoot "antigravity\skills\claude-leader\scripts\invoke-agent.ps1"
     $script:invokeCliPath   = Join-Path $repoRoot "antigravity\skills\claude-leader\scripts\invoke-cli-agent.ps1"
@@ -6,6 +30,19 @@ BeforeAll {
     $script:scriptsDir      = Join-Path $repoRoot "antigravity\skills\claude-leader\scripts"
     $script:repoRoot = $repoRoot
     . $script:registryLibPath
+}
+
+AfterAll {
+    if ($null -eq $script:origMawHome) { Remove-Item Env:\MAW_HOME -ErrorAction SilentlyContinue } else { $env:MAW_HOME = $script:origMawHome }
+    if ($null -eq $script:origUserProfile) { Remove-Item Env:\USERPROFILE -ErrorAction SilentlyContinue } else { $env:USERPROFILE = $script:origUserProfile }
+    if ($null -eq $script:origTemp) { Remove-Item Env:\TEMP -ErrorAction SilentlyContinue } else { $env:TEMP = $script:origTemp }
+    if ($null -eq $script:origTmp) { Remove-Item Env:\TMP -ErrorAction SilentlyContinue } else { $env:TMP = $script:origTmp }
+    if ($null -eq $script:origMawTest) { Remove-Item Env:\MAW_TEST -ErrorAction SilentlyContinue } else { $env:MAW_TEST = $script:origMawTest }
+    if ($null -eq $script:origSkipHealth) { Remove-Item Env:\MAW_SKIP_HEALTH -ErrorAction SilentlyContinue } else { $env:MAW_SKIP_HEALTH = $script:origSkipHealth }
+    if ($null -eq $script:origRuntime) { Remove-Item Env:\MAW_S4_RUNTIME -ErrorAction SilentlyContinue } else { $env:MAW_S4_RUNTIME = $script:origRuntime }
+    if ($script:isolatedBase -and (Test-Path -LiteralPath $script:isolatedBase)) {
+        Remove-Item -LiteralPath $script:isolatedBase -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Describe "invoke-agent.ps1 Unified Role Dispatcher (SPEC section 5)" {
@@ -538,5 +575,115 @@ Describe "v4.0 Agent Registry (lib/maw-registry.ps1) & CLI Adapter (invoke-cli-a
             }
             Remove-Item -LiteralPath $tmpHooks -Recurse -Force -ErrorAction SilentlyContinue
         }
+    }
+
+    It "supports hook string pass-through, PrependPrompt, and Suggest (HOOK_BLOCKED_SUGGEST) in invoke-agent.ps1 (D14)" {
+        $tmpHooks = Join-Path $env:TEMP ("maw_hooks_d14_" + [guid]::NewGuid().ToString("N"))
+        $beforeAgentDir = Join-Path $tmpHooks "before-agent"
+        New-Item -ItemType Directory -Path $beforeAgentDir -Force | Out-Null
+        $prevHooksDir = $env:MAW_HOOKS_DIR
+        try {
+            $utf8 = New-Object System.Text.UTF8Encoding($false)
+            [System.IO.File]::WriteAllText((Join-Path $beforeAgentDir "10-prep.ps1"), 'Write-Output "[S4] budget warning: 80% used"; @{ Block = $false; PrependPrompt = "<!-- INJECTED_POLICY_HEADER -->" }', $utf8)
+            $env:MAW_HOOKS_DIR = $tmpHooks
+
+            $outPrep = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:invokeAgentPath `
+                -Agent claude `
+                -Role backend `
+                -WorkDir $script:repoRoot `
+                -Prompt "Check prepend and string pass-through" `
+                -DryRun 2>&1
+            $LASTEXITCODE | Should -Be 0
+            $prepText = ($outPrep | Out-String)
+            $prepText | Should -Match "\[S4\] budget warning: 80% used"
+            $prepText | Should -Match "<!-- INJECTED_POLICY_HEADER -->"
+
+            # Now add a blocking hook with Suggest
+            [System.IO.File]::WriteAllText((Join-Path $beforeAgentDir "20-suggest.ps1"), '@{ Block = $true; Reason = "Cooldown active"; Suggest = "codex" }', $utf8)
+            $outSug = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:invokeAgentPath `
+                -Agent claude `
+                -Role backend `
+                -WorkDir $script:repoRoot `
+                -Prompt "Check suggest block" `
+                -DryRun 2>&1
+            $LASTEXITCODE | Should -Be 5
+            $sugText = ($outSug | Out-String)
+            $sugText | Should -Match "HOOK_BLOCKED \(before-agent\): Cooldown active"
+            $sugText | Should -Match "HOOK_BLOCKED_SUGGEST: codex"
+        } finally {
+            if ($null -eq $prevHooksDir) {
+                Remove-Item Env:\MAW_HOOKS_DIR -ErrorAction SilentlyContinue
+            } else {
+                $env:MAW_HOOKS_DIR = $prevHooksDir
+            }
+            Remove-Item -LiteralPath $tmpHooks -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "preserves strict line ordering for 200 sequential lines in invoke-cli-agent.ps1 (D15)" {
+        $tmpMaw = Join-Path $env:TEMP ("maw_cli_order_" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $tmpMaw -Force | Out-Null
+        $prevMaw = $env:MAW_HOME
+        try {
+            $env:MAW_HOME = $tmpMaw
+            $orderJson = @{
+                version = 1
+                agents  = @(
+                    @{
+                        id           = "order-test-ai"
+                        label        = "Order Test AI"
+                        color        = "#123456"
+                        enabled      = $true
+                        adapter      = "cli"
+                        detect       = @{ command = "powershell.exe"; version_args = @() }
+                        models       = @("auto")
+                        efforts      = @()
+                        capabilities = @{ write = $true; review = $true; new_session = $false; sessions = $false; ide_send = $false }
+                        cli          = @{
+                            command     = "powershell.exe"
+                            prompt_via  = "stdin"
+                            args        = @("-NoProfile", "-Command", '1..200 | ForEach-Object { [Console]::Out.WriteLine(("LINE_{0:D3}" -f $_)) }')
+                            role_args   = @{}
+                            model_args  = @()
+                            effort_args = @()
+                            output      = "text"
+                        }
+                    }
+                )
+            } | ConvertTo-Json -Depth 8
+            [System.IO.File]::WriteAllText((Join-Path $tmpMaw "agents.json"), $orderJson, (New-Object System.Text.UTF8Encoding($false)))
+
+            $outLines = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:invokeCliPath `
+                -AgentId "order-test-ai" `
+                -Role "backend" `
+                -WorkDir $tmpMaw `
+                -Prompt "Print 200 ordered lines" 2>&1
+            $LASTEXITCODE | Should -Be 0
+            $matched = @($outLines | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ -match '^LINE_\d{3}$' })
+            $matched.Count | Should -Be 200
+            for ($i = 1; $i -le 200; $i++) {
+                $expected = ("LINE_{0:D3}" -f $i)
+                $matched[$i - 1] | Should -BeExactly $expected
+            }
+        } finally {
+            $env:MAW_HOME = $prevMaw
+            Remove-Item -LiteralPath $tmpMaw -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "forwards -ResumeId across claude, codex, antigravity, and cli adapters (C11)" {
+        $outClaude = & $script:invokeAgentPath -Agent claude -Role backend -WorkDir $script:repoRoot -ResumeId "sess-claude-1" -Prompt "Resume claude" -DryRun 2>&1
+        ($outClaude | Out-String) | Should -Match '-ResumeId sess-claude-1'
+
+        $outCodex = & $script:invokeAgentPath -Agent codex -Role backend -WorkDir $script:repoRoot -ResumeId "sess-codex-2" -Prompt "Resume codex" -DryRun 2>&1
+        ($outCodex | Out-String) | Should -Match '-ResumeId sess-codex-2'
+
+        $outAgy = & $script:invokeAgentPath -Agent antigravity -Role backend -WorkDir $script:repoRoot -ResumeId "conv-agy-3" -Prompt "Resume agy" -DryRun 2>&1
+        $agyText = ($outAgy | Out-String)
+        $agyText | Should -Match '-Action send\b'
+        $agyText | Should -Match '-ConversationId conv-agy-3'
+
+        $outCli = & $script:invokeCliPath -AgentId gemini -Role backend -WorkDir $script:repoRoot -ResumeId "sess-gem-4" -Prompt "Resume gemini" -DryRun 2>&1
+        ($outCli | Out-String) | Should -Match '"--resume","sess-gem-4"'
     }
 }

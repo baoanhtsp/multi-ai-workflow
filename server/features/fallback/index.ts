@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createFeatureContext, type MawFeature, type MawFeatureContext } from '../../lib/feature.ts';
+import { logServerError } from '../../lib/logger.ts';
 import { resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { detectRegistryAgents } from '../../lib/versions.ts';
@@ -660,10 +661,20 @@ async function processDueItems(ctx: MawFeatureContext): Promise<void> {
 export function ensureEngine(ctx: MawFeatureContext): void {
   if (!engineInterval) {
     engineInterval = setInterval(() => {
-      const freshCtx = createFeatureContext(ctx.paths);
-      scanFinishedJobs(freshCtx)
-        .then(() => syncAttentionToInbox(freshCtx).catch(() => {}))
-        .catch(() => {});
+      try {
+        const freshCtx = createFeatureContext(ctx.paths);
+        scanFinishedJobs(freshCtx)
+          .then(() =>
+            syncAttentionToInbox(freshCtx).catch((err) => {
+              logServerError('fallback:syncAttentionToInbox', err, ctx.paths.mawHome);
+            })
+          )
+          .catch((err) => {
+            logServerError('fallback:scanFinishedJobs', err, ctx.paths.mawHome);
+          });
+      } catch (err) {
+        logServerError('fallback:ensureEngine', err, ctx.paths.mawHome);
+      }
     }, 5000);
     engineInterval.unref();
   }

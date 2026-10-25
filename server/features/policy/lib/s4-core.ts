@@ -135,7 +135,29 @@ export function writeJsonAtomic(filePath: string, data: unknown): void {
   const tmpFile = `${filePath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
   const content = JSON.stringify(data, null, 2);
   fs.writeFileSync(tmpFile, content, 'utf8');
-  fs.renameSync(tmpFile, filePath);
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      fs.renameSync(tmpFile, filePath);
+      return;
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code;
+      if ((code === 'EPERM' || code === 'EACCES' || code === 'EBUSY') && attempt < 4) {
+        const end = Date.now() + 15 * (attempt + 1);
+        while (Date.now() < end) {
+          // Short backoff for Windows concurrent reader/rename contention
+        }
+        continue;
+      }
+      try {
+        if (fs.existsSync(tmpFile)) {
+          fs.unlinkSync(tmpFile);
+        }
+      } catch {
+        // ignore cleanup error
+      }
+      throw err;
+    }
+  }
 }
 
 export function appendJsonl(filePath: string, data: unknown): void {
@@ -152,13 +174,22 @@ export function appendS4Audit(
   action: string,
   details: Record<string, unknown>
 ): void {
-  const auditFile = path.win32.join(featureDir, 'audit.jsonl');
-  appendJsonl(auditFile, {
-    ts: new Date().toISOString(),
+  const ts = new Date().toISOString();
+  const entry = {
+    ts,
+    timestamp: ts,
+    feature: path.basename(featureDir),
     action,
     by: 'dashboard',
     details,
-  });
+  };
+  const auditFile = path.win32.join(featureDir, 'audit.jsonl');
+  appendJsonl(auditFile, entry);
+  const parentDir = path.dirname(featureDir);
+  if (path.basename(parentDir).toLowerCase() === 'data') {
+    const sharedAudit = path.win32.join(path.dirname(parentDir), 'audit.jsonl');
+    appendJsonl(sharedAudit, entry);
+  }
 }
 
 export function readJsonSafe<T>(filePath: string, fallback: T): { data: T; warning?: string } {
@@ -191,16 +222,16 @@ export function createAttentionId(ts: string, kind: string, jobId?: string, scop
 export function createDefaultBudgetConfig(): BudgetConfig {
   return {
     version: 1,
-    enabled: true,
+    enabled: false,
     caps: {
-      job: { usd: { warn: 1.0, block: 2.0 }, tokens: { warn: 0, block: 0 } },
-      team_run: { usd: { warn: 3.0, block: 5.0 } },
-      day: { usd: { warn: 10.0, block: 20.0 }, tokens: { warn: 0, block: 4000000 } },
+      job: { usd: { warn: 5.0, block: 15.0 }, tokens: { warn: 0, block: 0 } },
+      team_run: { usd: { warn: 15.0, block: 40.0 } },
+      day: { usd: { warn: 50.0, block: 150.0 }, tokens: { warn: 0, block: 0 } },
       project: { usd: { warn: 0, block: 0 }, period: 'month' },
       agent_day: { usd: { warn: 0, block: 0 } },
     },
     projects: {},
-    estimate_next_call: true,
+    estimate_next_call: false,
   };
 }
 
@@ -261,7 +292,7 @@ export function validateBudgetConfig(raw: unknown): {
   const validatedCaps: BudgetConfig['caps'] = {
     job: { usd: { warn: 0, block: 0 }, tokens: { warn: 0, block: 0 } },
     team_run: { usd: { warn: 0, block: 0 } },
-    day: { usd: { warn: 10.0, block: 0 }, tokens: { warn: 0, block: 0 } },
+    day: { usd: { warn: 50.0, block: 0 }, tokens: { warn: 0, block: 0 } },
     project: { usd: { warn: 0, block: 0 }, period: 'month' },
     agent_day: { usd: { warn: 0, block: 0 } },
   };

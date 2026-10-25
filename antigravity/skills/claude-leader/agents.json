@@ -52,9 +52,14 @@
         "claude-haiku-4-5"
       ],
       "efforts": ["low", "medium", "high", "xhigh", "max"],
-      "login_cmd": ["claude", "/login"],
+      "login_cmd": ["claude", "auth", "login"],
       "status_cmd": ["claude", "auth", "status"],
       "resume_args": ["--resume", "{session_id}"],
+      "context_window": 200000,
+      "policy_args": {
+        "deny_Write": ["--disallowedTools", "Write,Edit"],
+        "deny_Bash": ["--disallowedTools", "Bash"]
+      },
       "capabilities": {
         "write": true,
         "review": true,
@@ -89,6 +94,10 @@
       "login_cmd": ["codex", "login"],
       "status_cmd": ["codex", "login", "status"],
       "resume_args": ["exec", "resume", "{session_id}"],
+      "context_window": 272000,
+      "policy_args": {
+        "read_only": ["-s", "read-only"]
+      },
       "capabilities": {
         "write": true,
         "review": true,
@@ -119,6 +128,7 @@
       "login_cmd": null,
       "status_cmd": null,
       "resume_args": null,
+      "context_window": 1000000,
       "capabilities": {
         "write": true,
         "review": true,
@@ -143,6 +153,10 @@
       "login_cmd": ["gemini"],
       "status_cmd": null,
       "resume_args": ["--resume", "{session_id}"],
+      "context_window": 1000000,
+      "policy_args": {
+        "read_only": ["--approval-mode", "plan"]
+      },
       "capabilities": {
         "write": true,
         "review": true,
@@ -189,8 +203,9 @@
       "models": ["auto"],
       "efforts": [],
       "login_cmd": ["cursor-agent", "login"],
-      "status_cmd": null,
+      "status_cmd": ["cursor-agent", "status"],
       "resume_args": null,
+      "context_window": 200000,
       "capabilities": {
         "write": true,
         "review": true,
@@ -233,6 +248,7 @@
       "login_cmd": null,
       "status_cmd": null,
       "resume_args": null,
+      "context_window": 128000,
       "capabilities": {
         "write": true,
         "review": true,

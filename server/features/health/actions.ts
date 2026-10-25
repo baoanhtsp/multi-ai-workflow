@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadInternalNotifyConfig } from '../../actions/notify.ts';
-import type { MawFeatureContext, MawFeatureRequest } from '../../lib/feature.ts';
+import {
+  appendActionAudit,
+  type MawFeatureContext,
+  type MawFeatureRequest,
+} from '../../lib/feature.ts';
 import { isDirectorySafe, isFileSafe } from '../../lib/paths.ts';
 import { isProcessRunning, runCommand } from '../../lib/proc.ts';
 import type { AgentEntry } from '../../lib/registry.ts';
@@ -251,20 +255,13 @@ export async function handleLoginOpen(
     throw new Error(`Failed to open login terminal: ${execRes.stderr || execRes.stdout || 'Unknown error'}`);
   }
 
-  // Write audit line in data/health/audit.jsonl
-  try {
-    const dataDir = ctx.paths.featureDataDir('health');
-    const auditFile = path.win32.join(dataDir, 'audit.jsonl');
-    const line = JSON.stringify({
-      ts: new Date().toISOString(),
-      action: 'login_open',
-      agent: rawAgent,
-      pid: pidNum,
-    }) + '\n';
-    fs.appendFileSync(auditFile, line, 'utf8');
-  } catch {
-    // Ignore audit write error
-  }
+  // Write action audit ($MAW_HOME/audit.jsonl + data/health/audit.jsonl)
+  appendActionAudit(ctx.paths, {
+    feature: 'health',
+    action: 'login_open',
+    agent: rawAgent,
+    pid: pidNum,
+  });
 
   const platform = agentEntry.adapter || agentEntry.cli?.command || rawAgent;
   return {

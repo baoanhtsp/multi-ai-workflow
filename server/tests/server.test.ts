@@ -7,20 +7,26 @@ import path from 'node:path';
 import { spawn, execFile } from 'node:child_process';
 
 import {
+  getRealSystemPaths,
   resolveServerPaths,
   resolveProjectPath,
   trimIncompleteUtf8Tail,
 } from '../lib/paths.ts';
+import { appendAuditEntry } from '../lib/audit.ts';
 import { buildCommandSpec } from '../lib/commands.ts';
 import { loadAgentRegistry, resolveAgentOwnersFromCell } from '../lib/registry.ts';
 import { buildValidatedCommand, ApiValidationError } from '../lib/validate.ts';
+import { handleDispatch } from '../actions/dispatch.ts';
 import {
   getPublicNotifyConfig,
   handleSaveNotify,
   loadInternalNotifyConfig,
 } from '../actions/notify.ts';
 import { createMawHttpServer } from '../http.ts';
-import { type MawFeature } from '../lib/feature.ts';
+import { createFeatureContext, type MawFeature } from '../lib/feature.ts';
+import { runCommand } from '../lib/proc.ts';
+import { handleGitBranchCreate } from '../features/worktrees/gitActions.ts';
+import { createCard, deleteCard } from '../features/tasks/store.ts';
 
 const repoRoot = path.resolve(import.meta.dirname, '..', '..');
 
@@ -1486,7 +1492,7 @@ test('F0 plugin foundation: feature loader (hello fixture), route security, stat
     const cursorAgent = statusJson.agents.find((a) => a.id === 'cursor');
     const aiderAgent = statusJson.agents.find((a) => a.id === 'aider');
 
-    assert.deepEqual(claudeAgent?.login_cmd, ['claude', '/login']);
+    assert.deepEqual(claudeAgent?.login_cmd, ['claude', 'auth', 'login']);
     assert.deepEqual(claudeAgent?.status_cmd, ['claude', 'auth', 'status']);
     assert.deepEqual(claudeAgent?.resume_args, ['--resume', '{session_id}']);
     assert.ok(claudeAgent?.version && claudeAgent.version.length > 0, 'claude version should be populated');
@@ -1502,6 +1508,129 @@ test('F0 plugin foundation: feature loader (hello fixture), route security, stat
     assert.equal(aiderAgent?.login_cmd, null);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    cleanup();
+  }
+});
+
+test('H6: dispatch writes AI row to paths.auditFile while worktree and task actions write only to $MAW_HOME/audit.jsonl', async () => {
+  const { tempDir, cleanup } = makeTempEnv();
+  const prevMawHome = process.env.MAW_HOME;
+  try {
+    const projectDir = path.win32.join(tempDir, 'projects', 'h6-repo');
+    const customTmpDir = path.win32.join(tempDir, 'tmp');
+    fs.mkdirSync(projectDir, { recursive: true });
+    fs.mkdirSync(customTmpDir, { recursive: true });
+    await runCommand('git', ['init'], { cwd: projectDir });
+    await runCommand('git', ['config', 'user.email', 'test@example.com'], { cwd: projectDir });
+    await runCommand('git', ['config', 'user.name', 'Test User'], { cwd: projectDir });
+    fs.writeFileSync(path.win32.join(projectDir, 'README.md'), '# H6\n', 'utf8');
+    await runCommand('git', ['add', 'README.md'], { cwd: projectDir });
+    await runCommand('git', ['commit', '-m', 'init'], { cwd: projectDir });
+
+    const paths = resolveServerPaths({
+      userProfile: tempDir,
+      mawHome: path.win32.join(tempDir, '.maw'),
+      projectsRoot: path.win32.join(tempDir, 'projects'),
+      tempDir: path.win32.join(tempDir, 'tmp'),
+      repoRoot,
+    });
+    process.env.MAW_HOME = paths.mawHome;
+
+    // Replace invoke-antigravity.ps1 in temp scriptsDir with a lightweight stub
+    const stubAgy = path.win32.join(paths.scriptsDir, 'invoke-antigravity.ps1');
+    fs.writeFileSync(stubAgy, 'Write-Output "Dispatched to Antigravity stub"\nexit 0\n', 'utf8');
+
+    // 1. Dispatch in temp profile -> adds 1 Tool: antigravity row to paths.auditFile
+    const dispatchRes = await handleDispatch(
+      {
+        mode: 'antigravity',
+        role: 'send-latest',
+        execute_antigravity: true,
+        project_path: projectDir,
+        prompt: 'H6 verification prompt',
+      },
+      paths
+    );
+    assert.equal(dispatchRes.ok, true);
+    assert.equal(dispatchRes.dispatched, true);
+
+    // 2. Perform a worktree action and a task action
+    const ctx = createFeatureContext(paths);
+    const branchRes = await handleGitBranchCreate(ctx, {
+      project_path: projectDir,
+      name: 'feat/h6-branch',
+      switch: false,
+    });
+    assert.equal(branchRes.ok, true);
+
+    const card = await createCard(ctx, {
+      title: 'H6 Task Card',
+      project_path: projectDir,
+      mode: 'task',
+      agent: 'claude',
+      role: 'backend',
+      prompt: 'Do H6 task',
+    });
+    await deleteCard(ctx, card.id);
+
+    // Verify paths.auditFile has ONLY the 1 Tool: antigravity AI row (0 action rows)
+    assert.ok(fs.existsSync(paths.auditFile), 'Temp profile AI audit log should exist');
+    const aiRows = fs
+      .readFileSync(paths.auditFile, 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    assert.equal(aiRows.length, 1, 'paths.auditFile must contain only 1 AI call row');
+    assert.equal(aiRows[0]!.Tool, 'antigravity');
+
+    // Verify $MAW_HOME/audit.jsonl has the worktree and task action rows (and 0 AI rows)
+    const mawAuditFile = path.win32.join(paths.mawHome, 'audit.jsonl');
+    assert.ok(fs.existsSync(mawAuditFile), '$MAW_HOME/audit.jsonl should exist');
+    const actionRows = fs
+      .readFileSync(mawAuditFile, 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    assert.ok(
+      actionRows.some((r) => r.Action === 'git_branch_create'),
+      '$MAW_HOME/audit.jsonl must include worktree git_branch_create action'
+    );
+    assert.ok(
+      actionRows.some((r) => r.Action === 'task_delete'),
+      '$MAW_HOME/audit.jsonl must include task_delete action'
+    );
+    assert.equal(
+      actionRows.some((r) => r.Tool === 'antigravity'),
+      false,
+      '$MAW_HOME/audit.jsonl must not contain AI call rows'
+    );
+
+    // 3. Verify H6.1 guard: appendAuditEntry refuses real audit file in test context
+    const realAuditFile = path.win32.join(
+      getRealSystemPaths().userProfile,
+      '.gemini',
+      'antigravity',
+      'multi-ai-audit.jsonl'
+    );
+    const beforeSize = fs.existsSync(realAuditFile) ? fs.statSync(realAuditFile).size : -1;
+    appendAuditEntry(realAuditFile, {
+      Timestamp: new Date().toISOString(),
+      Tool: 'antigravity',
+      Role: 'send-latest',
+    });
+    const afterSize = fs.existsSync(realAuditFile) ? fs.statSync(realAuditFile).size : -1;
+    assert.equal(afterSize, beforeSize, 'Real AI audit log must not be modified in test context');
+    const errLogFile = path.win32.join(paths.mawHome, 'logs', 'server.log');
+    assert.ok(fs.existsSync(errLogFile), 'logServerError should record refused write in server.log');
+    assert.match(fs.readFileSync(errLogFile, 'utf8'), /\[audit:appendAuditEntry\]/);
+  } finally {
+    if (prevMawHome === undefined) {
+      delete process.env.MAW_HOME;
+    } else {
+      process.env.MAW_HOME = prevMawHome;
+    }
     cleanup();
   }
 });

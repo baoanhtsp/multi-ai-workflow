@@ -16,7 +16,9 @@ param(
 
     [string]$ModelOverride = "",
 
-    [string]$EffortOverride = ""
+    [string]$EffortOverride = "",
+
+    [string]$ResumeId = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,7 +90,15 @@ $commonFlags = @(
     "--exclude-dynamic-system-prompt-sections"
 )
 
-$sessionFlag = if ($ContinueSession) { "--continue" } else { "--no-session-persistence" }
+$sessionFlags = if ($ResumeId) {
+    @("--resume", $ResumeId)
+} elseif ($ContinueSession) {
+    @("--continue")
+} elseif ($Role -ne "reviewer" -and $env:MAW_PERSIST_SESSION -eq "1") {
+    @()
+} else {
+    @("--no-session-persistence")
+}
 
 switch ($Role) {
     "architect" {
@@ -101,9 +111,8 @@ switch ($Role) {
             "--add-dir", $WorkDir,
             "--append-system-prompt", "CRITICAL: Only Read, Edit, and Write tools are enabled. Do NOT use Grep, Glob, or Bash. Use the provided workspace snapshot to read key config files and write/update SPEC.md directly.",
             "--permission-mode", "bypassPermissions",
-            "--dangerously-skip-permissions",
-            $sessionFlag
-        )
+            "--dangerously-skip-permissions"
+        ) + $sessionFlags
     }
     "leader" {
         $model  = if ($ModelOverride) { $ModelOverride } else { "opus" }
@@ -115,9 +124,8 @@ switch ($Role) {
             "--add-dir", $WorkDir,
             "--append-system-prompt", "CRITICAL: You are the Multi-AI Team Leader. Use Read, Edit, Write, and Bash to lock SPEC.md, delegate tasks via invoke-agent.ps1, run invoke-spec-guard.ps1, and verify results.",
             "--permission-mode", "bypassPermissions",
-            "--dangerously-skip-permissions",
-            $sessionFlag
-        )
+            "--dangerously-skip-permissions"
+        ) + $sessionFlags
     }
     "backend" {
         $model  = if ($ModelOverride) { $ModelOverride } else { "sonnet" }
@@ -129,9 +137,8 @@ switch ($Role) {
             "--add-dir", $WorkDir,
             "--append-system-prompt", "CRITICAL: Read SPEC.md first and strictly obey its File Ownership Matrix. Do NOT edit SPEC.md or frontend UI files.",
             "--permission-mode", "bypassPermissions",
-            "--dangerously-skip-permissions",
-            $sessionFlag
-        )
+            "--dangerously-skip-permissions"
+        ) + $sessionFlags
     }
     "frontend" {
         $model  = if ($ModelOverride) { $ModelOverride } else { "sonnet" }
@@ -143,9 +150,8 @@ switch ($Role) {
             "--add-dir", $WorkDir,
             "--append-system-prompt", "CRITICAL: Only Read, Edit, and Write tools are enabled. Do NOT use Grep, Glob, or Bash. Work only on the exact file paths specified in the prompt.",
             "--permission-mode", "bypassPermissions",
-            "--dangerously-skip-permissions",
-            $sessionFlag
-        )
+            "--dangerously-skip-permissions"
+        ) + $sessionFlags
     }
     "reviewer" {
         $model  = if ($ModelOverride) { $ModelOverride } else { "sonnet" }
@@ -157,9 +163,8 @@ switch ($Role) {
             "--add-dir", $WorkDir,
             "--append-system-prompt", "CRITICAL: Do NOT use Grep, Glob, Bash, Edit, or Write. Grade and review directly using the code/diff provided in the prompt. Finish with exact two lines: SCORE: X/10 and VERDICT: APPROVED or VERDICT: CHANGES_REQUESTED.",
             "--permission-mode", "bypassPermissions",
-            "--dangerously-skip-permissions",
-            $sessionFlag
-        )
+            "--dangerously-skip-permissions"
+        ) + $sessionFlags
     }
     "ui-tweak" {
         $model  = if ($ModelOverride) { $ModelOverride } else { "haiku" }
@@ -171,9 +176,8 @@ switch ($Role) {
             "--add-dir", $WorkDir,
             "--append-system-prompt", "CRITICAL: Only Read, Edit, and Write tools are enabled. Do NOT use Grep, Glob, or Bash. Work only on the exact file paths specified in the prompt.",
             "--permission-mode", "bypassPermissions",
-            "--dangerously-skip-permissions",
-            $sessionFlag
-        )
+            "--dangerously-skip-permissions"
+        ) + $sessionFlags
     }
 }
 
@@ -215,6 +219,7 @@ try {
     $realInTokens  = 0
     $realOutTokens = 0
     $realCostUsd   = 0.0
+    $emittedSessionId = $false
 
     $Prompt | & $claudeExe @allArgs 2>&1 | ForEach-Object {
         $rawLine = $_.ToString()
@@ -224,6 +229,10 @@ try {
         }
         try {
             $ev = $rawLine | ConvertFrom-Json -ErrorAction Stop
+            if (-not $emittedSessionId -and $null -ne $ev.session_id -and ([string]$ev.session_id).Trim()) {
+                Write-Output ((@{ type = "session"; session_id = ([string]$ev.session_id).Trim() }) | ConvertTo-Json -Compress)
+                $emittedSessionId = $true
+            }
             switch ($ev.type) {
                 "system" {
                     if ($ev.subtype -eq "init") {
@@ -267,11 +276,6 @@ try {
     }
 
     try {
-        $auditFile = Join-Path $env:USERPROFILE ".gemini\antigravity\multi-ai-audit.jsonl"
-        $auditDir = Split-Path -Parent $auditFile
-        if (-not (Test-Path -LiteralPath $auditDir)) {
-            New-Item -ItemType Directory -Path $auditDir -Force | Out-Null
-        }
         $fullOut = ($capturedText -join "`n")
         $vr = Get-ReviewVerdict -Text $fullOut
         $effectiveRole = if ($env:MAW_ROLE) { $env:MAW_ROLE } else { $Role }
@@ -286,11 +290,7 @@ try {
         if ($realInTokens -le 0)  { $realInTokens  = [Math]::Max(1, [int][Math]::Ceiling($Prompt.Length / 3.8)) }
         if ($realOutTokens -le 0) { $realOutTokens = [Math]::Max(1, [int][Math]::Ceiling($fullOut.Length / 3.8)) }
         if ($realCostUsd -le 0) {
-            $rates = if ($resolvedModel -match 'opus') { @{ in = 15.0; out = 75.0 } }
-                     elseif ($resolvedModel -match 'haiku') { @{ in = 0.8; out = 4.0 } }
-                     elseif ($resolvedModel -match 'fable') { @{ in = 6.0; out = 30.0 } }
-                     else { @{ in = 3.0; out = 15.0 } }
-            $realCostUsd = [Math]::Round(($realInTokens * $rates.in + $realOutTokens * $rates.out) / 1000000.0, 5)
+            $realCostUsd = Get-MawTokenCostUsd -Model $resolvedModel -Tool "claude" -InputTokens $realInTokens -OutputTokens $realOutTokens
         }
         $auditEntry = [ordered]@{
             Timestamp    = (Get-Date).ToString("o")
@@ -310,7 +310,7 @@ try {
         if ($env:MAW_AGENT) {
             $auditEntry["Agent"] = $env:MAW_AGENT
         }
-        $auditEntry | ConvertTo-Json -Compress | Add-Content -Path $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue
+        Write-MawAuditEntry -Entry $auditEntry | Out-Null
     } catch {}
 } finally {
     Pop-Location

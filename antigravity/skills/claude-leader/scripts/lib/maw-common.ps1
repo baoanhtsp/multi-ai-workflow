@@ -790,3 +790,131 @@ function Read-TranscriptTurnIncremental {
 
     return $turn
 }
+
+# ==============================================================================
+# 9. Shared Model Pricing & Audit Telemetry Helpers (v5 Hardening H4 / H5)
+# ==============================================================================
+$script:MawModelPricingTable = @{
+    "codex"       = @{ InputRate = 2.50;  CachedInputRate = 0.25;  OutputRate = 10.00 }
+    "gpt-5-codex" = @{ InputRate = 2.50;  CachedInputRate = 0.25;  OutputRate = 10.00 }
+    "gpt-5"       = @{ InputRate = 2.50;  CachedInputRate = 0.25;  OutputRate = 10.00 }
+    "sonnet"      = @{ InputRate = 3.00;  CachedInputRate = 0.30;  OutputRate = 15.00 }
+    "opus"        = @{ InputRate = 15.00; CachedInputRate = 1.50;  OutputRate = 75.00 }
+    "haiku"       = @{ InputRate = 0.80;  CachedInputRate = 0.08;  OutputRate = 4.00  }
+    "fable"       = @{ InputRate = 6.00;  CachedInputRate = 0.60;  OutputRate = 30.00 }
+    "gemini"      = @{ InputRate = 1.25;  CachedInputRate = 0.125; OutputRate = 5.00  }
+    "antigravity" = @{ InputRate = 1.25;  CachedInputRate = 0.125; OutputRate = 5.00  }
+}
+
+function Get-MawModelPricing {
+    param(
+        [string]$Model = "",
+        [string]$Tool = ""
+    )
+
+    $m = if ($Model) { $Model.Trim().ToLowerInvariant() } else { "" }
+    $t = if ($Tool) { $Tool.Trim().ToLowerInvariant() } else { "" }
+
+    if ($m -and $script:MawModelPricingTable.ContainsKey($m)) {
+        return $script:MawModelPricingTable[$m]
+    }
+    if ($m -match 'opus') {
+        return $script:MawModelPricingTable["opus"]
+    }
+    if ($m -match 'haiku') {
+        return $script:MawModelPricingTable["haiku"]
+    }
+    if ($m -match 'fable') {
+        return $script:MawModelPricingTable["fable"]
+    }
+    if ($t -eq 'codex' -or $m -match 'gpt|codex') {
+        return $script:MawModelPricingTable["codex"]
+    }
+    if ($t -eq 'antigravity' -or $t -eq 'gemini' -or $m -match 'gemini') {
+        return $script:MawModelPricingTable["gemini"]
+    }
+    return $script:MawModelPricingTable["sonnet"]
+}
+
+function Get-MawTokenCostUsd {
+    param(
+        [string]$Model = "",
+        [string]$Tool = "",
+        [long]$InputTokens = 0,
+        [long]$CachedInputTokens = 0,
+        [long]$OutputTokens = 0
+    )
+
+    $rates = Get-MawModelPricing -Model $Model -Tool $Tool
+    $totalIn = [Math]::Max([long]0, $InputTokens)
+    $cachedIn = [Math]::Max([long]0, [Math]::Min($totalIn, $CachedInputTokens))
+    $uncachedIn = [Math]::Max([long]0, $totalIn - $cachedIn)
+    $totalOut = [Math]::Max([long]0, $OutputTokens)
+
+    $rawUsd = (($uncachedIn * [double]$rates.InputRate) + ($cachedIn * [double]$rates.CachedInputRate) + ($totalOut * [double]$rates.OutputRate)) / 1000000.0
+    return [Math]::Round($rawUsd, 5)
+}
+
+function Resolve-MawAuditFilePath {
+    param(
+        [string]$AuditFileOverride = ""
+    )
+
+    $candidate = if ($AuditFileOverride -and $AuditFileOverride.Trim() -ne "") {
+        $AuditFileOverride.Trim()
+    } elseif ($env:MAW_AUDIT_FILE -and $env:MAW_AUDIT_FILE.Trim() -ne "") {
+        $env:MAW_AUDIT_FILE.Trim()
+    } else {
+        Join-Path $env:USERPROFILE ".gemini\antigravity\multi-ai-audit.jsonl"
+    }
+
+    if ($env:MAW_TEST -eq "1") {
+        $realProfile = [Environment]::GetFolderPath("UserProfile")
+        if (-not $realProfile -and $env:LOCALAPPDATA) {
+            try {
+                $realProfile = [System.IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA "..\.."))
+            } catch {}
+        }
+        if ($realProfile) {
+            $normRealGemini = ([System.IO.Path]::GetFullPath((Join-Path $realProfile ".gemini"))).TrimEnd('\', '/').ToLowerInvariant()
+            $normCandidate = ""
+            try {
+                $normCandidate = ([System.IO.Path]::GetFullPath($candidate)).TrimEnd('\', '/').ToLowerInvariant()
+            } catch {
+                $normCandidate = $candidate.Replace('/', '\').TrimEnd('\').ToLowerInvariant()
+            }
+            if ($normCandidate -eq $normRealGemini -or $normCandidate.StartsWith("$normRealGemini\")) {
+                Write-Warning "[MAW_TEST=1] Refusing to write audit entry to real user profile path: $candidate"
+                return $null
+            }
+        }
+    }
+
+    return $candidate
+}
+
+function Write-MawAuditEntry {
+    param(
+        [Parameter(Mandatory=$true)]
+        $Entry,
+        [string]$AuditFileOverride = ""
+    )
+
+    $auditFile = Resolve-MawAuditFilePath -AuditFileOverride $AuditFileOverride
+    if (-not $auditFile) {
+        return $false
+    }
+
+    try {
+        $auditDir = Split-Path -Parent $auditFile
+        if ($auditDir -and -not (Test-Path -LiteralPath $auditDir)) {
+            New-Item -ItemType Directory -Path $auditDir -Force | Out-Null
+        }
+        $line = ($Entry | ConvertTo-Json -Compress) + [Environment]::NewLine
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::AppendAllText($auditFile, $line, $utf8NoBom)
+        return $true
+    } catch {
+        return $false
+    }
+}

@@ -1,7 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { MawFeatureContext, MawFeatureRequest } from '../../lib/feature.ts';
-import { isFileSafe } from '../../lib/paths.ts';
+import {
+  appendActionAudit,
+  type MawFeatureContext,
+  type MawFeatureRequest,
+} from '../../lib/feature.ts';
+import { isFileSafe, type ServerPaths } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { generateUnifiedDiff } from './diff.ts';
 import {
@@ -121,19 +125,12 @@ export function validateMcpMutation(
   }
 }
 
-function logMcpAudit(paths: any, action: string, details: Record<string, unknown>): void {
-  try {
-    const dataDir = paths.featureDataDir('mcp');
-    const auditFile = path.win32.join(dataDir, 'audit.jsonl');
-    const line = JSON.stringify({
-      ts: new Date().toISOString(),
-      action,
-      ...details,
-    }) + '\n';
-    fs.appendFileSync(auditFile, line, 'utf8');
-  } catch {
-    // Ignore audit log error
-  }
+function logMcpAudit(paths: ServerPaths, action: string, details: Record<string, unknown>): void {
+  appendActionAudit(paths, {
+    feature: 'mcp',
+    action,
+    ...details,
+  });
 }
 
 export function handleMcpConfig(

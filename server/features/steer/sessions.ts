@@ -65,7 +65,8 @@ export function parseSessionRefFromLog(
     // First "thread_id"\s*:\s*"([^"]+)" or session id:\s*([0-9a-f-]{36})
     const m1 = /"thread_id"\s*:\s*"([^"]+)"/i.exec(logContent);
     const m2 = /session id:\s*([0-9a-f-]{36})/i.exec(logContent);
-    const id = m1 ? m1[1]! : m2 ? m2[1]! : null;
+    const m3 = /(?:OpenAI Codex Thread:|Thread:)\s*([a-zA-Z0-9._-]+)/i.exec(logContent);
+    const id = m1 ? m1[1]! : m2 ? m2[1]! : m3 ? m3[1]! : null;
     if (id) {
       let exists = false;
       try {

@@ -124,7 +124,7 @@ export function createDefaultChecksConfig(): ChecksConfig {
     version: 1,
     checks: [],
     todo_patterns: ['TODO', 'FIXME', 'XXX', 'HACK'],
-    todo_max: 0,
+    todo_max: -1,
     require_clean_git: false,
     min_review_score: 8.5,
     spec_guard: true,
@@ -477,7 +477,7 @@ export function detectChecks(projectPath: string): ChecksConfig {
     version: 1,
     checks: detected,
     todo_patterns: ['TODO', 'FIXME', 'XXX', 'HACK'],
-    todo_max: 0,
+    todo_max: -1,
     require_clean_git: false,
     min_review_score: 8.5,
     spec_guard: true,
@@ -503,6 +503,26 @@ export function getProjectChecksSha256(projectPath: string): { sha256: string; c
   }
 }
 
+export function resolveMainRepoRoot(projectPath: string): string | null {
+  try {
+    const dotGit = path.win32.join(projectPath, '.git');
+    if (!fs.existsSync(dotGit)) return null;
+    const st = fs.statSync(dotGit);
+    if (!st.isFile()) return null;
+    const raw = fs.readFileSync(dotGit, 'utf8').trim();
+    const m = /^gitdir:\s*(.+)$/im.exec(raw);
+    if (!m) return null;
+    const gitDir = path.resolve(projectPath, m[1]!.trim());
+    const worktreesDir = path.dirname(gitDir);
+    if (path.basename(worktreesDir).toLowerCase() !== 'worktrees') return null;
+    const mainDotGit = path.dirname(worktreesDir);
+    if (path.basename(mainDotGit).toLowerCase() !== '.git') return null;
+    return path.dirname(mainDotGit);
+  } catch {
+    return null;
+  }
+}
+
 export function isProjectChecksTrusted(
   paths: ServerPaths,
   projectPath: string,
@@ -511,7 +531,20 @@ export function isProjectChecksTrusted(
   const trustedFile = path.win32.join(paths.featureDataDir('checks'), 'trusted.json');
   const trustedMap = readJsonSafe<Record<string, string>>(trustedFile, {}).data;
   const normKey = projectPath.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
-  return trustedMap[normKey] === currentSha256;
+  if (trustedMap[normKey] === currentSha256) {
+    return true;
+  }
+  const mainRoot = resolveMainRepoRoot(projectPath);
+  if (mainRoot) {
+    const mainKey = mainRoot.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+    if (trustedMap[mainKey] === currentSha256) {
+      const mainSha = getProjectChecksSha256(mainRoot);
+      if (mainSha && mainSha.sha256 === currentSha256) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 export function trustProjectChecks(
@@ -1024,6 +1057,132 @@ export function computeDirtySignature(
   return hasher.digest('hex').slice(0, 16);
 }
 
+export function isCommentTodoLine(
+  lineText: string,
+  relFile: string,
+  todoRegex: RegExp
+): boolean {
+  if (!todoRegex.test(lineText)) {
+    return false;
+  }
+
+  const ext = path.extname(relFile).toLowerCase();
+  const isVb = ext === '.vb' || ext === '.vbs' || ext === '.bas';
+  const isPs1 = ext === '.ps1' || ext === '.psm1' || ext === '.psd1';
+
+  const trimmed = lineText.trimStart();
+  let commentBody: string | null = null;
+
+  if ((isPs1 || isVb) && /^'(?:\s|$)/.test(trimmed)) {
+    commentBody = trimmed.slice(1);
+  } else if (/^\*(?!\/)(?:\s|$)/.test(trimmed)) {
+    commentBody = trimmed.slice(1);
+  } else if (/^REM(?:\s|$)/i.test(trimmed)) {
+    commentBody = trimmed.slice(3);
+  } else {
+    let inSingle = false;
+    let inDouble = false;
+    let inBacktick = false;
+
+    for (let i = 0; i < lineText.length; i++) {
+      const ch = lineText[i]!;
+
+      if (inSingle) {
+        if (ch === '\\') {
+          i++;
+        } else if (ch === "'") {
+          inSingle = false;
+        }
+        continue;
+      }
+      if (inDouble) {
+        if (ch === '\\' || (isPs1 && ch === '`')) {
+          i++;
+        } else if (ch === '"') {
+          inDouble = false;
+        }
+        continue;
+      }
+      if (inBacktick) {
+        if (ch === '\\') {
+          i++;
+        } else if (ch === '`') {
+          inBacktick = false;
+        }
+        continue;
+      }
+
+      // Outside string literals: check comment markers
+      if (lineText.startsWith('<!--', i)) {
+        commentBody = lineText.slice(i + 4);
+        break;
+      }
+      if (lineText.startsWith('//', i) && (i === 0 || lineText[i - 1] !== ':')) {
+        commentBody = lineText.slice(i + 2);
+        break;
+      }
+      if (lineText.startsWith('/*', i)) {
+        commentBody = lineText.slice(i + 2);
+        break;
+      }
+      if (ch === '#') {
+        commentBody = lineText.slice(i + 1);
+        break;
+      }
+      if (
+        lineText.startsWith('--', i) &&
+        lineText[i + 2] !== '>' &&
+        (i === 0 || /\s/.test(lineText[i - 1]!))
+      ) {
+        commentBody = lineText.slice(i + 2);
+        break;
+      }
+      if (ch === ';' && (i === 0 || /\s/.test(lineText[i - 1]!))) {
+        commentBody = lineText.slice(i + 1);
+        break;
+      }
+      if (ch === "'" && isVb) {
+        commentBody = lineText.slice(i + 1);
+        break;
+      }
+      if (ch === "'" && isPs1) {
+        const hasClosingQuote = lineText.indexOf("'", i + 1) !== -1;
+        if (!hasClosingQuote) {
+          commentBody = lineText.slice(i + 1);
+          break;
+        }
+      }
+      if (
+        /^REM(?:\s|$)/i.test(lineText.slice(i)) &&
+        (i === 0 || /[\s&|]/.test(lineText[i - 1]!))
+      ) {
+        commentBody = lineText.slice(i + 3);
+        break;
+      }
+
+      if (ch === '"') {
+        inDouble = true;
+      } else if (ch === "'") {
+        inSingle = true;
+      } else if (ch === '`') {
+        inBacktick = true;
+      }
+    }
+  }
+
+  if (commentBody === null) {
+    return false;
+  }
+
+  // Strip quoted string literals inside the comment body (ignoring word-internal apostrophes like don't)
+  const stripped = commentBody
+    .replace(/(?<![A-Za-z0-9_])'[^']*'/g, ' ')
+    .replace(/"[^"]*"/g, ' ')
+    .replace(/`[^`]*`/g, ' ');
+
+  return todoRegex.test(stripped);
+}
+
 export function scanTrackedTodos(
   projectPath: string,
   patterns: string[] = ['TODO', 'FIXME', 'XXX', 'HACK']
@@ -1072,7 +1231,7 @@ export function scanTrackedTodos(
       const lines = content.split(/\r?\n/);
       for (let lineNum = 0; lineNum < lines.length; lineNum++) {
         const lineText = lines[lineNum]!;
-        if (todoRegex.test(lineText)) {
+        if (isCommentTodoLine(lineText, relFile, todoRegex)) {
           count++;
           if (matches.length < 20) {
             matches.push({
@@ -1373,7 +1532,7 @@ export async function computeGate(
 
   // 5. todo item
   const todoPatterns = config.todo_patterns || ['TODO', 'FIXME', 'XXX', 'HACK'];
-  const todoMax = config.todo_max ?? 0;
+  const todoMax = config.todo_max ?? -1;
   if (todoPatterns.length === 0) {
     items.push({
       id: 'todo',

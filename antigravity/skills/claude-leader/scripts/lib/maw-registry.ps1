@@ -14,9 +14,9 @@ function Merge-AgentEntryObjects {
     foreach ($prop in $OverrideObj.PSObject.Properties) {
         $name = $prop.Name
         $val  = $prop.Value
-        if ($null -eq $val -and $name -notin @("login_cmd", "status_cmd", "resume_args")) { continue }
+        if ($null -eq $val -and $name -notin @("login_cmd", "status_cmd", "resume_args", "context_window", "policy_args")) { continue }
 
-        if ($name -in @("capabilities", "detect", "cli") -and $merged.ContainsKey($name) -and $null -ne $merged[$name] -and ($val -is [psobject])) {
+        if ($name -in @("capabilities", "detect", "cli", "policy_args") -and $merged.ContainsKey($name) -and $null -ne $merged[$name] -and ($val -is [psobject])) {
             $sub = @{}
             if ($merged[$name] -is [hashtable]) {
                 foreach ($sk in $merged[$name].Keys) { $sub[$sk] = $merged[$name][$sk] }
@@ -268,30 +268,59 @@ function ConvertTo-ValidatedAgentEntry {
         $cliBlock.resume_args = $resumeArgs
     }
 
+    $contextWindow = $null
+    if ($null -ne $RawEntry.context_window) {
+        $parsedCw = 0
+        if ([int]::TryParse([string]$RawEntry.context_window, [ref]$parsedCw) -and $parsedCw -gt 0) {
+            $contextWindow = $parsedCw
+        }
+    }
+
+    $policyArgs = $null
+    if ($null -ne $RawEntry.policy_args) {
+        $paMap = @{}
+        if ($RawEntry.policy_args -is [hashtable]) {
+            foreach ($pk in $RawEntry.policy_args.Keys) {
+                $pArr = & $parseCmdArr $RawEntry.policy_args[$pk]
+                if ($null -ne $pArr) { $paMap[[string]$pk] = $pArr }
+            }
+        } elseif ($RawEntry.policy_args -is [psobject]) {
+            foreach ($pp in $RawEntry.policy_args.PSObject.Properties) {
+                $pArr = & $parseCmdArr $pp.Value
+                if ($null -ne $pArr) { $paMap[[string]$pp.Name] = $pArr }
+            }
+        }
+        if ($paMap.Count -gt 0) {
+            $policyArgs = [PSCustomObject]$paMap
+        }
+    }
+
     return @{
-        id           = $id
-        label        = $label
-        color        = $color
-        enabled      = $enabled
-        adapter      = $adapter
-        aliases      = [string[]]$aliases.ToArray()
-        detect       = [PSCustomObject]@{
+        id             = $id
+        label          = $label
+        color          = $color
+        enabled        = $enabled
+        adapter        = $adapter
+        aliases        = [string[]]$aliases.ToArray()
+        detect         = [PSCustomObject]@{
             command      = $detectCmd
             version_args = [string[]]$detectArgs
         }
-        models       = [string[]]$models.ToArray()
-        efforts      = [string[]]$efforts.ToArray()
-        login_cmd    = $loginCmd
-        status_cmd   = $statusCmd
-        resume_args  = $resumeArgs
-        capabilities = [PSCustomObject]@{
+        models         = [string[]]$models.ToArray()
+        efforts        = [string[]]$efforts.ToArray()
+        login_cmd      = $loginCmd
+        status_cmd     = $statusCmd
+        resume_args    = $resumeArgs
+        context_window = $contextWindow
+        policy_args    = $policyArgs
+        capabilities   = [PSCustomObject]@{
             write       = $capWrite
             review      = $capReview
             new_session = $capNewSession
             sessions    = $capSessions
             ide_send    = $capIdeSend
         }
-        cli          = $cliBlock
+        cli            = $cliBlock
     }
 }
 
@@ -327,6 +356,23 @@ function Get-AgentRegistry {
             $MawHome = Join-Path $userProf ".maw"
         }
     }
+
+    if ($env:MAW_TEST -eq "1") {
+        $realUserProf = [Environment]::GetFolderPath('UserProfile')
+        $realInstalledScripts = Join-Path $realUserProf ".gemini\config\skills\claude-leader\scripts"
+        $realMawHome = Join-Path $realUserProf ".maw"
+        $normScripts = [System.IO.Path]::GetFullPath($ScriptsDir).TrimEnd('\', '/').ToLowerInvariant()
+        $normRealScripts = [System.IO.Path]::GetFullPath($realInstalledScripts).TrimEnd('\', '/').ToLowerInvariant()
+        if ($normScripts -eq $normRealScripts) {
+            throw "TEST ISOLATION VIOLATION: Get-AgentRegistry refuses real installed scriptsDir ($ScriptsDir) when MAW_TEST=1."
+        }
+        $normMaw = [System.IO.Path]::GetFullPath($MawHome).TrimEnd('\', '/').ToLowerInvariant()
+        $normRealMaw = [System.IO.Path]::GetFullPath($realMawHome).TrimEnd('\', '/').ToLowerInvariant()
+        if ($normMaw -eq $normRealMaw) {
+            throw "TEST ISOLATION VIOLATION: Get-AgentRegistry refuses real ~/.maw ($MawHome) when MAW_TEST=1."
+        }
+    }
+
     $userFile = Join-Path $MawHome "agents.json"
 
     $warnings = [System.Collections.Generic.List[string]]::new()

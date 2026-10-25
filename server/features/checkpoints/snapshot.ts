@@ -2,8 +2,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { appendAuditEntry } from '../../lib/audit.ts';
-import { getTempDir, isDirectorySafe, isFileSafe } from '../../lib/paths.ts';
+import { appendActionAudit } from '../../lib/feature.ts';
+import { getTempDir, isDirectorySafe, isFileSafe, type ServerPaths } from '../../lib/paths.ts';
 import { runCommand, type RunCommandOptions, type RunCommandResult } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 
@@ -1091,7 +1091,7 @@ export async function restoreTree(
   checkpointId: string,
   options: {
     confirm?: boolean;
-    auditFile?: string;
+    paths?: ServerPaths;
     checkpointsAuditFile?: string;
   }
 ): Promise<{
@@ -1130,14 +1130,23 @@ export async function restoreTree(
 
   // Audit entry for destructive action
   const auditEntry = {
+    feature: 'checkpoints',
     Timestamp: new Date().toISOString(),
     Tool: 'maw-s1',
     Action: 'checkpoint_restore',
+    action: 'checkpoint_restore',
     Project: top,
     Detail: `Restored checkpoint ${validatedId} (safety: ${safetyCheckpointId})`,
   };
-  if (options.auditFile) appendAuditEntry(options.auditFile, auditEntry);
-  if (options.checkpointsAuditFile) appendAuditEntry(options.checkpointsAuditFile, auditEntry);
+  if (options.paths) {
+    appendActionAudit(options.paths, auditEntry);
+  } else if (options.checkpointsAuditFile) {
+    const dir = path.dirname(options.checkpointsAuditFile);
+    if (!isDirectorySafe(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.appendFileSync(options.checkpointsAuditFile, JSON.stringify(auditEntry) + '\n', 'utf8');
+  }
 
   // C5: Files to write = AMT from currentTree to targetTree
   const writeRes = await gitRun(

@@ -311,11 +311,16 @@ export async function githubTicker(ctx: MawFeatureContext): Promise<void> {
           cwd: req.project_path,
         });
 
-        appendAudit(ctx.paths.auditFile, 'git_push', {
-          project_path: req.project_path,
-          branch: req.branch,
-          exit_code: pushRes.code,
-        });
+        appendAudit(
+          ctx.paths,
+          'git_push',
+          {
+            project_path: req.project_path,
+            branch: req.branch,
+            exit_code: pushRes.code,
+          },
+          'github'
+        );
 
         if (pushRes.code !== 0 && !pushRes.stderr.includes('Everything up-to-date')) {
           req.state = 'failed';
@@ -361,11 +366,16 @@ export async function githubTicker(ctx: MawFeatureContext): Promise<void> {
             c.pr = { number: adoptedPr.number, url: adoptedPr.url };
           });
 
-          appendAudit(ctx.paths.auditFile, 'github_pr_adopt', {
-            task_id: card.id,
-            pr_url: adoptedPr.url,
-            pr_number: adoptedPr.number,
-          });
+          appendAudit(
+            ctx.paths,
+            'github_pr_adopt',
+            {
+              task_id: card.id,
+              pr_url: adoptedPr.url,
+              pr_number: adoptedPr.number,
+            },
+            'github'
+          );
 
           modified = true;
           continue;
@@ -420,10 +430,15 @@ export async function githubTicker(ctx: MawFeatureContext): Promise<void> {
             c.pr = { number: prNumber, url: prUrl };
           });
 
-          appendAudit(ctx.paths.auditFile, 'github_pr_create', {
-            task_id: card.id,
-            pr_url: prUrl,
-          });
+          appendAudit(
+            ctx.paths,
+            'github_pr_create',
+            {
+              task_id: card.id,
+              pr_url: prUrl,
+            },
+            'github'
+          );
 
           modified = true;
         } finally {

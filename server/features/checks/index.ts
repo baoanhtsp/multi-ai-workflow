@@ -2,7 +2,12 @@ import child_process from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { MawFeature, MawFeatureContext, MawFeatureRequest } from '../../lib/feature.ts';
+import {
+  appendActionAudit,
+  type MawFeature,
+  type MawFeatureContext,
+  type MawFeatureRequest,
+} from '../../lib/feature.ts';
 import { resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import {
@@ -24,6 +29,7 @@ import {
   getStoredResults,
   isProjectChecksTrusted,
   normProjectKey,
+  resolveMainRepoRoot,
   runCheckProcess,
   saveLastSummary,
   saveStoredResults,
@@ -51,9 +57,10 @@ function appendChecksAudit(
   action: string,
   details: Record<string, unknown>
 ): void {
-  const auditFile = path.win32.join(ctx.paths.featureDataDir('checks'), 'audit.jsonl');
-  appendJsonl(auditFile, {
-    ts: new Date().toISOString(),
+  const ts = new Date().toISOString();
+  appendActionAudit(ctx.paths, {
+    ts,
+    feature: 'checks',
     action,
     by: 'dashboard',
     details,
@@ -414,10 +421,12 @@ export const feature: MawFeature = {
           const reqScope = (req.query.get('scope') || 'merge').trim().toLowerCase();
           const overrides = getOverrides(ctx);
           const now = Date.now();
+          const mainRoot = resolveMainRepoRoot(projectPath);
           const idx = overrides.findIndex(
             (o) =>
               o.token === overrideToken &&
-              isPathInsideProject(projectPath, o.project_path) &&
+              (isPathInsideProject(projectPath, o.project_path) ||
+                (mainRoot !== null && isPathInsideProject(mainRoot, o.project_path))) &&
               (o.scope ? o.scope.toLowerCase() === reqScope : true) &&
               new Date(o.expires_at).getTime() > now
           );

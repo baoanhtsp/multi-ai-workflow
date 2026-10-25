@@ -22,6 +22,53 @@ export interface ServerPaths {
 
 const FEATURE_NAME_REGEX = /^[a-z][a-z0-9-]{1,31}$/;
 
+const REAL_USER_PROFILE = (
+  process.env.MAW_REAL_USERPROFILE ||
+  (process.env.LOCALAPPDATA
+    ? path.win32.resolve(process.env.LOCALAPPDATA, '..', '..')
+    : process.env.APPDATA
+      ? path.win32.resolve(process.env.APPDATA, '..', '..')
+      : process.env.USERPROFILE || os.homedir() || 'C:\\Users\\Admin')
+).replace(/[\\/]+$/, '');
+
+const REAL_MAW_HOME = path.win32.join(REAL_USER_PROFILE, '.maw');
+const REAL_TEMP_DIR = (
+  process.env.MAW_REAL_TEMP ||
+  (process.env.LOCALAPPDATA
+    ? path.win32.join(process.env.LOCALAPPDATA, 'Temp')
+    : os.tmpdir())
+).replace(/[\\/]+$/, '');
+const REAL_JOBS_DIR = path.win32.join(REAL_TEMP_DIR, 'maw_jobs');
+const REAL_INSTALLED_SCRIPTS_DIR = path.win32.join(
+  REAL_USER_PROFILE,
+  '.gemini',
+  'config',
+  'skills',
+  'claude-leader',
+  'scripts'
+);
+
+export function isTestContext(): boolean {
+  return Boolean(process.env.NODE_TEST_CONTEXT) || process.env.MAW_TEST === '1';
+}
+
+export function sameWinPath(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  const normA = path.win32.resolve(a).replace(/[\\/]+$/, '').toLowerCase();
+  const normB = path.win32.resolve(b).replace(/[\\/]+$/, '').toLowerCase();
+  return normA === normB;
+}
+
+export function getRealSystemPaths() {
+  return {
+    userProfile: REAL_USER_PROFILE,
+    mawHome: REAL_MAW_HOME,
+    tempDir: REAL_TEMP_DIR,
+    jobsDir: REAL_JOBS_DIR,
+    installedScriptsDir: REAL_INSTALLED_SCRIPTS_DIR,
+  };
+}
+
 export function getTempDir(): string {
   const raw = process.env.TEMP || process.env.TMP || os.tmpdir();
   return raw.replace(/[\\/]+$/, '');
@@ -32,6 +79,9 @@ export function resolveServerPaths(options?: {
   projectsRoot?: string;
   userProfile?: string;
   mawHome?: string;
+  tempDir?: string;
+  jobsDir?: string;
+  scriptsDir?: string;
 }): ServerPaths {
   let repoRoot = options?.repoRoot ?? path.resolve(import.meta.dirname, '..', '..');
   try {
@@ -51,11 +101,61 @@ export function resolveServerPaths(options?: {
     // Keep rawProjectsRoot if realpath fails
   }
 
-  let userProfile = (options?.userProfile ?? process.env.USERPROFILE ?? '').trim();
-  if (!userProfile || !isDirectorySafe(userProfile)) {
-    userProfile = 'C:\\Users\\Admin';
+  const inTest = isTestContext();
+
+  const explicitUserProfile = options?.userProfile?.trim();
+  if (explicitUserProfile && sameWinPath(explicitUserProfile, REAL_USER_PROFILE) && inTest) {
+    throw new Error(
+      `Test isolation guard: resolveServerPaths refused real userProfile (${explicitUserProfile}) in test context.`
+    );
+  }
+
+  const explicitMawHome = options?.mawHome?.trim();
+  if (explicitMawHome && sameWinPath(explicitMawHome, REAL_MAW_HOME) && inTest) {
+    throw new Error(
+      `Test isolation guard: resolveServerPaths refused real MAW_HOME (${explicitMawHome}) in test context.`
+    );
+  }
+
+  const explicitJobsDir = options?.jobsDir?.trim();
+  if (explicitJobsDir && sameWinPath(explicitJobsDir, REAL_JOBS_DIR) && inTest) {
+    throw new Error(
+      `Test isolation guard: resolveServerPaths refused real jobsDir (${explicitJobsDir}) in test context.`
+    );
+  }
+
+  const explicitScriptsDir = options?.scriptsDir?.trim();
+  if (explicitScriptsDir && sameWinPath(explicitScriptsDir, REAL_INSTALLED_SCRIPTS_DIR) && inTest) {
+    throw new Error(
+      `Test isolation guard: resolveServerPaths refused real installed scriptsDir (${explicitScriptsDir}) in test context.`
+    );
+  }
+
+  let rawMawHome = (options?.mawHome ?? process.env.MAW_HOME ?? '').trim().replace(/[\\/]+$/, '');
+  let userProfile = (options?.userProfile ?? process.env.USERPROFILE ?? '').trim().replace(/[\\/]+$/, '');
+
+  if (inTest) {
+    // If test caller passed isolated mawHome without userProfile, derive isolated userProfile inside mawHome
+    if (!explicitUserProfile && (!userProfile || sameWinPath(userProfile, REAL_USER_PROFILE))) {
+      if (rawMawHome && !sameWinPath(rawMawHome, REAL_MAW_HOME)) {
+        userProfile = path.win32.join(rawMawHome, '_user_profile');
+      }
+    }
+    if (userProfile && !sameWinPath(userProfile, REAL_USER_PROFILE) && !fs.existsSync(userProfile)) {
+      try {
+        fs.mkdirSync(userProfile, { recursive: true });
+      } catch {
+        // Ignore mkdir errors if parent does not exist
+      }
+    }
+  } else {
+    if (!userProfile || !isDirectorySafe(userProfile)) {
+      userProfile = REAL_USER_PROFILE || 'C:\\Users\\Admin';
+    }
   }
   userProfile = userProfile.replace(/[\\/]+$/, '');
+
+  const mawHome = rawMawHome || path.win32.join(userProfile, '.maw');
 
   const antigravityDir = path.win32.join(userProfile, '.gemini', 'antigravity');
   const bridgeFile = path.win32.join(antigravityDir, 'agentapi-bridge.json');
@@ -63,9 +163,36 @@ export function resolveServerPaths(options?: {
   const notifyCfgFile = path.win32.join(antigravityDir, 'notify-config.json');
   const presenceDir = path.win32.join(antigravityDir, 'presence');
   const brainDir = path.win32.join(antigravityDir, 'brain');
-  const tempDir = getTempDir();
-  const jobsDir = path.win32.join(tempDir, 'maw_jobs');
 
+  let tempDir = (options?.tempDir ?? '').trim().replace(/[\\/]+$/, '') || getTempDir();
+  if (inTest && !options?.tempDir && sameWinPath(tempDir, REAL_TEMP_DIR)) {
+    const baseIso = explicitUserProfile && !sameWinPath(userProfile, REAL_USER_PROFILE)
+      ? userProfile
+      : !sameWinPath(mawHome, REAL_MAW_HOME)
+        ? mawHome
+        : '';
+    if (baseIso) {
+      tempDir = path.win32.join(baseIso, '_temp');
+      try {
+        fs.mkdirSync(path.win32.join(tempDir, 'maw_jobs'), { recursive: true });
+      } catch {}
+    }
+  }
+
+  let jobsDir =
+    (options?.jobsDir ?? process.env.MAW_JOBS_DIR ?? '').trim().replace(/[\\/]+$/, '') ||
+    path.win32.join(tempDir, 'maw_jobs');
+  if (inTest && !options?.jobsDir && sameWinPath(jobsDir, REAL_JOBS_DIR) && !sameWinPath(tempDir, REAL_TEMP_DIR)) {
+    jobsDir = path.win32.join(tempDir, 'maw_jobs');
+  }
+
+  const repoScriptsDir = path.win32.join(
+    repoRoot,
+    'antigravity',
+    'skills',
+    'claude-leader',
+    'scripts'
+  );
   const installedScriptsDir = path.win32.join(
     userProfile,
     '.gemini',
@@ -74,14 +201,40 @@ export function resolveServerPaths(options?: {
     'claude-leader',
     'scripts'
   );
-  const scriptsDir = isDirectorySafe(installedScriptsDir)
-    ? installedScriptsDir
-    : path.win32.join(repoRoot, 'antigravity', 'skills', 'claude-leader', 'scripts');
+
+  let scriptsDir = (options?.scriptsDir ?? process.env.MAW_SCRIPTS_DIR ?? '').trim().replace(/[\\/]+$/, '');
+  if (!scriptsDir) {
+    if (inTest && sameWinPath(installedScriptsDir, REAL_INSTALLED_SCRIPTS_DIR)) {
+      scriptsDir = repoScriptsDir;
+    } else {
+      scriptsDir = isDirectorySafe(installedScriptsDir) ? installedScriptsDir : repoScriptsDir;
+    }
+  }
+
+  if (inTest) {
+    if (!userProfile || sameWinPath(userProfile, REAL_USER_PROFILE)) {
+      throw new Error(
+        `Test isolation guard: resolveServerPaths refused real userProfile (${userProfile || REAL_USER_PROFILE}) in test context.`
+      );
+    }
+    if (!mawHome || sameWinPath(mawHome, REAL_MAW_HOME)) {
+      throw new Error(
+        `Test isolation guard: resolveServerPaths refused real MAW_HOME (${mawHome || REAL_MAW_HOME}) in test context.`
+      );
+    }
+    if (!jobsDir || sameWinPath(jobsDir, REAL_JOBS_DIR)) {
+      throw new Error(
+        `Test isolation guard: resolveServerPaths refused real jobsDir (${jobsDir || REAL_JOBS_DIR}) in test context.`
+      );
+    }
+    if (!scriptsDir || sameWinPath(scriptsDir, REAL_INSTALLED_SCRIPTS_DIR)) {
+      throw new Error(
+        `Test isolation guard: resolveServerPaths refused real installed scriptsDir (${scriptsDir || REAL_INSTALLED_SCRIPTS_DIR}) in test context.`
+      );
+    }
+  }
 
   const dashboardDir = path.win32.join(repoRoot, 'dashboard');
-  const mawHome =
-    (options?.mawHome ?? process.env.MAW_HOME ?? '').trim().replace(/[\\/]+$/, '') ||
-    path.win32.join(userProfile, '.maw');
 
   const featureDataDir = (name: string): string => {
     const trimmed = String(name ?? '').trim();
@@ -114,6 +267,98 @@ export function resolveServerPaths(options?: {
     scriptsDir,
     featureDataDir,
   };
+}
+
+export function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  if (pid === process.pid) {
+    return true;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'EPERM') {
+      return true;
+    }
+    return false;
+  }
+}
+
+export interface ServerLockInfo {
+  pid: number;
+  port: number | null;
+  started_at: string;
+}
+
+export function acquireServerLock(mawHome: string, options?: { port?: number; pid?: number }): string {
+  const dir = mawHome.replace(/[\\/]+$/, '');
+  if (!isDirectorySafe(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const lockFile = path.win32.join(dir, 'server.lock');
+  const myPid = options?.pid ?? process.pid;
+
+  if (fs.existsSync(lockFile)) {
+    let existing: Partial<ServerLockInfo> | null = null;
+    try {
+      const raw = fs.readFileSync(lockFile, 'utf8').replace(/^\uFEFF/, '').trim();
+      if (raw.startsWith('{')) {
+        existing = JSON.parse(raw) as Partial<ServerLockInfo>;
+      } else {
+        const parsedPid = Number.parseInt(raw, 10);
+        if (Number.isInteger(parsedPid)) {
+          existing = { pid: parsedPid };
+        }
+      }
+    } catch {
+      existing = null;
+    }
+
+    const holderPid = typeof existing?.pid === 'number' ? existing.pid : 0;
+    if (holderPid > 0 && holderPid !== myPid && isPidAlive(holderPid)) {
+      const portHint = existing?.port ? ` on port ${existing.port}` : '';
+      throw new Error(
+        `Another MAW dashboard server is already running for MAW_HOME '${dir}' (PID ${holderPid}${portHint}). Only one server per MAW_HOME is allowed.`
+      );
+    }
+
+    try {
+      fs.unlinkSync(lockFile);
+    } catch {
+      // Ignore unlink race
+    }
+  }
+
+  const payload: ServerLockInfo = {
+    pid: myPid,
+    port: options?.port ?? null,
+    started_at: new Date().toISOString(),
+  };
+  fs.writeFileSync(lockFile, JSON.stringify(payload, null, 2), 'utf8');
+  return lockFile;
+}
+
+export function releaseServerLock(mawHome: string, expectedPid: number = process.pid): void {
+  const dir = mawHome.replace(/[\\/]+$/, '');
+  const lockFile = path.win32.join(dir, 'server.lock');
+  if (!fs.existsSync(lockFile)) {
+    return;
+  }
+  try {
+    const raw = fs.readFileSync(lockFile, 'utf8').replace(/^\uFEFF/, '').trim();
+    if (raw.startsWith('{')) {
+      const parsed = JSON.parse(raw) as Partial<ServerLockInfo>;
+      if (parsed.pid && parsed.pid !== expectedPid) {
+        return;
+      }
+    }
+    fs.unlinkSync(lockFile);
+  } catch {
+    // Ignore errors during lock cleanup
+  }
 }
 
 export function isDirectorySafe(dirPath: string): boolean {

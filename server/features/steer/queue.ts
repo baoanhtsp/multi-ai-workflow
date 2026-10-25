@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { refreshJobMetaStatus, type JobMeta } from '../../actions/jobs.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
+import { logServerError } from '../../lib/logger.ts';
 import type { ServerPaths } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
 import { resolveProjectPath } from '../../lib/paths.ts';
@@ -199,7 +200,13 @@ export function ensureQueueProcessorRunning(ctx: MawFeatureContext): void {
   const queued = countTotalQueued(ctx.paths);
   if (queued > 0 && !queueTimer) {
     queueTimer = setInterval(() => {
-      runQueueProcessor(ctx).catch(() => {});
+      try {
+        runQueueProcessor(ctx).catch((err) => {
+          logServerError('steer:queueProcessor', err, ctx.paths.mawHome);
+        });
+      } catch (err) {
+        logServerError('steer:queueInterval', err, ctx.paths.mawHome);
+      }
     }, 5000);
     queueTimer.unref();
   } else if (queued === 0 && queueTimer) {

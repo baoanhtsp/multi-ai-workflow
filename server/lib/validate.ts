@@ -15,6 +15,7 @@ export class ApiValidationError extends Error {
 
 const ALLOWED_MODES: readonly string[] = [
   'task',
+  'chat',
   'team',
   'antigravity',
   'claude',
@@ -32,6 +33,17 @@ const ALLOWED_TASK_ROLES: readonly string[] = [
   'tester',
 ];
 const ALLOWED_TEAM_KEYS: readonly string[] = ['backend', 'frontend', 'reviewer'];
+const DENIED_ENV_KEYS = new Set<string>([
+  'PATH',
+  'PATHEXT',
+  'COMSPEC',
+  'SYSTEMROOT',
+  'WINDIR',
+  'PSMODULEPATH',
+  'NODE_OPTIONS',
+  'LD_PRELOAD',
+  'DYLD_INSERT_LIBRARIES',
+]);
 
 function parseReviewersList(
   rawReviewers: unknown,
@@ -80,7 +92,7 @@ export function buildValidatedCommand(
   const mode = String(body.mode ?? '').trim().toLowerCase();
   if (!ALLOWED_MODES.includes(mode)) {
     throw new ApiValidationError(
-      'Invalid mode. Must be one of: task, team, antigravity, claude, codex, council, auto-gate, spec-guard.',
+      'Invalid mode. Must be one of: task, chat, team, antigravity, claude, codex, council, auto-gate, spec-guard.',
       400
     );
   }
@@ -105,19 +117,64 @@ export function buildValidatedCommand(
   let teamSpec = '';
   let reviewers: string[] | undefined;
   let implementer: string | undefined;
+  let agentProfileId: string | undefined;
+  let conversationId: string | undefined;
+  let resumeToken: string | undefined;
+  let cliArgs: string[] | undefined;
+  let envVars: Record<string, string> | undefined;
 
-  if (mode === 'task') {
+  if (body.resume_token !== undefined && body.resume_token !== null && String(body.resume_token).trim() !== '') {
+    const rt = String(body.resume_token).trim();
+    if (!/^[\w.:/-]{1,128}$/.test(rt)) {
+      throw new ApiValidationError('Invalid resume_token format.', 400);
+    }
+    resumeToken = rt;
+  }
+
+  if (body.agent_profile_id !== undefined && body.agent_profile_id !== null && String(body.agent_profile_id).trim() !== '') {
+    agentProfileId = String(body.agent_profile_id).trim();
+  }
+
+  if (body.conversation_id !== undefined && body.conversation_id !== null && String(body.conversation_id).trim() !== '') {
+    conversationId = String(body.conversation_id).trim();
+  }
+
+  if (body.cli_args !== undefined && body.cli_args !== null) {
+    if (!Array.isArray(body.cli_args)) {
+      throw new ApiValidationError('Invalid cli_args: must be an array of strings.', 400);
+    }
+    cliArgs = body.cli_args.map((a) => String(a ?? ''));
+  }
+
+  if (body.env !== undefined && body.env !== null) {
+    if (typeof body.env !== 'object' || Array.isArray(body.env)) {
+      throw new ApiValidationError('Invalid env: must be an object of string key-value pairs.', 400);
+    }
+    envVars = {};
+    for (const [k, v] of Object.entries(body.env as Record<string, unknown>)) {
+      const kTrim = k.trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(kTrim) || DENIED_ENV_KEYS.has(kTrim.toUpperCase())) {
+        throw new ApiValidationError(`Invalid or denied environment variable key '${kTrim}'.`, 400);
+      }
+      envVars[kTrim] = String(v ?? '');
+    }
+  }
+
+  if (mode === 'task' || mode === 'chat') {
     agent = String(body.agent ?? '').trim().toLowerCase();
     const agentEntry = enabledAgentsMap.get(agent);
     if (!agentEntry) {
       throw new ApiValidationError(
-        `Invalid agent for task mode. Allowed: ${enabledIds.join(', ')}.`,
+        `Invalid agent for ${mode} mode. Allowed: ${enabledIds.join(', ')}.`,
         400
       );
     }
+    if (mode === 'chat' && role === '') {
+      role = 'backend';
+    }
     if (!ALLOWED_TASK_ROLES.includes(role)) {
       throw new ApiValidationError(
-        'Invalid role for task mode. Allowed: architect, backend, frontend, reviewer, tester.',
+        `Invalid role for ${mode} mode. Allowed: architect, backend, frontend, reviewer, tester.`,
         400
       );
     }
@@ -277,6 +334,7 @@ export function buildValidatedCommand(
 
   const requiresPrompt =
     mode === 'task' ||
+    mode === 'chat' ||
     mode === 'team' ||
     mode === 'claude' ||
     (mode === 'codex' && ['critic', 'coder'].includes(role)) ||
@@ -294,7 +352,7 @@ export function buildValidatedCommand(
   const modelOverride = rawModel.trim().toLowerCase();
   const effortOverride = rawEffort.trim().toLowerCase();
 
-  const execAgent = mode === 'task' || mode === 'team' ? agent : mode;
+  const execAgent = mode === 'task' || mode === 'chat' || mode === 'team' ? agent : mode;
   const execEntry =
     enabledAgentsMap.get(execAgent) ?? registry.agents.find((a) => a.id === execAgent);
 
@@ -312,8 +370,9 @@ export function buildValidatedCommand(
       }
       if (
         execEntry.adapter === 'antigravity' &&
-        (mode === 'task' || mode === 'team') &&
-        !newSession
+        (mode === 'task' || mode === 'chat' || mode === 'team') &&
+        !newSession &&
+        !resumeToken
       ) {
         throw new ApiValidationError(
           'Antigravity model tier override is only supported when new_session is true.',
@@ -347,6 +406,21 @@ export function buildValidatedCommand(
   }
   if (implementer !== undefined) {
     baseInfo.implementer = implementer;
+  }
+  if (agentProfileId !== undefined) {
+    baseInfo.agent_profile_id = agentProfileId;
+  }
+  if (conversationId !== undefined) {
+    baseInfo.conversation_id = conversationId;
+  }
+  if (resumeToken !== undefined) {
+    baseInfo.resume_token = resumeToken;
+  }
+  if (cliArgs !== undefined) {
+    baseInfo.cli_args = cliArgs;
+  }
+  if (envVars !== undefined) {
+    baseInfo.env = envVars;
   }
 
   const spec = buildCommandSpec(baseInfo, paths.scriptsDir, null);

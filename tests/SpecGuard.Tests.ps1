@@ -1,8 +1,42 @@
 BeforeAll {
+    $script:origMawHome = $env:MAW_HOME
+    $script:origUserProfile = $env:USERPROFILE
+    $script:origTemp = $env:TEMP
+    $script:origTmp = $env:TMP
+    $script:origMawTest = $env:MAW_TEST
+    $script:origAuditFile = $env:MAW_AUDIT_FILE
+
+    $script:isoBase = Join-Path ([System.IO.Path]::GetTempPath()) ("maw-specguard-iso-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    $script:isoMaw = Join-Path $script:isoBase ".maw"
+    $script:isoUser = Join-Path $script:isoBase "user"
+    $script:isoTemp = Join-Path $script:isoBase "tmp"
+    New-Item -ItemType Directory -Path $script:isoMaw -Force | Out-Null
+    New-Item -ItemType Directory -Path $script:isoUser -Force | Out-Null
+    New-Item -ItemType Directory -Path $script:isoTemp -Force | Out-Null
+
+    $env:MAW_HOME = $script:isoMaw
+    $env:USERPROFILE = $script:isoUser
+    $env:TEMP = $script:isoTemp
+    $env:TMP = $script:isoTemp
+    $env:MAW_TEST = "1"
+    $env:MAW_AUDIT_FILE = Join-Path $script:isoUser ".gemini\antigravity\multi-ai-audit.jsonl"
+
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
     $script:GuardScript = Join-Path $script:RepoRoot "antigravity\skills\claude-leader\scripts\invoke-spec-guard.ps1"
     $script:CommonScript = Join-Path $script:RepoRoot "antigravity\skills\claude-leader\scripts\lib\maw-common.ps1"
     . $script:CommonScript
+}
+
+AfterAll {
+    if ($null -eq $script:origMawHome) { Remove-Item Env:\MAW_HOME -ErrorAction SilentlyContinue } else { $env:MAW_HOME = $script:origMawHome }
+    if ($null -eq $script:origUserProfile) { Remove-Item Env:\USERPROFILE -ErrorAction SilentlyContinue } else { $env:USERPROFILE = $script:origUserProfile }
+    if ($null -eq $script:origTemp) { Remove-Item Env:\TEMP -ErrorAction SilentlyContinue } else { $env:TEMP = $script:origTemp }
+    if ($null -eq $script:origTmp) { Remove-Item Env:\TMP -ErrorAction SilentlyContinue } else { $env:TMP = $script:origTmp }
+    if ($null -eq $script:origMawTest) { Remove-Item Env:\MAW_TEST -ErrorAction SilentlyContinue } else { $env:MAW_TEST = $script:origMawTest }
+    if ($null -eq $script:origAuditFile) { Remove-Item Env:\MAW_AUDIT_FILE -ErrorAction SilentlyContinue } else { $env:MAW_AUDIT_FILE = $script:origAuditFile }
+    if ($script:isoBase -and (Test-Path -LiteralPath $script:isoBase)) {
+        Remove-Item -LiteralPath $script:isoBase -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Describe "invoke-spec-guard.ps1" {

@@ -624,6 +624,7 @@ export const feature: MawFeature = {
           effort: targetEffort,
           project_path: executionPath,
           prompt,
+          source: { feature: 'review', ref },
         });
 
         const childJobId = String(jobResult.job_id ?? '');

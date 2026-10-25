@@ -109,10 +109,22 @@ export async function appendAuditLog(
     }
     const record = {
       ts: entry.ts ?? new Date().toISOString(),
+      feature: path.basename(featureDir),
       action: entry.action,
       target: entry.target,
       detail: entry.detail ?? {},
     };
-    fs.appendFileSync(auditFile, JSON.stringify(record) + '\n', 'utf8');
+    const line = JSON.stringify(record) + '\n';
+    fs.appendFileSync(auditFile, line, 'utf8');
+    try {
+      const parentDir = path.dirname(featureDir);
+      const parentName = path.basename(parentDir).toLowerCase();
+      if (parentName === 'features' || parentName === 'data') {
+        const sharedAudit = path.win32.join(path.dirname(parentDir), 'audit.jsonl');
+        fs.appendFileSync(sharedAudit, line, 'utf8');
+      }
+    } catch {
+      // Ignore shared audit write error
+    }
   });
 }

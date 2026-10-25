@@ -124,6 +124,61 @@ if (-not $serverMain) {
 $dashboardUrl = "http://127.0.0.1:$Port/"
 $statusUrl    = "http://127.0.0.1:$Port/api?action=status"
 
+$mawHome = if ($env:MAW_HOME -and $env:MAW_HOME.Trim() -ne "") {
+    $env:MAW_HOME.Trim()
+} else {
+    Join-Path $env:USERPROFILE ".maw"
+}
+$logsDir   = Join-Path $mawHome "logs"
+$serverLog = Join-Path $logsDir "server.log"
+$outLog    = Join-Path $logsDir "server.out.log"
+$errLog    = Join-Path $logsDir "server.err.log"
+
+function Rotate-MawLogFile {
+    param(
+        [string]$FilePath,
+        [long]$MaxBytes = 5242880,
+        [int]$Keep = 3,
+        [switch]$ArchiveForStartProcess
+    )
+    if (-not (Test-Path -LiteralPath $FilePath)) {
+        return
+    }
+    try {
+        $item = Get-Item -LiteralPath $FilePath -ErrorAction Stop
+        if ($item.Length -le 0) {
+            return
+        }
+        $rot1 = "$FilePath.1"
+        $rot1Len = if (Test-Path -LiteralPath $rot1) { (Get-Item -LiteralPath $rot1).Length } else { 0 }
+
+        # Rotate .1 -> .2 -> .3 when current file >= 5 MB, or when archiving into .1 would exceed 5 MB
+        if ($item.Length -ge $MaxBytes -or ($ArchiveForStartProcess -and ($rot1Len + $item.Length) -ge $MaxBytes)) {
+            for ($i = $Keep; $i -ge 1; $i--) {
+                $src = if ($i -eq 1) { $FilePath } else { "$FilePath.$($i - 1)" }
+                $dst = "$FilePath.$i"
+                if (Test-Path -LiteralPath $src) {
+                    if (Test-Path -LiteralPath $dst) {
+                        Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue
+                    }
+                    Move-Item -LiteralPath $src -Destination $dst -Force -ErrorAction SilentlyContinue
+                }
+            }
+        } elseif ($ArchiveForStartProcess) {
+            # Start-Process -RedirectStandardOutput overwrites target; append prior log to .1 so history is retained
+            $bytes = [System.IO.File]::ReadAllBytes($FilePath)
+            $fs = [System.IO.File]::Open($rot1, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+            try {
+                $fs.Write($bytes, 0, $bytes.Length)
+            } finally {
+                $fs.Close()
+            }
+        }
+    } catch {
+        # Best-effort rotation
+    }
+}
+
 function Test-DashboardReady {
     param([string]$Url)
     try {
@@ -150,8 +205,16 @@ if (-not (Test-DashboardReady -Url $statusUrl)) {
         $nodeArgs += @("--projects-root", $qRoot)
     }
 
+    if (-not (Test-Path -LiteralPath $logsDir)) {
+        New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
+    }
+    Rotate-MawLogFile -FilePath $serverLog
+    Rotate-MawLogFile -FilePath $outLog -ArchiveForStartProcess
+    Rotate-MawLogFile -FilePath $errLog -ArchiveForStartProcess
+
     Write-Host "[Mission Control] Starting Node.js ($nodeVerRaw) server on $dashboardUrl ..." -ForegroundColor Cyan
-    $proc = Start-Process -FilePath $nodeCmd.Source -ArgumentList $nodeArgs -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru
+    Write-Host "[Mission Control] Logs: $serverLog | stdout: $outLog | stderr: $errLog" -ForegroundColor DarkGray
+    $proc = Start-Process -FilePath $nodeCmd.Source -ArgumentList $nodeArgs -WorkingDirectory $repoRoot -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
 
     $ready = $false
     for ($attempt = 0; $attempt -lt 40; $attempt++) {

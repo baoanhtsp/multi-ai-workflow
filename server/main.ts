@@ -1,6 +1,9 @@
 import type { AddressInfo } from 'node:net';
 import { reconcileJobsOnStartup } from './actions/jobs.ts';
 import { createMawHttpServer } from './http.ts';
+import { createFeatureContext, startServerFeatures, stopServerFeatures } from './lib/feature.ts';
+import { appendServerLog, logServerError } from './lib/logger.ts';
+import { acquireServerLock, releaseServerLock } from './lib/paths.ts';
 
 interface CliOptions {
   port: number;
@@ -38,11 +41,26 @@ function parseCliArgs(argv: readonly string[]): CliOptions {
 
 async function main(): Promise<void> {
   const cli = parseCliArgs(process.argv.slice(2));
-  const { server, getPaths } = createMawHttpServer({
+  const { server, getPaths, loadedFeatures } = createMawHttpServer({
     projectsRoot: cli.projectsRoot,
   });
 
   const paths = getPaths();
+  acquireServerLock(paths.mawHome, { port: cli.port });
+  process.on('exit', () => {
+    releaseServerLock(paths.mawHome);
+  });
+
+  process.on('unhandledRejection', (reason: unknown) => {
+    logServerError('unhandledRejection', reason, paths.mawHome);
+  });
+
+  process.on('uncaughtException', (err: Error) => {
+    appendServerLog('FATAL', 'uncaughtException', err, paths.mawHome);
+    releaseServerLock(paths.mawHome);
+    process.exit(1);
+  });
+
   await reconcileJobsOnStartup(paths.jobsDir);
 
   await new Promise<void>((resolve, reject) => {
@@ -54,19 +72,35 @@ async function main(): Promise<void> {
   });
 
   const addr = server.address() as AddressInfo;
-  console.log(
-    `[MAW v3.0] Mission Control Server listening on http://127.0.0.1:${addr.port}/ (projectsRoot: ${paths.projectsRoot})`
-  );
+  process.env.MAW_PORT = String(addr.port);
+  acquireServerLock(paths.mawHome, { port: addr.port });
+
+  const serverUrl = `http://127.0.0.1:${addr.port}`;
+  const startCtx = createFeatureContext(paths, undefined, {
+    routes: loadedFeatures.routes,
+    serverUrl,
+  });
+  await startServerFeatures(loadedFeatures.features, startCtx);
+
+  const startupMsg = `[MAW v3.0] Mission Control Server listening on ${serverUrl}/ (projectsRoot: ${paths.projectsRoot})`;
+  console.log(startupMsg);
+  appendServerLog('INFO', startupMsg, undefined, paths.mawHome);
 
   let shuttingDown = false;
   const shutdown = (signal: string): void => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`[MAW v3.0] Received ${signal}, shutting down gracefully...`);
-    server.close(() => {
-      process.exit(0);
+    const shutdownMsg = `[MAW v3.0] Received ${signal}, shutting down gracefully...`;
+    console.log(shutdownMsg);
+    appendServerLog('INFO', shutdownMsg, undefined, paths.mawHome);
+    void stopServerFeatures(loadedFeatures.features).finally(() => {
+      releaseServerLock(paths.mawHome);
+      server.close(() => {
+        process.exit(0);
+      });
     });
     setTimeout(() => {
+      releaseServerLock(paths.mawHome);
       process.exit(0);
     }, 3000).unref();
   };
@@ -76,6 +110,6 @@ async function main(): Promise<void> {
 }
 
 void main().catch((err: unknown) => {
-  console.error('[MAW v3.0] Fatal startup error:', err);
+  appendServerLog('FATAL', 'Fatal startup error', err);
   process.exit(1);
 });

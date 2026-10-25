@@ -3,7 +3,12 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import path from 'node:path';
 import { isFileSafe, type ServerPaths } from '../lib/paths.ts';
 import { ApiValidationError } from '../lib/validate.ts';
-import { readSafeLogSlice, refreshJobMetaStatus, type JobMeta } from './jobs.ts';
+import {
+  readSafeLogSlice,
+  redactJobLogChunk,
+  refreshJobMetaStatus,
+  type JobMeta,
+} from './jobs.ts';
 
 const TERMINAL_STATUSES = new Set(['DONE', 'FAILED', 'CANCELLED']);
 const LOG_POLL_INTERVAL_MS = 500; // SPEC §3.11 & M3: read log every 500 ms
@@ -82,7 +87,10 @@ export async function handleJobStream(
       }
       currentOffset = nextOffset;
       if (chunk.length > 0) {
-        writeSseEvent(res, 'log', { chunk, next_offset: currentOffset });
+        writeSseEvent(res, 'log', {
+          chunk: redactJobLogChunk(chunk, paths),
+          next_offset: currentOffset,
+        });
       }
     }
   };

@@ -1,10 +1,25 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { gitRun } from '../features/checkpoints/snapshot.ts';
+import {
+  extractProjectEnvSecrets,
+  loadPolicyConfig,
+  redactSecrets,
+} from '../features/policy/lib/s4-core.ts';
+import { prepareIsolatedJob } from '../features/worktrees/isolate.ts';
+import {
+  loadWorktreesStore,
+  saveWorktreesStore,
+  withStoreLock,
+  type WorktreeRecord,
+} from '../features/worktrees/store.ts';
 import { buildCommandSpec, psq } from '../lib/commands.ts';
+import type { MawFeatureContext } from '../lib/feature.ts';
 import {
   isDirectorySafe,
   isFileSafe,
+  isTestContext,
   trimIncompleteUtf8Tail,
   type ServerPaths,
 } from '../lib/paths.ts';
@@ -13,9 +28,29 @@ import { loadAgentRegistry } from '../lib/registry.ts';
 import { ApiValidationError, buildValidatedCommand } from '../lib/validate.ts';
 import { detectRegistryAgents } from '../lib/versions.ts';
 
+export interface JobWorktreeInfo {
+  id: string;
+  path: string;
+  branch: string;
+  port: number;
+}
+
+export interface JobSourceInfo {
+  feature: string;
+  task_id?: string;
+  [k: string]: unknown;
+}
+
+export interface JobSessionRef {
+  platform: string;
+  id: string;
+}
+
 export interface JobMeta {
   job_id: string;
   pid: number;
+  server_id?: string;
+  projects_root?: string;
   mode: string;
   agent?: string;
   role: string;
@@ -26,12 +61,112 @@ export interface JobMeta {
   reviewers?: string[];
   implementer?: string;
   project_path: string;
+  isolated_from?: string;
+  worktree?: JobWorktreeInfo | string;
+  branch?: string;
+  budget_usd?: number;
+  max_rounds?: number;
+  source?: JobSourceInfo;
+  agent_profile_id?: string;
+  conversation_id?: string;
+  resume_token?: string;
+  session_ref?: JobSessionRef | string;
+  parent_job_id?: string;
+  steer_strategy?: string;
   command: string;
   status: 'RUNNING' | 'DONE' | 'FAILED' | 'CANCELLED' | string;
   exit_code: number | null;
   started_at: string;
   started_ts: number;
   finished_at?: string;
+}
+
+export function extractSessionIdFromLogText(logContent: string): string | null {
+  if (!logContent) return null;
+  const agyMatches = Array.from(
+    logContent.matchAll(/(?:CONVERSATION_ID|conversation):\s*([0-9a-f-]{36})/gi)
+  );
+  if (agyMatches.length > 0) {
+    return agyMatches[agyMatches.length - 1]![1]!;
+  }
+  const sessMatch = /"session_id"\s*:\s*"([^"]+)"/i.exec(logContent);
+  if (sessMatch) {
+    return sessMatch[1]!;
+  }
+  const threadJsonMatch = /"thread_id"\s*:\s*"([^"]+)"/i.exec(logContent);
+  if (threadJsonMatch) {
+    return threadJsonMatch[1]!;
+  }
+  const codexSessMatch = /session id:\s*([0-9a-f-]{36})/i.exec(logContent);
+  if (codexSessMatch) {
+    return codexSessMatch[1]!;
+  }
+  const threadLineMatch = /(?:OpenAI Codex Thread:|Thread:)\s*([a-zA-Z0-9._-]+)/i.exec(logContent);
+  if (threadLineMatch) {
+    return threadLineMatch[1]!;
+  }
+  return null;
+}
+
+function populateSessionRefFromLog(meta: JobMeta, logFile: string): boolean {
+  if (meta.session_ref) {
+    return false;
+  }
+  const platform = String(meta.agent ?? meta.mode ?? '').toLowerCase();
+  if (!platform) return false;
+
+  let foundId: string | null = null;
+  if (isFileSafe(logFile)) {
+    try {
+      const st = fs.statSync(logFile);
+      const readLen = Math.min(st.size, 65536);
+      if (readLen > 0) {
+        const fd = fs.openSync(logFile, 'r');
+        try {
+          const buf = Buffer.alloc(readLen);
+          const n = fs.readSync(fd, buf, 0, readLen, 0);
+          foundId = extractSessionIdFromLogText(buf.subarray(0, n).toString('utf8'));
+        } finally {
+          fs.closeSync(fd);
+        }
+      }
+    } catch {
+      // Ignore read errors
+    }
+  }
+  if (!foundId && meta.resume_token) {
+    foundId = meta.resume_token;
+  }
+  if (foundId) {
+    meta.session_ref = { platform, id: foundId };
+    return true;
+  }
+  return false;
+}
+
+export function redactJobLogChunk(
+  chunk: string,
+  paths?: ServerPaths,
+  projectPath?: string
+): string {
+  if (!chunk) return '';
+  try {
+    if (paths) {
+      const policyDir = path.win32.join(paths.mawHome, 'data', 'policy');
+      const policyCfg = loadPolicyConfig(policyDir).config;
+      if (policyCfg.enabled && policyCfg.global.redact_secrets === false) {
+        return chunk;
+      }
+      const extraSecrets =
+        policyCfg.global.redact_env_files !== false && projectPath
+          ? extractProjectEnvSecrets(projectPath)
+          : [];
+      return redactSecrets(chunk, extraSecrets, policyCfg.global.secret_patterns);
+    }
+  } catch {
+    // Fall back to default built-in patterns
+  }
+  return redactSecrets(chunk);
 }
 
 function readLogTail(logFile: string, maxBytes = 1024): string {
@@ -82,16 +217,22 @@ export async function refreshJobMetaStatus(
   jobsDir: string,
   options?: { checkPid?: boolean }
 ): Promise<JobMeta> {
+  const jobId = String(meta.job_id ?? '');
+  const logFile = path.win32.join(jobsDir, `${jobId}.log`);
+  const metaFile = path.win32.join(jobsDir, `${jobId}.json`);
+
   if (meta.status !== 'RUNNING') {
     if (meta.exit_code === undefined) {
       meta.exit_code = null;
     }
+    if (populateSessionRefFromLog(meta, logFile)) {
+      try {
+        fs.writeFileSync(metaFile, JSON.stringify(meta), 'utf8');
+      } catch {}
+    }
     return meta;
   }
 
-  const jobId = String(meta.job_id ?? '');
-  const logFile = path.win32.join(jobsDir, `${jobId}.log`);
-  const metaFile = path.win32.join(jobsDir, `${jobId}.json`);
   const pid = Math.trunc(Number(meta.pid ?? 0) || 0);
 
   const tail = readLogTail(logFile, 1024);
@@ -100,12 +241,19 @@ export async function refreshJobMetaStatus(
     meta.status = marker.status;
     meta.exit_code = marker.status === 'CANCELLED' ? (meta.exit_code ?? null) : marker.exitCode;
     meta.finished_at = new Date().toISOString();
+    populateSessionRefFromLog(meta, logFile);
     try {
       fs.writeFileSync(metaFile, JSON.stringify(meta), 'utf8');
     } catch {
       // Ignore write error
     }
     return meta;
+  }
+
+  if (populateSessionRefFromLog(meta, logFile)) {
+    try {
+      fs.writeFileSync(metaFile, JSON.stringify(meta), 'utf8');
+    } catch {}
   }
 
   if (options?.checkPid === false) {
@@ -160,6 +308,7 @@ export async function refreshJobMetaStatus(
       meta.exit_code = null;
     }
     meta.finished_at = new Date().toISOString();
+    populateSessionRefFromLog(meta, logFile);
     try {
       fs.writeFileSync(metaFile, JSON.stringify(meta), 'utf8');
     } catch {
@@ -200,7 +349,10 @@ export async function reconcileJobsOnStartup(jobsDir: string): Promise<void> {
   }
 }
 
-export async function getRecentJobs(jobsDir: string): Promise<Array<Record<string, unknown>>> {
+export async function getRecentJobs(
+  jobsDir: string,
+  limit = 8
+): Promise<Array<Record<string, unknown>>> {
   if (!isDirectorySafe(jobsDir)) {
     return [];
   }
@@ -220,9 +372,10 @@ export async function getRecentJobs(jobsDir: string): Promise<Array<Record<strin
   }
 
   entries.sort((a, b) => b.mtime - a.mtime);
+  const cappedLimit = Math.max(1, Math.min(2000, Math.trunc(Number(limit) || 8)));
   const jobs: Array<Record<string, unknown>> = [];
 
-  for (const item of entries.slice(0, 8)) {
+  for (const item of entries.slice(0, cappedLimit)) {
     let meta: JobMeta;
     try {
       meta = JSON.parse(fs.readFileSync(item.file, 'utf8')) as JobMeta;
@@ -236,6 +389,7 @@ export async function getRecentJobs(jobsDir: string): Promise<Array<Record<strin
       mode: meta.mode ?? '',
       agent: meta.agent ?? meta.mode ?? '',
       role: meta.role ?? '',
+      project_path: meta.project_path ?? '',
       project_name: path.basename(String(meta.project_path ?? '')),
       status: meta.status ?? 'UNKNOWN',
       exit_code: meta.exit_code ?? null,
@@ -250,6 +404,18 @@ export async function getRecentJobs(jobsDir: string): Promise<Array<Record<strin
     }
     if (typeof meta.implementer === 'string' && meta.implementer !== '') {
       row.implementer = meta.implementer;
+    }
+    if (meta.worktree !== undefined) {
+      row.worktree = meta.worktree;
+    }
+    if (meta.isolated_from !== undefined) {
+      row.isolated_from = meta.isolated_from;
+    }
+    if (meta.session_ref !== undefined) {
+      row.session_ref = meta.session_ref;
+    }
+    if (meta.source !== undefined) {
+      row.source = meta.source;
     }
     jobs.push(row);
   }
@@ -271,6 +437,243 @@ function formatHumanDateTime(d: Date): string {
     `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
     `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   );
+}
+
+export interface LaunchJobOptions {
+  meta: Partial<JobMeta> & { project_path: string; mode?: string; role?: string };
+  commandLine:
+    | string
+    | ((ctx: { jobId: string; promptFile: string; logFile: string; runnerFile: string }) => string);
+  prompt: string;
+  paths?: ServerPaths;
+  jobsDir?: string;
+  scriptsDir?: string;
+  notifyCfgFile?: string;
+  headerExtraLines?: string[];
+  env?: Record<string, string>;
+  cliArgs?: string[];
+  worktreePort?: number;
+  customLauncher?: (runnerFile: string) => Promise<number>;
+}
+
+export async function launchJob(options: LaunchJobOptions): Promise<{
+  job_id: string;
+  pid: number;
+  command: string;
+  meta: JobMeta;
+}> {
+  const paths = options.paths;
+  const jobsDir = options.jobsDir ?? paths?.jobsDir;
+  if (!jobsDir) {
+    throw new Error('launchJob requires paths or jobsDir.');
+  }
+  if (!isDirectorySafe(jobsDir)) {
+    fs.mkdirSync(jobsDir, { recursive: true });
+  }
+
+  const scriptsDir = options.scriptsDir ?? paths?.scriptsDir ?? '';
+  const notifyCfgFile = options.notifyCfgFile ?? paths?.notifyCfgFile ?? '';
+  const now = new Date();
+  const nowSec = Math.floor(now.getTime() / 1000);
+  const jobId =
+    options.meta.job_id ||
+    `job_${formatJobTimestamp(now)}_${crypto.randomBytes(3).toString('hex')}`;
+
+  const promptFile = path.win32.join(jobsDir, `${jobId}.prompt.txt`);
+  const logFile = path.win32.join(jobsDir, `${jobId}.log`);
+  const runnerFile = path.win32.join(jobsDir, `${jobId}.runner.ps1`);
+  const metaFile = path.win32.join(jobsDir, `${jobId}.json`);
+
+  const mode = String(options.meta.mode ?? 'task');
+  const agent = String(options.meta.agent ?? mode);
+  const role = String(options.meta.role ?? 'backend');
+  const projectPath = String(options.meta.project_path);
+
+  const redactedPromptForLog = options.prompt ?? '';
+  fs.writeFileSync(promptFile, '\uFEFF' + redactedPromptForLog, 'utf8');
+
+  const extraLines =
+    options.headerExtraLines && options.headerExtraLines.length > 0
+      ? options.headerExtraLines.join('\n') + '\n'
+      : '';
+  const headerLine =
+    `=== [MISSION CONTROL JOB ${jobId}] ===\n` +
+    `Mode: ${mode.toUpperCase()} | Agent: ${agent} | Role: ${role} | Project: ${projectPath}\n` +
+    extraLines +
+    `Started: ${formatHumanDateTime(now)}\n` +
+    `------------------------------------------------------------\n`;
+  fs.writeFileSync(logFile, '\uFEFF' + headerLine, 'utf8');
+
+  const resolvedCommandLine =
+    typeof options.commandLine === 'function'
+      ? options.commandLine({ jobId, promptFile, logFile, runnerFile })
+      : options.commandLine;
+
+  const notifyScript = scriptsDir ? path.win32.join(scriptsDir, 'send-notification.ps1') : '';
+  const hooksLib = scriptsDir ? path.win32.join(scriptsDir, 'lib', 'maw-hooks.ps1') : '';
+  const projShort = path.basename(projectPath);
+  const portValue = String(options.worktreePort ?? process.env.MAW_PORT ?? '4317');
+
+  const envExportLines: string[] = [
+    `$env:MAW_JOB_ID = ${psq(jobId)}`,
+    `$env:MAW_PROJECT = ${psq(projectPath)}`,
+    `$env:MAW_PORT = ${psq(portValue)}`,
+    `$env:MAW_JOBS_DIR = ${psq(jobsDir)}`,
+  ];
+  if (paths) {
+    envExportLines.push(
+      `$env:USERPROFILE = ${psq(paths.userProfile)}`,
+      `$env:MAW_HOME = ${psq(paths.mawHome)}`,
+      `$env:TEMP = ${psq(paths.tempDir)}`,
+      `$env:TMP = ${psq(paths.tempDir)}`,
+      `$env:MAW_SCRIPTS_DIR = ${psq(paths.scriptsDir)}`
+    );
+  }
+  if (isTestContext()) {
+    envExportLines.push(`$env:MAW_TEST = '1'`);
+  }
+  if (mode === 'task' || mode === 'chat' || mode === 'team' || mode === 'steer') {
+    envExportLines.push(`$env:MAW_PERSIST_SESSION = '1'`);
+  }
+  if (options.meta.budget_usd !== undefined) {
+    envExportLines.push(`$env:MAW_BUDGET_USD = ${psq(String(options.meta.budget_usd))}`);
+  }
+  if (options.meta.max_rounds !== undefined) {
+    envExportLines.push(`$env:MAW_MAX_ROUNDS = ${psq(String(options.meta.max_rounds))}`);
+  }
+  if (options.cliArgs && options.cliArgs.length > 0) {
+    envExportLines.push(`$env:MAW_EXTRA_CLI_ARGS = ${psq(JSON.stringify(options.cliArgs))}`);
+  }
+  if (options.env) {
+    for (const [k, v] of Object.entries(options.env)) {
+      if (/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(k)) {
+        envExportLines.push(`$env:${k} = ${psq(String(v ?? ''))}`);
+      }
+    }
+  }
+
+  const runnerCode =
+    `$ErrorActionPreference = 'Continue'\n` +
+    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n` +
+    `$OutputEncoding = New-Object System.Text.UTF8Encoding $false\n` +
+    envExportLines.join('\n') +
+    `\n` +
+    `function Redact-MawLine([string]$s) {\n` +
+    `    if (-not $s) { return '' }\n` +
+    `    $o = $s -replace '(?<=^|[^a-zA-Z0-9_\\-])sk-ant-[A-Za-z0-9_\\-]{20,}', '[REDACTED:anthropic]'\n` +
+    `    $o = $o -replace '(?<=^|[^a-zA-Z0-9_\\-])sk-(?:proj-)?[A-Za-z0-9_\\-]{20,}', '[REDACTED:openai]'\n` +
+    `    $o = $o -replace '(?<=^|[^a-zA-Z0-9_\\-])github_pat_[A-Za-z0-9_]{50,}', '[REDACTED:github]'\n` +
+    `    $o = $o -replace '(?<=^|[^a-zA-Z0-9_\\-])gh[pousr]_[A-Za-z0-9]{36,}', '[REDACTED:github]'\n` +
+    `    $o = $o -replace '\\bAKIA[0-9A-Z]{16}\\b', '[REDACTED:aws]'\n` +
+    `    $o = $o -replace '(?<=^|[^a-zA-Z0-9_\\-])AIza[0-9A-Za-z_\\-]{35}', '[REDACTED:google]'\n` +
+    `    $o = $o -replace '(?<=^|[^a-zA-Z0-9_\\-])xox[baprs]-[A-Za-z0-9-]{10,}', '[REDACTED:slack]'\n` +
+    `    $o = $o -replace '\\b\\d{8,10}:[A-Za-z0-9_\\-]{35}\\b', '[REDACTED:telegram]'\n` +
+    `    $o = $o -replace '(?<=^|[^a-zA-Z0-9_\\-])eyJ[A-Za-z0-9_\\-]+\\.eyJ[A-Za-z0-9_\\-]+\\.[A-Za-z0-9_\\-]+', '[REDACTED:jwt]'\n` +
+    `    $o = [regex]::Replace($o, '(["'']?(?:api[_-]?key|secret|token|password|passwd)["'']?\\s*[:=]\\s*["'']?)(?!\\[REDACTED:)([^\\s"'']{8,})(["'']?)', '$1[REDACTED:assignment]$3', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)\n` +
+    `    return $o\n` +
+    `}\n` +
+    `$logPath = ${psq(logFile)}\n` +
+    (hooksLib
+      ? `if (Test-Path -LiteralPath ${psq(hooksLib)}) {\n    try { . ${psq(hooksLib)} } catch {}\n}\n`
+      : '') +
+    `$code = 0\n` +
+    `$hookBlocked = $false\n` +
+    `if (Get-Command Invoke-MawHooks -ErrorAction SilentlyContinue) {\n` +
+    `    try {\n` +
+    `        $startRes = @(Invoke-MawHooks -Event 'job-start' -Context @{ job_id = ${psq(jobId)}; mode = ${psq(mode)}; agent = ${psq(agent)}; role = ${psq(role)}; project = ${psq(projectPath)}; exit_code = $null })\n` +
+    `        foreach ($item in $startRes) {\n` +
+    `            if ($item -is [string] -and $item.Trim()) {\n` +
+    `                [System.IO.File]::AppendAllText($logPath, (Redact-MawLine $item) + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    `            } elseif ($null -ne $item -and $item.Block) {\n` +
+    `                $hookBlocked = $true\n` +
+    `                [System.IO.File]::AppendAllText($logPath, "[HOOK BLOCKED: job-start] " + (Redact-MawLine ([string]$item.Reason)) + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    `                $code = 4\n` +
+    `            }\n` +
+    `        }\n` +
+    `    } catch {}\n` +
+    `}\n` +
+    `if (-not $hookBlocked) {\n` +
+    `    try {\n` +
+    `        ${resolvedCommandLine} *>&1 | ForEach-Object {\n` +
+    `            $line = Redact-MawLine ($_.ToString())\n` +
+    `            [System.IO.File]::AppendAllText($logPath, $line + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    `        }\n` +
+    `        $code = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }\n` +
+    `    } catch {\n` +
+    `        [System.IO.File]::AppendAllText($logPath, "[ERROR] " + (Redact-MawLine $_.Exception.Message) + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    `        $code = 1\n` +
+    `    }\n` +
+    `}\n` +
+    `if (Get-Command Invoke-MawHooks -ErrorAction SilentlyContinue) {\n` +
+    `    try {\n` +
+    `        $finRes = @(Invoke-MawHooks -Event 'job-finish' -Context @{ job_id = ${psq(jobId)}; mode = ${psq(mode)}; agent = ${psq(agent)}; role = ${psq(role)}; project = ${psq(projectPath)}; exit_code = $code })\n` +
+    `        foreach ($item in $finRes) {\n` +
+    `            if ($item -is [string] -and $item.Trim()) {\n` +
+    `                [System.IO.File]::AppendAllText($logPath, (Redact-MawLine $item) + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    `            }\n` +
+    `        }\n` +
+    `    } catch {}\n` +
+    `}\n` +
+    `[System.IO.File]::AppendAllText($logPath, "\`r\`n=== [JOB_FINISHED exit_code=$code] ===\`r\`n", [System.Text.Encoding]::UTF8)\n` +
+    (notifyScript
+      ? `if (Test-Path -LiteralPath ${psq(notifyScript)}) {\n` +
+        `    $finalStatus = if ($code -eq 0) { 'DONE' } else { 'FAILED' }\n` +
+        `    try {\n` +
+        `        & ${psq(notifyScript)} -JobId ${psq(jobId)} -Status $finalStatus -Mode ${psq(mode)} -Role ${psq(role)} -Project ${psq(projShort)} -ExitCode $code -ConfigFile ${psq(notifyCfgFile)} *>$null\n` +
+        `    } catch {}\n` +
+        `}\n`
+      : '') +
+    `exit $code\n`;
+
+  fs.writeFileSync(runnerFile, '\uFEFF' + runnerCode, 'utf8');
+
+  let pid = 0;
+  if (options.customLauncher) {
+    pid = await options.customLauncher(runnerFile);
+  } else {
+    const launchScript =
+      `$r = ${psq(runnerFile)}; ` +
+      `$p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $r)) -WindowStyle Hidden -PassThru; ` +
+      `if ($p) { [Console]::Out.WriteLine($p.Id) }`;
+    const encodedLaunch = Buffer.from(launchScript, 'utf16le').toString('base64');
+
+    const launchRes = await runCommand(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedLaunch],
+      { timeoutMs: 10000 }
+    );
+    const pidMatch = /(\d+)/.exec(launchRes.stdout.trim());
+    if (pidMatch) {
+      pid = Number.parseInt(pidMatch[1]!, 10) || 0;
+    }
+  }
+
+  const serverId = `${process.pid}@${process.env.MAW_PORT || '4317'}`;
+  const fullMeta: JobMeta = {
+    ...options.meta,
+    job_id: jobId,
+    pid,
+    server_id: options.meta.server_id ?? serverId,
+    projects_root: options.meta.projects_root ?? paths?.projectsRoot,
+    mode,
+    agent,
+    role,
+    project_path: projectPath,
+    command: resolvedCommandLine,
+    status: 'RUNNING',
+    exit_code: null,
+    started_at: now.toISOString(),
+    started_ts: nowSec,
+  };
+
+  fs.writeFileSync(metaFile, JSON.stringify(fullMeta), 'utf8');
+
+  return {
+    job_id: jobId,
+    pid,
+    command: resolvedCommandLine,
+    meta: fullMeta,
+  };
 }
 
 export async function handleRunJob(
@@ -305,7 +708,7 @@ export async function handleRunJob(
       : undefined;
 
   const requiredAgentIds: string[] = [];
-  if (mode === 'task') {
+  if (mode === 'task' || mode === 'chat') {
     requiredAgentIds.push(agent);
   } else if (mode === 'team') {
     requiredAgentIds.push(agent);
@@ -402,141 +805,138 @@ export async function handleRunJob(
     // Ignore cleanup errors
   }
 
-  const now = new Date();
-  const jobId = `job_${formatJobTimestamp(now)}_${crypto.randomBytes(3).toString('hex')}`;
-  const promptFile = path.win32.join(jobsDir, `${jobId}.prompt.txt`);
-  const logFile = path.win32.join(jobsDir, `${jobId}.log`);
-  const runnerFile = path.win32.join(jobsDir, `${jobId}.runner.ps1`);
-  const metaFile = path.win32.join(jobsDir, `${jobId}.json`);
-
-  fs.writeFileSync(promptFile, '\uFEFF' + prompt, 'utf8');
-  const headerLine =
-    `=== [MISSION CONTROL JOB ${jobId}] ===\n` +
-    `Mode: ${mode.toUpperCase()} | Agent: ${agent} | Role: ${role} | Project: ${validatedProjectPath}\n` +
-    `Started: ${formatHumanDateTime(now)}\n` +
-    `------------------------------------------------------------\n`;
-  fs.writeFileSync(logFile, '\uFEFF' + headerLine, 'utf8');
-
-  const spec = buildCommandSpec(info, paths.scriptsDir, promptFile);
-  const notifyScript = path.win32.join(paths.scriptsDir, 'send-notification.ps1');
-  const hooksLib = path.win32.join(paths.scriptsDir, 'lib', 'maw-hooks.ps1');
-  const projShort = path.basename(validatedProjectPath);
-
-  // C1 + C2 fix + F0 §9.0 hooks: Write self-contained PowerShell runner script that invokes job-start/job-finish hooks,
-  // streams output to logFile, records the real $LASTEXITCODE in JOB_FINISHED, and triggers send-notification.ps1.
-  const runnerCode =
-    `$ErrorActionPreference = 'Continue'\n` +
-    `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8\n` +
-    `$OutputEncoding = [System.Text.Encoding]::UTF8\n` +
-    `$logPath = ${psq(logFile)}\n` +
-    `if (Test-Path -LiteralPath ${psq(hooksLib)}) {\n` +
-    `    try { . ${psq(hooksLib)} } catch {}\n` +
-    `}\n` +
-    `$code = 0\n` +
-    `$hookBlocked = $false\n` +
-    `if (Get-Command Invoke-MawHooks -ErrorAction SilentlyContinue) {\n` +
-    `    try {\n` +
-    `        $startRes = @(Invoke-MawHooks -Event 'job-start' -Context @{ job_id = ${psq(jobId)}; mode = ${psq(mode)}; agent = ${psq(agent)}; role = ${psq(role)}; project = ${psq(validatedProjectPath)}; exit_code = $null })\n` +
-    `        foreach ($item in $startRes) {\n` +
-    `            if ($item -is [string] -and $item.Trim()) {\n` +
-    `                [System.IO.File]::AppendAllText($logPath, $item + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
-    `            } elseif ($null -ne $item -and $item.Block) {\n` +
-    `                $hookBlocked = $true\n` +
-    `                [System.IO.File]::AppendAllText($logPath, "[HOOK BLOCKED: job-start] " + [string]$item.Reason + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
-    `                $code = 4\n` +
-    `            }\n` +
-    `        }\n` +
-    `    } catch {}\n` +
-    `}\n` +
-    `if (-not $hookBlocked) {\n` +
-    `    try {\n` +
-    `        ${spec.preview} *>&1 | ForEach-Object {\n` +
-    `            $line = $_.ToString()\n` +
-    `            [System.IO.File]::AppendAllText($logPath, $line + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
-    `        }\n` +
-    `        $code = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }\n` +
-    `    } catch {\n` +
-    `        [System.IO.File]::AppendAllText($logPath, "[ERROR] " + $_.Exception.Message + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
-    `        $code = 1\n` +
-    `    }\n` +
-    `}\n` +
-    `if (Get-Command Invoke-MawHooks -ErrorAction SilentlyContinue) {\n` +
-    `    try {\n` +
-    `        $finRes = @(Invoke-MawHooks -Event 'job-finish' -Context @{ job_id = ${psq(jobId)}; mode = ${psq(mode)}; agent = ${psq(agent)}; role = ${psq(role)}; project = ${psq(validatedProjectPath)}; exit_code = $code })\n` +
-    `        foreach ($item in $finRes) {\n` +
-    `            if ($item -is [string] -and $item.Trim()) {\n` +
-    `                [System.IO.File]::AppendAllText($logPath, $item + "\`r\`n", [System.Text.Encoding]::UTF8)\n` +
-    `            }\n` +
-    `        }\n` +
-    `    } catch {}\n` +
-    `}\n` +
-    `[System.IO.File]::AppendAllText($logPath, "\`r\`n=== [JOB_FINISHED exit_code=$code] ===\`r\`n", [System.Text.Encoding]::UTF8)\n` +
-    `if (Test-Path -LiteralPath ${psq(notifyScript)}) {\n` +
-    `    $finalStatus = if ($code -eq 0) { 'DONE' } else { 'FAILED' }\n` +
-    `    try {\n` +
-    `        & ${psq(notifyScript)} -JobId ${psq(jobId)} -Status $finalStatus -Mode ${psq(mode)} -Role ${psq(role)} -Project ${psq(projShort)} -ExitCode $code -ConfigFile ${psq(paths.notifyCfgFile)} *>$null\n` +
-    `    } catch {}\n` +
-    `}\n` +
-    `exit $code\n`;
-
-  fs.writeFileSync(runnerFile, '\uFEFF' + runnerCode, 'utf8');
-
-  // C1 + C2 fix: Spawn a short non-detached launcher (argument array, shell: false) that uses Start-Process
-  // so the grandchild runner breaks away from libuv's KILL_ON_JOB_CLOSE job object and survives server restarts.
-  const launchScript =
-    `$r = ${psq(runnerFile)}; ` +
-    `$p = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $r)) -WindowStyle Hidden -PassThru; ` +
-    `if ($p) { [Console]::Out.WriteLine($p.Id) }`;
-  const encodedLaunch = Buffer.from(launchScript, 'utf16le').toString('base64');
-
-  const launchRes = await runCommand(
-    'powershell.exe',
-    ['-NoProfile', '-NonInteractive', '-EncodedCommand', encodedLaunch],
-    { timeoutMs: 10000 }
-  );
-
-  let pid = 0;
-  const pidMatch = /(\d+)/.exec(launchRes.stdout.trim());
-  if (pidMatch) {
-    pid = Number.parseInt(pidMatch[1]!, 10) || 0;
+  // C9: Handle isolate: true through S1's prepareIsolatedJob
+  let isolatedWorktree: WorktreeRecord | null = null;
+  let effectiveProjectPath = validatedProjectPath;
+  if (body.isolate === true) {
+    const wtCtx: MawFeatureContext = {
+      paths,
+      registry,
+      readJobs: (opts?: { limit?: number }) => getRecentJobs(paths.jobsDir, opts?.limit ?? 8),
+      startJob: (b: Record<string, unknown>) => handleRunJob(b, paths),
+    };
+    isolatedWorktree = await prepareIsolatedJob(wtCtx, {
+      ...body,
+      project_path: validatedProjectPath,
+    });
+    effectiveProjectPath = isolatedWorktree.worktree_path;
+    info.project_path = effectiveProjectPath;
   }
 
-  const meta: JobMeta = {
-    job_id: jobId,
-    pid,
+  const metaDraft: Partial<JobMeta> & { project_path: string } = {
     mode,
     agent,
     role,
     model: modelOverride,
     effort: effortOverride,
     new_session: newSession,
-    project_path: validatedProjectPath,
-    command: spec.preview,
-    status: 'RUNNING',
-    exit_code: null,
-    started_at: now.toISOString(),
-    started_ts: nowSec,
+    project_path: effectiveProjectPath,
   };
   if (teamArray) {
-    meta.team = teamArray;
+    metaDraft.team = teamArray;
   }
   if (effectiveReviewers) {
-    meta.reviewers = effectiveReviewers;
+    metaDraft.reviewers = effectiveReviewers;
   }
   if (effectiveImplementer) {
-    meta.implementer = effectiveImplementer;
+    metaDraft.implementer = effectiveImplementer;
   }
-  fs.writeFileSync(metaFile, JSON.stringify(meta), 'utf8');
+  if (isolatedWorktree) {
+    metaDraft.isolated_from = validatedProjectPath;
+    metaDraft.worktree = {
+      id: isolatedWorktree.id,
+      path: isolatedWorktree.worktree_path,
+      branch: isolatedWorktree.branch,
+      port: isolatedWorktree.port,
+    };
+    metaDraft.branch = isolatedWorktree.branch;
+  }
+  if (
+    typeof body.budget_usd === 'number' &&
+    Number.isFinite(body.budget_usd) &&
+    body.budget_usd >= 0
+  ) {
+    metaDraft.budget_usd = body.budget_usd;
+  }
+  if (
+    typeof body.max_rounds === 'number' &&
+    Number.isInteger(body.max_rounds) &&
+    body.max_rounds >= 1
+  ) {
+    metaDraft.max_rounds = body.max_rounds;
+  }
+  if (body.source && typeof body.source === 'object' && !Array.isArray(body.source)) {
+    const srcObj = body.source as Record<string, unknown>;
+    metaDraft.source = {
+      ...srcObj,
+      feature: String(srcObj.feature ?? ''),
+      ...(srcObj.task_id !== undefined ? { task_id: String(srcObj.task_id) } : {}),
+    };
+  }
+  if (info.agent_profile_id) {
+    metaDraft.agent_profile_id = info.agent_profile_id;
+  }
+  if (info.conversation_id) {
+    metaDraft.conversation_id = info.conversation_id;
+  }
+  if (info.resume_token) {
+    metaDraft.resume_token = info.resume_token;
+    metaDraft.session_ref = { platform: agent || mode, id: info.resume_token };
+  }
+
+  let launched: { job_id: string; pid: number; command: string; meta: JobMeta };
+  try {
+    launched = await launchJob({
+      meta: metaDraft,
+      commandLine: ({ promptFile }) => buildCommandSpec(info, paths.scriptsDir, promptFile).preview,
+      prompt,
+      paths,
+      env: info.env,
+      cliArgs: info.cli_args,
+      worktreePort: isolatedWorktree?.port,
+    });
+  } catch (err) {
+    if (isolatedWorktree) {
+      await gitRun(['worktree', 'remove', '--force', isolatedWorktree.worktree_path], {
+        cwd: isolatedWorktree.project_path,
+        allowFailure: true,
+      });
+      await gitRun(['branch', '-D', isolatedWorktree.branch], {
+        cwd: isolatedWorktree.project_path,
+        allowFailure: true,
+      });
+      const wtDataDir = paths.featureDataDir('worktrees');
+      await withStoreLock(async () => {
+        const store = await loadWorktreesStore(wtDataDir);
+        store.worktrees = store.worktrees.filter((w) => w.id !== isolatedWorktree!.id);
+        await saveWorktreesStore(wtDataDir, store);
+      });
+    }
+    throw err;
+  }
+
+  if (isolatedWorktree && launched.job_id) {
+    const wtDataDir = paths.featureDataDir('worktrees');
+    await withStoreLock(async () => {
+      const store = await loadWorktreesStore(wtDataDir);
+      const rec = store.worktrees.find((w) => w.id === isolatedWorktree!.id);
+      if (rec) {
+        rec.job_id = launched.job_id;
+        rec.updated_at = new Date().toISOString();
+        await saveWorktreesStore(wtDataDir, store);
+      }
+    });
+  }
 
   const runResp: Record<string, unknown> = {
     ok: true,
-    job_id: jobId,
-    pid,
+    job_id: launched.job_id,
+    pid: launched.pid,
     mode,
     agent,
     role,
     status: 'RUNNING',
-    command: spec.preview,
+    command: launched.command,
   };
   if (teamArray) {
     runResp.team = teamArray;
@@ -546,6 +946,10 @@ export async function handleRunJob(
   }
   if (effectiveImplementer) {
     runResp.implementer = effectiveImplementer;
+  }
+  if (metaDraft.worktree) {
+    runResp.worktree = metaDraft.worktree;
+    runResp.isolated_from = metaDraft.isolated_from;
   }
   return runResp;
 }
@@ -619,6 +1023,7 @@ export async function handleJobStatus(
   meta = await refreshJobMetaStatus(meta, paths.jobsDir);
 
   const { chunk, nextOffset, fullSize } = readSafeLogSlice(logFile, offset, 131072);
+  const redactedChunk = redactJobLogChunk(chunk, paths, meta.project_path);
   const nowSec = Math.floor(Date.now() / 1000);
   const elapsed = Math.max(0, nowSec - Math.trunc(Number(meta.started_ts ?? nowSec) || nowSec));
 
@@ -631,8 +1036,9 @@ export async function handleJobStatus(
     mode: meta.mode ?? '',
     agent: meta.agent ?? meta.mode ?? '',
     role: meta.role ?? '',
+    project_path: meta.project_path ?? '',
     elapsed_sec: elapsed,
-    log_chunk: chunk,
+    log_chunk: redactedChunk,
     next_offset: nextOffset,
     full_log_size: fullSize,
   };
@@ -644,6 +1050,15 @@ export async function handleJobStatus(
   }
   if (typeof meta.implementer === 'string' && meta.implementer !== '') {
     statusResp.implementer = meta.implementer;
+  }
+  if (meta.worktree !== undefined) {
+    statusResp.worktree = meta.worktree;
+  }
+  if (meta.isolated_from !== undefined) {
+    statusResp.isolated_from = meta.isolated_from;
+  }
+  if (meta.session_ref !== undefined) {
+    statusResp.session_ref = meta.session_ref;
   }
   return statusResp;
 }

@@ -1,7 +1,12 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import type { MawFeature, MawFeatureContext, MawFeatureRequest } from '../../lib/feature.ts';
+import {
+  appendActionAudit,
+  type MawFeature,
+  type MawFeatureContext,
+  type MawFeatureRequest,
+} from '../../lib/feature.ts';
 import { resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { withRecoveryLock, type RecoveryData, type RecoveryItem } from '../fallback/index.ts';
@@ -94,9 +99,10 @@ function appendPolicyAudit(
   action: string,
   details: Record<string, unknown>
 ): void {
-  const auditFile = path.win32.join(ctx.paths.featureDataDir('policy'), 'audit.jsonl');
-  appendJsonl(auditFile, {
-    ts: new Date().toISOString(),
+  const ts = new Date().toISOString();
+  appendActionAudit(ctx.paths, {
+    ts,
+    feature: 'policy',
     action,
     by: 'dashboard',
     details,

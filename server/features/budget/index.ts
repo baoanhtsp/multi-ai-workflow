@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createFeatureContext, type MawFeature, type MawFeatureContext } from '../../lib/feature.ts';
+import { logServerError } from '../../lib/logger.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import {
   appendJsonl,
@@ -342,8 +343,14 @@ export async function syncLedger(ctx: MawFeatureContext): Promise<void> {
 function ensureLedgerTimer(ctx: MawFeatureContext): void {
   if (!ledgerTimer) {
     ledgerTimer = setInterval(() => {
-      const freshCtx = createFeatureContext(ctx.paths);
-      syncLedger(freshCtx).catch(() => {});
+      try {
+        const freshCtx = createFeatureContext(ctx.paths);
+        syncLedger(freshCtx).catch((err) => {
+          logServerError('budget:syncLedger', err, ctx.paths.mawHome);
+        });
+      } catch (err) {
+        logServerError('budget:ensureLedgerTimer', err, ctx.paths.mawHome);
+      }
     }, 60000);
     ledgerTimer.unref();
   }

@@ -209,6 +209,9 @@ export interface MawServerOptions {
   projectsRoot?: string;
   userProfile?: string;
   mawHome?: string;
+  tempDir?: string;
+  jobsDir?: string;
+  scriptsDir?: string;
   featuresDir?: string;
   extraFeatures?: MawFeature[];
 }
@@ -288,6 +291,7 @@ export function createMawHttpServer(options?: MawServerOptions): {
 
       const url = new URL(rawUrl, `http://${rawHost}`);
       const paths = getPaths();
+      const serverUrl = `http://127.0.0.1:${boundPort}`;
 
       // 6. API Endpoint: /api (or /dashboard/api)
       if (decodedPathname === '/api' || decodedPathname === '/dashboard/api') {
@@ -303,33 +307,25 @@ export function createMawHttpServer(options?: MawServerOptions): {
           return;
         }
 
-        if (
-          (BUILTIN_GET_ACTIONS.has(action) || featRoute?.method === 'GET') &&
-          method !== 'GET'
-        ) {
-          sendJson(
-            res,
-            { ok: false, error: `Method Not Allowed: Use GET for ${action}.` },
-            405
-          );
-          return;
-        }
-
-        if (
-          (BUILTIN_POST_ACTIONS.has(action) || featRoute?.method === 'POST') &&
-          method !== 'POST'
-        ) {
-          sendJson(
-            res,
-            { ok: false, error: `Method Not Allowed: Use POST for ${action}.` },
-            405
-          );
-          return;
-        }
-
         if (featRoute) {
-          const body = featRoute.method === 'POST' ? await readJsonBody(req) : {};
-          const baseCtx = createFeatureContext(paths);
+          const allowedMethods = featRoute.methods ?? [featRoute.method];
+          if (!allowedMethods.includes(method as 'GET' | 'POST')) {
+            sendJson(
+              res,
+              {
+                ok: false,
+                error: `Method Not Allowed: Use ${allowedMethods.join(' or ')} for ${action}.`,
+              },
+              405
+            );
+            return;
+          }
+
+          const body = method === 'POST' ? await readJsonBody(req) : {};
+          const baseCtx = createFeatureContext(paths, undefined, {
+            routes: loadedFeatures.routes,
+            serverUrl,
+          });
           const reqCtx: MawFeatureRequest = {
             ...baseCtx,
             url,
@@ -346,8 +342,29 @@ export function createMawHttpServer(options?: MawServerOptions): {
           return;
         }
 
+        if (BUILTIN_GET_ACTIONS.has(action) && method !== 'GET') {
+          sendJson(
+            res,
+            { ok: false, error: `Method Not Allowed: Use GET for ${action}.` },
+            405
+          );
+          return;
+        }
+
+        if (BUILTIN_POST_ACTIONS.has(action) && method !== 'POST') {
+          sendJson(
+            res,
+            { ok: false, error: `Method Not Allowed: Use POST for ${action}.` },
+            405
+          );
+          return;
+        }
+
         if (action === 'status') {
-          const payload = await handleStatus(paths, loadedFeatures.features);
+          const payload = await handleStatus(paths, loadedFeatures.features, {
+            routes: loadedFeatures.routes,
+            serverUrl,
+          });
           sendJson(res, payload, 200);
           return;
         }

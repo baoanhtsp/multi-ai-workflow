@@ -16,12 +16,31 @@ Describe "S3 Hooks (30-health.ps1, 30-timeline.ps1)" {
         $tlFinHook = Join-Path $repoRoot "antigravity\skills\claude-leader\scripts\hooks\job-finish\30-timeline.ps1"
 
         $origMawHome = $env:MAW_HOME
+        $origUserProf = $env:USERPROFILE
+        $origTemp = $env:TEMP
+        $origTmp = $env:TMP
+        $origMawTest = $env:MAW_TEST
+        $origAuditFile = $env:MAW_AUDIT_FILE
         $origSkipHealth = $env:MAW_SKIP_HEALTH
+
+        $isoTemp = Join-Path $testRoot "Temp"
+        [void](New-Item -ItemType Directory -Path $isoTemp -Force)
+
         $env:MAW_HOME = $mawHome
+        $env:USERPROFILE = $userProf
+        $env:TEMP = $isoTemp
+        $env:TMP = $isoTemp
+        $env:MAW_TEST = "1"
+        $env:MAW_AUDIT_FILE = Join-Path $userProf ".gemini\antigravity\multi-ai-audit.jsonl"
     }
 
     AfterAll {
         if ($null -ne $origMawHome) { $env:MAW_HOME = $origMawHome } else { Remove-Item env:MAW_HOME -ErrorAction SilentlyContinue }
+        if ($null -ne $origUserProf) { $env:USERPROFILE = $origUserProf } else { Remove-Item env:USERPROFILE -ErrorAction SilentlyContinue }
+        if ($null -ne $origTemp) { $env:TEMP = $origTemp } else { Remove-Item env:TEMP -ErrorAction SilentlyContinue }
+        if ($null -ne $origTmp) { $env:TMP = $origTmp } else { Remove-Item env:TMP -ErrorAction SilentlyContinue }
+        if ($null -ne $origMawTest) { $env:MAW_TEST = $origMawTest } else { Remove-Item env:MAW_TEST -ErrorAction SilentlyContinue }
+        if ($null -ne $origAuditFile) { $env:MAW_AUDIT_FILE = $origAuditFile } else { Remove-Item env:MAW_AUDIT_FILE -ErrorAction SilentlyContinue }
         if ($null -ne $origSkipHealth) { $env:MAW_SKIP_HEALTH = $origSkipHealth } else { Remove-Item env:MAW_SKIP_HEALTH -ErrorAction SilentlyContinue }
         try {
             Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue

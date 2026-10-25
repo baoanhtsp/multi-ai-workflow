@@ -1,6 +1,4 @@
-import path from 'node:path';
-import { appendAuditEntry } from '../../lib/audit.ts';
-import type { MawFeatureContext } from '../../lib/feature.ts';
+import { appendActionAudit, type MawFeatureContext } from '../../lib/feature.ts';
 import { resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import {
@@ -227,7 +225,6 @@ export async function handleGitPull(
     args.push(br);
   }
 
-  const dataDir = ctx.paths.featureDataDir('worktrees');
   const auditEntry = {
     Timestamp: new Date().toISOString(),
     Tool: 'maw-s1',
@@ -235,8 +232,7 @@ export async function handleGitPull(
     Project: projectPath,
     Detail: `git pull --ff-only ${remote} ${body.branch || ''}`.trim(),
   };
-  appendAuditEntry(ctx.paths.auditFile, auditEntry);
-  appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+  appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
 
   const res = await gitRun(args, {
     cwd: projectPath,
@@ -287,7 +283,6 @@ export async function handleGitPush(
   }
   args.push(remote, validBranch);
 
-  const dataDir = ctx.paths.featureDataDir('worktrees');
   const auditEntry = {
     Timestamp: new Date().toISOString(),
     Tool: 'maw-s1',
@@ -295,8 +290,7 @@ export async function handleGitPush(
     Project: projectPath,
     Detail: `git push ${body.set_upstream ? '-u ' : ''}${remote} ${validBranch}`,
   };
-  appendAuditEntry(ctx.paths.auditFile, auditEntry);
-  appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+  appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
 
   const res = await gitRun(args, {
     cwd: projectPath,
@@ -336,7 +330,6 @@ export async function handleGitBranchSwitch(
   }
   const branch = await validateRefName(rawBranch, projectPath);
 
-  const dataDir = ctx.paths.featureDataDir('worktrees');
   const auditEntry = {
     Timestamp: new Date().toISOString(),
     Tool: 'maw-s1',
@@ -344,8 +337,7 @@ export async function handleGitBranchSwitch(
     Project: projectPath,
     Detail: `git switch ${branch}`,
   };
-  appendAuditEntry(ctx.paths.auditFile, auditEntry);
-  appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+  appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
 
   const res = await gitRun(['switch', branch], {
     cwd: projectPath,
@@ -391,7 +383,6 @@ export async function handleGitBranchCreate(
     args.push(base);
   }
 
-  const dataDir = ctx.paths.featureDataDir('worktrees');
   const auditEntry = {
     Timestamp: new Date().toISOString(),
     Tool: 'maw-s1',
@@ -399,8 +390,7 @@ export async function handleGitBranchCreate(
     Project: projectPath,
     Detail: `git branch create ${name} (base: ${base || 'HEAD'}, switch: ${shouldSwitch})`,
   };
-  appendAuditEntry(ctx.paths.auditFile, auditEntry);
-  appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+  appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
 
   const res = await gitRun(args, {
     cwd: projectPath,

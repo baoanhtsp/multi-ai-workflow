@@ -103,6 +103,17 @@ try {
     Write-Output "[$(Get-Date -Format 'HH:mm:ss')] Launching Parallel AI Council ($namesJoined) in $WorkDir..."
 
     $mawHomeVal = if ($env:MAW_HOME) { $env:MAW_HOME } else { "" }
+    $userProfileVal = if ($env:USERPROFILE) { $env:USERPROFILE } else { "" }
+    $tempVal = if ($env:TEMP) { $env:TEMP } else { "" }
+    $tmpVal = if ($env:TMP) { $env:TMP } else { "" }
+    $mawTestVal = if ($env:MAW_TEST) { $env:MAW_TEST } else { "" }
+
+    if ($userProfileVal) {
+        $psPersistDir = Join-Path $userProfileVal "AppData\Local\Microsoft\Windows\PowerShell"
+        if (-not (Test-Path -LiteralPath $psPersistDir)) {
+            New-Item -ItemType Directory -Path $psPersistDir -Force -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
 
     foreach ($entry in $reviewerEntries) {
         $rid = $entry.id
@@ -111,16 +122,18 @@ try {
         $timedOutById[$rid] = $false
 
         $jobsById[$rid] = Start-Job -ScriptBlock {
-            param($agentScriptPath, $agentId, $workDir, $promptFilePath, $timeoutSec, $mawHome)
+            param($agentScriptPath, $agentId, $workDir, $promptFilePath, $timeoutSec, $mawHome, $userProfile, $tempDir, $tmpDir, $mawTest)
             $OutputEncoding = [System.Text.Encoding]::UTF8
             [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-            if ($mawHome) {
-                $env:MAW_HOME = $mawHome
-            }
+            if ($mawHome) { $env:MAW_HOME = $mawHome }
+            if ($userProfile) { $env:USERPROFILE = $userProfile }
+            if ($tempDir) { $env:TEMP = $tempDir }
+            if ($tmpDir) { $env:TMP = $tmpDir }
+            if ($mawTest) { $env:MAW_TEST = $mawTest }
             & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $agentScriptPath -Agent $agentId -Role reviewer -WorkDir $workDir -PromptFile $promptFilePath -TimeoutSeconds $timeoutSec 2>&1
             $code = if ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 0 }
             Write-Output "__JOB_EXIT_CODE__:$code"
-        } -ArgumentList $agentScript, $rid, $WorkDir, $sharedPromptFile, $TimeoutSeconds, $mawHomeVal
+        } -ArgumentList $agentScript, $rid, $WorkDir, $sharedPromptFile, $TimeoutSeconds, $mawHomeVal, $userProfileVal, $tempVal, $tmpVal, $mawTestVal
     }
 
     $deadlineMs = [Math]::Max(2000, ($TimeoutSeconds + 15) * 1000)

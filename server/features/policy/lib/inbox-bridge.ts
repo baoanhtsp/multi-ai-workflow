@@ -16,7 +16,7 @@ import {
   type PolicyApproval,
 } from '../index.ts';
 import {
-  appendJsonl,
+  appendS4Audit,
   readJsonSafe,
   rebuildRunBody,
   replaceAgent,
@@ -260,25 +260,17 @@ export async function handleInboxResolved(item: InboxItem): Promise<boolean> {
             targetRec.status = 'started';
             targetRec.new_job_id = newJobId;
             writeJsonAtomic(recFile, recData);
-            appendJsonl(path.win32.join(fallbackDir, 'audit.jsonl'), {
-              ts: new Date().toISOString(),
-              action: 'recovery_apply',
-              details: {
-                id: targetRec.id,
-                new_job_id: newJobId,
-                from: 'inbox_retry',
-              },
+            appendS4Audit(fallbackDir, 'recovery_apply', {
+              id: targetRec.id,
+              new_job_id: newJobId,
+              from: 'inbox_retry',
             });
           } else {
             // no-op if no longer waiting/suggested/gave_up/failed; log info audit
-            appendJsonl(path.win32.join(fallbackDir, 'audit.jsonl'), {
-              ts: new Date().toISOString(),
-              action: 'inbox_retry_ignored',
-              details: {
-                id: targetRec.id,
-                status: targetRec.status,
-                job_id: targetRec.source_job_id,
-              },
+            appendS4Audit(fallbackDir, 'inbox_retry_ignored', {
+              id: targetRec.id,
+              status: targetRec.status,
+              job_id: targetRec.source_job_id,
             });
           }
         }

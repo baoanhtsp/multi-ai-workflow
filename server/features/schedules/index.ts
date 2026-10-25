@@ -1,6 +1,6 @@
 import type { MawFeature } from '../../lib/feature.ts';
 import { badRequest } from '../tasks/lib.ts';
-import { ensureScheduler, registerTicker, triggerImmediateTick } from '../tasks/scheduler.ts';
+import { registerTicker, triggerImmediateTick } from '../tasks/scheduler.ts';
 import {
   deleteSchedule,
   getSchedules,
@@ -18,7 +18,6 @@ export const feature: MawFeature = {
     schedule_list: {
       method: 'GET',
       handler: async (ctx) => {
-        ensureScheduler(ctx);
         const schedules = await getSchedules(ctx);
         return {
           ok: true,
@@ -31,7 +30,6 @@ export const feature: MawFeature = {
     schedule_save: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
         const schedule = await saveSchedule(ctx, req.body);
         triggerImmediateTick(ctx);
         return {
@@ -44,7 +42,6 @@ export const feature: MawFeature = {
     schedule_delete: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
         const id = String(req.body.id ?? '').trim();
         if (!id) {
           throw badRequest("Field 'id' is required.");
@@ -61,7 +58,6 @@ export const feature: MawFeature = {
     schedule_run_now: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
         const id = String(req.body.id ?? '').trim();
         if (!id) {
           throw badRequest("Field 'id' is required.");

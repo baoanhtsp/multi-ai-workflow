@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { appendActionAudit } from '../../lib/feature.ts';
 import type { ServerPaths } from '../../lib/paths.ts';
 
 export interface ReviewSessionVerdict {
@@ -148,10 +149,10 @@ export function saveReviewSession(session: ReviewSession, paths: ServerPaths): v
 }
 
 export function appendReviewAudit(entry: ReviewAuditEntry, paths: ServerPaths): void {
-  const baseDir = paths.featureDataDir('review');
-  const auditFile = path.win32.join(baseDir, 'audit.jsonl');
-  const line = JSON.stringify(entry) + '\n';
-  fs.appendFileSync(auditFile, line, 'utf8');
+  appendActionAudit(paths, {
+    feature: 'review',
+    ...entry,
+  });
 }
 
 export function appendReviewVerdict(entry: ReviewVerdictEntry, paths: ServerPaths): void {

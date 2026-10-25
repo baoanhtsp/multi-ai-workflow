@@ -457,6 +457,49 @@ export const feature: MawFeature = {
           }
 
           const note = String(body.note ?? '').trim();
+          const overrideToken = String(body.override_token ?? body.checks_override_token ?? '').trim();
+
+          // Consult checks_gate when merging / accepting an isolated worktree or a project with .maw/checks.json (Item B8)
+          const agentsDir = ctx.paths.featureDataDir('agents-ws');
+          const agentsFile = path.win32.join(agentsDir, 'agents.json');
+          const agentsData = await readJsonStore<{ version: number; agents: Agent[] }>(agentsFile, {
+            version: 1,
+            agents: [],
+          });
+          const memberAgent = agentsData.agents.find((a) => a.id === handoff.to);
+          const leadAgent = agentsData.agents.find((a) => a.id === handoff.lead_agent_id);
+          const gateProjectPath = handoff.worktree || memberAgent?.workdir || leadAgent?.workdir || '';
+
+          if (ctx.callAction && gateProjectPath && (handoff.isolated || body.merge === true || fs.existsSync(path.win32.join(gateProjectPath, '.maw', 'checks.json')))) {
+            let gateRes: Record<string, unknown> | null = null;
+            try {
+              gateRes = await ctx.callAction('checks_gate', {
+                query: {
+                  project_path: gateProjectPath,
+                  ...(overrideToken ? { override_token: overrideToken, scope: 'merge' } : {}),
+                },
+              });
+            } catch (err: unknown) {
+              if (err instanceof ApiValidationError && err.message.startsWith("Unknown API action 'checks_gate'")) {
+                gateRes = null;
+              } else {
+                throw err;
+              }
+            }
+            if (gateRes && gateRes.green === false) {
+              const failing = Array.isArray(gateRes.items)
+                ? (gateRes.items as Array<{ id?: string; state?: string; detail?: string }>)
+                    .filter((i) => i.state !== 'pass')
+                    .map((i) => `${i.id}: ${i.state}${i.detail ? ` (${i.detail})` : ''}`)
+                    .join('; ')
+                : 'checks failed';
+              throw new ApiValidationError(
+                `Checks gate is red (${failing || 'checks failed'}). Provide override_token to accept/merge.`,
+                409
+              );
+            }
+          }
+
           handoff.parse_error = '';
           handoff.scope_violations = [];
           // Item 6 (Codex Pass 7): Short Lead message "[Handoff <id>] accepted by user (was needs_review)" and no member-conversation message
@@ -470,6 +513,78 @@ export const feature: MawFeature = {
             action: 'handoff_accept',
             target: id,
             detail: { note },
+          });
+
+          return {
+            ok: true,
+            handoff,
+          };
+        });
+      },
+    },
+
+    handoff_merge: {
+      method: 'POST',
+      handler: async (ctx) => {
+        return await withS6State(async () => {
+          const body = ctx.body ?? {};
+          const id = String(body.id ?? '').trim();
+          if (!HANDOFF_ID_REGEX.test(id)) {
+            throw new ApiValidationError('Invalid handoff id.', 400);
+          }
+
+          const handoffsDir = ctx.paths.featureDataDir('handoffs');
+          const handoffsFile = path.win32.join(handoffsDir, 'handoffs.json');
+          const handoffsData = await readJsonStore<{ version: number; handoffs: Handoff[] }>(handoffsFile, {
+            version: 1,
+            handoffs: [],
+          });
+
+          const handoff = handoffsData.handoffs.find((h) => h.id === id);
+          if (!handoff) {
+            throw new ApiValidationError(`Handoff '${id}' not found.`, 404);
+          }
+
+          const overrideToken = String(body.override_token ?? body.checks_override_token ?? '').trim();
+          const agentsDir = ctx.paths.featureDataDir('agents-ws');
+          const agentsFile = path.win32.join(agentsDir, 'agents.json');
+          const agentsData = await readJsonStore<{ version: number; agents: Agent[] }>(agentsFile, {
+            version: 1,
+            agents: [],
+          });
+          const memberAgent = agentsData.agents.find((a) => a.id === handoff.to);
+          const leadAgent = agentsData.agents.find((a) => a.id === handoff.lead_agent_id);
+          const gateProjectPath = handoff.worktree || memberAgent?.workdir || leadAgent?.workdir || '';
+
+          if (gateProjectPath && ctx.callAction) {
+            const gateRes = await ctx.callAction('checks_gate', {
+              query: {
+                project_path: gateProjectPath,
+                ...(overrideToken ? { override_token: overrideToken, scope: 'merge' } : {}),
+              },
+            });
+            if (gateRes && gateRes.green === false) {
+              throw new ApiValidationError(
+                'Checks gate is red. Fix failing checks or provide an override_token.',
+                409
+              );
+            }
+          }
+
+          if (handoff.status === 'needs_review') {
+            handoff.parse_error = '';
+            handoff.scope_violations = [];
+            await finalizeHandoff(ctx, handoff, 'completed', {
+              note: String(body.note ?? 'Merged'),
+              skipMemberMessage: true,
+              leadMessageText: `[Handoff ${handoff.id}] merged by user`,
+            });
+          }
+
+          await appendAuditLog(handoffsDir, {
+            action: 'handoff_merge',
+            target: id,
+            detail: { worktree: handoff.worktree, branch: handoff.branch },
           });
 
           return {

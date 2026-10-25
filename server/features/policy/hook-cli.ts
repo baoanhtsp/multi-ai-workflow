@@ -61,6 +61,8 @@ interface HookResult {
   reason: string;
   lines: string[];
   env?: Record<string, string>;
+  suggest?: string;
+  prepend_prompt?: string;
 }
 
 function outputResult(result: HookResult): void {
@@ -406,6 +408,7 @@ async function main(): Promise<void> {
               block: true,
               reason,
               lines: [reason],
+              ...(fallbackId !== 'none' ? { suggest: fallbackId } : {}),
             });
             return;
           }
@@ -502,7 +505,12 @@ async function main(): Promise<void> {
                 project_path: workdir,
                 reason,
               });
-              outputResult({ block: true, reason, lines: [reason] });
+              outputResult({
+                block: true,
+                reason,
+                lines: [reason],
+                ...(fallbackId !== 'none' ? { suggest: fallbackId } : {}),
+              });
               return;
             }
             if (usdCap && usdCap.warn > 0 && agentSpend.usd >= usdCap.warn) {
@@ -1089,11 +1097,7 @@ async function main(): Promise<void> {
           if (!isTrusted) {
             const reason =
               'Test gate: .maw/checks.json changed and is not trusted — review and trust it in the dashboard (Checks tab) [S4:gate]';
-            outputResult({
-              block: true,
-              reason,
-              lines: [reason],
-            });
+            outputResult({ block: true, reason, lines: [reason] });
             return;
           }
 
@@ -1139,11 +1143,7 @@ async function main(): Promise<void> {
             );
             const failDetails = failedItems.map((it) => `${it.id} (${it.detail})`).join(', ');
             const reason = `Test gate red: ${failDetails || 'checks failed'} [S4:gate]`;
-            outputResult({
-              block: true,
-              reason,
-              lines: [reason],
-            });
+            outputResult({ block: true, reason, lines: [reason] });
             return;
           }
 

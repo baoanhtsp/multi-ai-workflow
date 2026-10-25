@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node server/main.ts",
-    "test": "node --test server/tests/*.test.ts",
+    "test": "node --test server/tests/*.test.ts server/features/*/*.test.ts server/features/*/tests/*.test.ts server/mcp/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

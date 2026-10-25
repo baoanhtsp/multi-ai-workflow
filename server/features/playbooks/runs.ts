@@ -214,7 +214,7 @@ export async function stopPlaybookRun(
     }
 
     writeJsonAtomic(runsFile, rawData);
-    appendAudit(ctx.paths.auditFile, 'playbook_stop', { run_id: runId });
+    appendAudit(ctx.paths, 'playbook_stop', { run_id: runId }, 'playbooks');
     return run;
   });
 }
@@ -241,11 +241,16 @@ export async function playbookTicker(ctx: MawFeatureContext): Promise<void> {
               continue;
             }
             if (tickResult === 'ticked') {
-              appendAudit(ctx.paths.auditFile, 'playbook_tick', {
-                file: run.file,
-                line: item.line,
-                text: item.text,
-              });
+              appendAudit(
+                ctx.paths,
+                'playbook_tick',
+                {
+                  file: run.file,
+                  line: item.line,
+                  text: item.text,
+                },
+                'playbooks'
+              );
             }
             item.state = 'done';
             modified = true;
@@ -296,11 +301,16 @@ export async function playbookTicker(ctx: MawFeatureContext): Promise<void> {
             continue;
           }
           if (tickResult === 'ticked') {
-            appendAudit(ctx.paths.auditFile, 'playbook_tick', {
-              file: run.file,
-              line: runningItem.line,
-              text: runningItem.text,
-            });
+            appendAudit(
+              ctx.paths,
+              'playbook_tick',
+              {
+                file: run.file,
+                line: runningItem.line,
+                text: runningItem.text,
+              },
+              'playbooks'
+            );
           }
           runningItem.state = 'done';
           run.cursor++;

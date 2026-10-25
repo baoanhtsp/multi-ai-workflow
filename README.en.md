@@ -102,6 +102,29 @@ v4.0 ships `antigravity/skills/claude-leader/agents.json` with 6 built-in & CLI 
 
 ---
 
+## ⚡ 3b. Mission Control v5.0 Feature Suite (Streams S1–S6)
+
+- **S1 — Git Isolation, Checkpoints & Best-of-N Worktrees**:
+  - Automatic Git ref checkpoints (`refs/maw/checkpoints/<job>/<NNNN>`) before jobs and rounds, 1-click restore with safety snapshots, isolated worktree execution (`isolate: true`), parallel **Best-of-N** multi-agent comparison (`bestof_start`), branch merge (`worktree_merge`), and stale branch/worktree cleanup (`cleanup_preview` / `cleanup_apply`).
+- **S2 — Kanban Task Board, Playbooks, Schedules & GitHub Sync**:
+  - Dependency-aware Kanban board (`depends_on`), automated quality gate + Council Review on `review` transition, multi-step **Playbook** templates, recurring **Schedules**, and GitHub Issues import / PR creation via `gh` CLI.
+- **S3 — Attention Inbox, Live Health Check, Unified Timeline, 2-Way Telegram & MCP Server**:
+  - Unified **Attention Inbox** for approvals, gate failures, and budget blocks; live CLI login/quota health probes (`health_check`); chronological event `timeline`; 2-way **Telegram Bot** (`/status`, `/inbox`, `/approve`, `/deny`, `/run`, `/cancel`); and a stdio **MCP Server (`server/mcp/index.ts`)** for Claude, Codex, Cursor, and Gemini.
+- **S4 — Cost & Budget Guardrails, Role Policy, Scoreboard & Auto-Fallback**:
+  - Multi-scope spend caps (`day`, `agent_day`, `project`, `job`, `team_run`), role command policies with one-time approval claims (`policy_approve`), pre-review automated test gates (`checks_run`), empirical agent **Scoreboard**, and automatic fallback routing on cooldown or cap exhaustion.
+- **S5 — Live Session Steer, Interactive Diff Review & File Explorer**:
+  - Live job steering (`steer_send`, `steer_interrupt`, `steer_follow_up`, `session_resume`), hunk/line-level interactive diff review with structured fix requests (`review_submit`), and a read-only workspace **File Explorer** (`file_tree` / `file_read`).
+- **S6 — Persistent Agent Profiles, Multi-Turn Chat Rooms, Handoffs, Shared Memory & Org Chart**:
+  - Persistent workspace agent profiles (`.maw/agents/<id>/`), multi-agent **Chat Rooms** with `@mention` routing and structured `maw:handoff` task proposals, pinned project **Memory** notes (`.maw/memory/`), and **Teams / Org Chart** hierarchy management.
+
+### 📌 v5.0 Operational Notes:
+1. **One Server Instance per `MAW_HOME`**: Each `MAW_HOME` directory (default `~/.maw`) acquires an exclusive `server.lock` so background loops (`tasks`, `schedules`, `telegram`, `chat`) never double-fire.
+2. **What to Track in Git under `.maw/`**:
+   - **Recommended to commit**: `.maw/checks.json`, `.maw/playbooks/`, `.maw/agents/`, `.maw/teams.json`, and `.maw/memory/` to share team workflows, quality gates, and project knowledge.
+   - **Optional / local state (can be gitignored)**: `.maw/tasks.json`, `.maw/chat/`, and `.maw/handoffs.json` if you prefer keeping runtime task/chat history local.
+
+---
+
 ## 🛠️ 4. 1-Click Installation & Health Check (Windows PowerShell)
 
 ```powershell

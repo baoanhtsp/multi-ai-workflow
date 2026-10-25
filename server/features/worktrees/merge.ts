@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { appendAuditEntry } from '../../lib/audit.ts';
-import type { MawFeatureContext } from '../../lib/feature.ts';
+import { appendActionAudit, type MawFeatureContext } from '../../lib/feature.ts';
 import { getTempDir, isFileSafe } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
@@ -113,8 +112,7 @@ export async function handleWorktreeMerge(
       Project: repoPath,
       Detail: `Merge worktree ${record.id} (${record.branch}) with strategy ${strategy}`,
     };
-    appendAuditEntry(ctx.paths.auditFile, auditEntry);
-    appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+    appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
 
     // Commit any pending uncommitted work in the worktree
     const dirtyRes = await gitRun(['status', '--porcelain'], { cwd: wtPath });
@@ -258,7 +256,9 @@ export async function handleWorktreeMerge(
           project_path: wtPath,
           scope: 'merge',
         };
-        const overrideToken = String(body.checks_override_token ?? '').trim();
+        const overrideToken = String(
+          body.override_token ?? body.checks_override_token ?? ''
+        ).trim();
         if (overrideToken) {
           gateQuery.override_token = overrideToken;
         }
@@ -638,8 +638,7 @@ export async function handleWorktreeDiscard(
       Project: repoPath,
       Detail: `Discard worktree ${record.id} (${record.branch})`,
     };
-    appendAuditEntry(ctx.paths.auditFile, auditEntry);
-    appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+    appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
 
     const keptRef = `refs/maw/discarded/${record.id}`;
 

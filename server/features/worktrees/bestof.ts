@@ -2,7 +2,6 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { handleCancelJob } from '../../actions/jobs.ts';
-import { appendAuditEntry } from '../../lib/audit.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
 import { isDirectorySafe, isFileSafe, resolveProjectPath } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
@@ -300,7 +299,7 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
                       statusRes = await callAction('checks_status', {
                         query: { project_path: wtPath },
                       });
-                      if (!statusRes || !statusRes.pending) {
+                      if (!statusRes || (!statusRes.running && !statusRes.pending)) {
                         break;
                       }
                       await new Promise((r) => setTimeout(r, pollIntervalMs));
@@ -313,8 +312,13 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
                     const testResults = rawResults.map((r) => ({
                       name: String(r.label || r.name || r.id || 'check'),
                       exit_code: typeof r.exit_code === 'number' ? r.exit_code : null,
-                      duration_s: typeof r.duration_s === 'number' ? r.duration_s : 0,
-                      tail: String(r.tail ?? ''),
+                      duration_s:
+                        typeof r.duration_s === 'number'
+                          ? r.duration_s
+                          : typeof r.duration_ms === 'number'
+                            ? Math.round((r.duration_ms / 1000) * 100) / 100
+                            : 0,
+                      tail: String(r.tail ?? r.output_tail ?? ''),
                     }));
 
                     let status: 'pass' | 'fail' | 'error' = 'fail';
@@ -324,7 +328,7 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
                       status = 'pass';
                     } else if (gate && gate.green === false) {
                       status = 'fail';
-                    } else if (rawResults.some((r) => r.status === 'error')) {
+                    } else if (rawResults.some((r) => r.status === 'error' || r.state === 'untrusted')) {
                       status = 'error';
                     } else {
                       status = 'fail';
@@ -364,6 +368,8 @@ export async function advanceBestOfRun(ctx: MawFeatureContext, run: BestOfRun): 
                         if (targetCand) {
                           if (isUnknownAction) {
                             targetCand.tests = { status: 'unavailable', results: [] };
+                          } else if (msg.includes('No .maw/checks.json')) {
+                            targetCand.tests = { status: 'none', results: [] };
                           } else {
                             targetCand.tests = {
                               status: 'error',
@@ -843,12 +849,20 @@ export async function handleBestOfPick(
         if (other.i !== candIndex) {
           if (other.job_id) {
             try {
-              await handleCancelJob({ job_id: other.job_id }, ctx.paths);
+              if (typeof ctx.cancelJob === 'function') {
+                await ctx.cancelJob(other.job_id);
+              } else {
+                await handleCancelJob({ job_id: other.job_id }, ctx.paths);
+              }
             } catch {}
           }
           if (other.council?.job_id) {
             try {
-              await handleCancelJob({ job_id: other.council.job_id }, ctx.paths);
+              if (typeof ctx.cancelJob === 'function') {
+                await ctx.cancelJob(other.council.job_id);
+              } else {
+                await handleCancelJob({ job_id: other.council.job_id }, ctx.paths);
+              }
             } catch {}
           }
           try {
@@ -906,12 +920,20 @@ export async function handleBestOfCancel(
     for (const c of run.candidates) {
       if (c.job_id) {
         try {
-          await handleCancelJob({ job_id: c.job_id }, ctx.paths);
+          if (typeof ctx.cancelJob === 'function') {
+            await ctx.cancelJob(c.job_id);
+          } else {
+            await handleCancelJob({ job_id: c.job_id }, ctx.paths);
+          }
         } catch {}
       }
       if (c.council?.job_id) {
         try {
-          await handleCancelJob({ job_id: c.council.job_id }, ctx.paths);
+          if (typeof ctx.cancelJob === 'function') {
+            await ctx.cancelJob(c.council.job_id);
+          } else {
+            await handleCancelJob({ job_id: c.council.job_id }, ctx.paths);
+          }
         } catch {}
       }
       c.job_status = 'CANCELLED';

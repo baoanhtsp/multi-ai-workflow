@@ -104,6 +104,30 @@ Hệ thống v4.0 đi kèm 6 AI trong `antigravity/skills/claude-leader/agents.j
 
 ---
 
+## ⚡ 3b. Bộ Tính Năng Mission Control v5.0 (6 Streams: S1–S6)
+
+- **S1 — Git Isolation, Checkpoints & Best-of-N Worktrees**:
+  - Tự động tạo snapshot `refs/maw/checkpoints/<job>/<NNNN>` trước mỗi job/vòng lặp, khôi phục 1-click kèm checkpoint an toàn (`safety`).
+  - Hỗ trợ chạy cô lập trên nhánh/worktree riêng (`isolate: true`), so sánh kết quả **Best-of-N** song song nhiều AI, gộp nhánh (`worktree_merge`) và dọn dẹp nhánh/worktree cũ (`cleanup_preview` / `cleanup_apply`).
+- **S2 — Kanban Task Board, Playbooks, Schedules & GitHub PR/Issue Sync**:
+  - Bảng Kanban quản lý tác vụ có phụ thuộc (`depends_on`), tự động kiểm tra chất lượng + Council Review khi kéo sang `review`, mẫu quy trình **Playbooks** đa bước, hẹn giờ **Schedules**, và đồng bộ GitHub Issues / tạo PR trực tiếp qua `gh` CLI.
+- **S3 — Attention Inbox, Live Health Check, Unified Timeline, Telegram 2-Way & MCP Server**:
+  - Hộp thư **Attention Inbox** gom mọi sự kiện cần duyệt (approval, gate fail, budget block), kiểm tra sức khỏe đăng nhập/quota của 6 AI (`health_check`), dòng thời gian hợp nhất (`timeline`), bot **Telegram 2 chiều** (`/status`, `/inbox`, `/approve`, `/deny`, `/run`, `/cancel`), và máy chủ **MCP (`server/mcp/index.ts`)** kết nối trực tiếp vào Claude/Codex/Cursor/Gemini.
+- **S4 — Cost & Budget Guardrails, Role Policy, Scoreboard & Auto-Fallback**:
+  - Giới hạn ngân sách theo ngày/agent/dự án/job/team (`budget_get`/`budget_set`), kiểm soát lệnh cấm & lệnh cần phê duyệt (`policy_get`/`policy_approve`), cổng kiểm thử tự động trước khi review (`checks_run`), bảng xếp hạng hiệu năng AI (`scoreboard`), và tự động chuyển đổi sang AI dự phòng khi chạm trần chi phí/rate-limit.
+- **S5 — Live Session Steer, Interactive Diff Review & File Explorer**:
+  - Điều hướng phiên làm việc trực tiếp (`steer_send`, `steer_interrupt`, `steer_follow_up`, `session_resume`), duyệt `git diff` từng hunk/dòng và gửi yêu cầu sửa lỗi (`review_submit`), kèm trình duyệt cây thư mục dự án (`file_tree`/`file_read`).
+- **S6 — Persistent Agent Profiles, Multi-Turn Chat Rooms, Handoffs, Shared Memory & Org Chart**:
+  - Hồ sơ AI có bộ nhớ riêng (`.maw/agents/<id>/`), phòng **Chat đa lượt** (`@mention` nhiều AI cùng thảo luận và bàn giao `maw:handoff` sang Task Board), bộ nhớ dự án có ghim (`.maw/memory/`), và sơ đồ tổ chức đội hình **Teams / Org Chart**.
+
+### 📌 Lưu ý vận hành v5.0:
+1. **Một tiến trình Server trên mỗi `MAW_HOME`**: Mỗi thư mục `MAW_HOME` (mặc định `~/.maw`) sử dụng khóa độc quyền `server.lock` để đảm bảo các bộ lập lịch nền (`tasks`, `schedules`, `telegram`, `chat`) không chạy trùng lặp.
+2. **Theo dõi thư mục `.maw/` trong Git của từng dự án**:
+   - **Nên commit vào Git**: `.maw/checks.json`, `.maw/playbooks/`, `.maw/agents/`, `.maw/teams.json`, `.maw/memory/` để chia sẻ cấu hình đội ngũ AI với cả nhóm.
+   - **Không nên commit (thêm vào `.gitignore` nếu cần)**: `.maw/tasks.json`, `.maw/chat/`, `.maw/handoffs.json` nếu bạn chỉ muốn lưu lịch sử chạy cục bộ trên máy cá nhân.
+
+---
+
 ## 🛠️ 4. Hướng dẫn Cài đặt & Kiểm tra Sức khỏe Hệ thống (1 Click trên Windows)
 
 ### Yêu cầu cài sẵn trên máy:

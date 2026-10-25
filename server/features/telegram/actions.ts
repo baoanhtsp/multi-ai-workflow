@@ -95,7 +95,9 @@ export async function handleTelegramConfig(
   }
 
   if (inbound || pushInbox || digest.enabled) {
-    await poller.start();
+    if (process.env.MAW_TELEGRAM_AUTOSTART !== '0') {
+      await poller.start();
+    }
   } else {
     poller.stop();
   }

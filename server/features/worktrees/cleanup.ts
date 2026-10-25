@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { appendAuditEntry } from '../../lib/audit.ts';
-import type { MawFeatureContext } from '../../lib/feature.ts';
+import { appendActionAudit, type MawFeatureContext } from '../../lib/feature.ts';
+import { logServerError } from '../../lib/logger.ts';
 import { getTempDir, isDirectorySafe, isFileSafe, resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { loadCheckpointsConfig } from '../checkpoints/index.ts';
@@ -1146,8 +1146,7 @@ export async function applyCleanupCandidates(
           Project: repoPath,
           Detail: `${cand.kind} ${branchName}${backupRef ? ` [backup ${backupRef}]` : ''}`,
         };
-        appendAuditEntry(ctx.paths.auditFile, auditEntry);
-        appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+        appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
 
         if (typeof cand.size_bytes === 'number') freedBytes += cand.size_bytes;
         deleted.push({ id, kind: cand.kind, name: branchName, backup_ref: backupRef });
@@ -1176,8 +1175,7 @@ export async function applyCleanupCandidates(
             Project: repoPath,
             Detail: `orphan_worktree ${cand.name} [pruned missing worktree registration]`,
           };
-          appendAuditEntry(ctx.paths.auditFile, auditEntry);
-          appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+          appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
           deleted.push({ id, kind: cand.kind, name: cand.name });
           continue;
         }
@@ -1211,8 +1209,7 @@ export async function applyCleanupCandidates(
             Project: repoPath,
             Detail: `orphan_worktree ${cand.name} [unregistered folder]`,
           };
-          appendAuditEntry(ctx.paths.auditFile, auditEntry);
-          appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+          appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
 
           if (typeof cand.size_bytes === 'number') freedBytes += cand.size_bytes;
           deleted.push({ id, kind: cand.kind, name: cand.name });
@@ -1392,8 +1389,7 @@ export async function applyCleanupCandidates(
           Project: repoPath,
           Detail: `${cand.kind} ${cand.name}${detailSuffix ? ` ${detailSuffix}` : ''}`,
         };
-        appendAuditEntry(ctx.paths.auditFile, auditEntry);
-        appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+        appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
 
         if (typeof cand.size_bytes === 'number') freedBytes += cand.size_bytes;
         deleted.push({
@@ -1431,8 +1427,7 @@ export async function applyCleanupCandidates(
           Project: repoPath,
           Detail: `${cand.kind} ${refName}`,
         };
-        appendAuditEntry(ctx.paths.auditFile, auditEntry);
-        appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+        appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
 
         deleted.push({ id, kind: cand.kind, name: refName });
       } else {
@@ -1583,7 +1578,6 @@ export async function handleCleanupRestore(
   }
 
   // Audit
-  const dataDir = ctx.paths.featureDataDir('worktrees');
   const auditEntry = {
     Timestamp: new Date().toISOString(),
     Tool: 'maw-s1',
@@ -1591,8 +1585,7 @@ export async function handleCleanupRestore(
     Project: repoPath,
     Detail: `${ref} -> ${finalBranch}`,
   };
-  appendAuditEntry(ctx.paths.auditFile, auditEntry);
-  appendAuditEntry(path.win32.join(dataDir, 'audit.jsonl'), auditEntry);
+  appendActionAudit(ctx.paths, { feature: 'worktrees', ...auditEntry });
 
   return {
     ok: true,
@@ -1745,19 +1738,27 @@ export function ensureCleanupSweepStarted(ctx: MawFeatureContext): void {
       if (!config.sweep_enabled) return;
 
       await runAutomaticSweep(ctx);
-    } catch {
-      // Swallowed in background sweep
+    } catch (err) {
+      logServerError('worktrees:cleanupSweep', err, ctx.paths.mawHome);
     }
   };
 
   const scheduleNext = () => {
-    const config = loadCleanupConfig(ctx);
-    const ms = Math.max(1, config.sweep_hours) * 3600 * 1000;
-    cleanupSweepTimer = setTimeout(async () => {
-      await runSweep();
-      scheduleNext();
-    }, ms);
-    cleanupSweepTimer.unref();
+    try {
+      const config = loadCleanupConfig(ctx);
+      const ms = Math.max(1, config.sweep_hours) * 3600 * 1000;
+      cleanupSweepTimer = setTimeout(async () => {
+        try {
+          await runSweep();
+          scheduleNext();
+        } catch (err) {
+          logServerError('worktrees:scheduleNextTimeout', err, ctx.paths.mawHome);
+        }
+      }, ms);
+      cleanupSweepTimer.unref();
+    } catch (err) {
+      logServerError('worktrees:scheduleNext', err, ctx.paths.mawHome);
+    }
   };
 
   scheduleNext();

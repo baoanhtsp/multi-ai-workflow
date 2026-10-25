@@ -93,13 +93,21 @@ function Invoke-AutoGateHookOrExit {
         [int]$RoundNum = 1
     )
 
-    $hookRes = Invoke-MawHooks -Event $EventName -Context @{
+    $rawHookItems = @(Invoke-MawHooks -Event $EventName -Context @{
         workdir     = $WorkDir
         project     = $WorkDir
         implementer = $effImplementer
         reviewers   = $effReviewers
         round       = $RoundNum
         max_rounds  = $MaxRounds
+    })
+    $hookRes = $null
+    foreach ($hi in $rawHookItems) {
+        if ($hi -is [string]) {
+            Write-Output $hi
+        } elseif ($null -ne $hi) {
+            $hookRes = $hi
+        }
     }
     if ($hookRes -and $hookRes.Block) {
         Write-Output "[Auto-Gate HOOK BLOCKED: $EventName] $($hookRes.Reason)"

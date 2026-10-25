@@ -1,6 +1,30 @@
 # Pester 5 tests for S1 Checkpoint library and hooks (SPEC §1, §8)
 
 BeforeAll {
+    $script:origMawHome = $env:MAW_HOME
+    $script:origUserProfile = $env:USERPROFILE
+    $script:origTemp = $env:TEMP
+    $script:origTmp = $env:TMP
+    $script:origMawTest = $env:MAW_TEST
+    $script:origSkipHealth = $env:MAW_SKIP_HEALTH
+    $script:origRuntime = $env:MAW_S4_RUNTIME
+
+    $script:isolatedBase = Join-Path ([System.IO.Path]::GetTempPath()) ("maw-s1cp-iso-" + [System.Guid]::NewGuid().ToString("N").Substring(0, 8))
+    $script:isoMaw = Join-Path $script:isolatedBase ".maw"
+    $script:isoUser = Join-Path $script:isolatedBase "user"
+    $script:isoTemp = Join-Path $script:isolatedBase "tmp"
+    New-Item -ItemType Directory -Path $script:isoMaw -Force | Out-Null
+    New-Item -ItemType Directory -Path $script:isoUser -Force | Out-Null
+    New-Item -ItemType Directory -Path $script:isoTemp -Force | Out-Null
+
+    $env:MAW_HOME = $script:isoMaw
+    $env:USERPROFILE = $script:isoUser
+    $env:TEMP = $script:isoTemp
+    $env:TMP = $script:isoTemp
+    $env:MAW_TEST = "1"
+    $env:MAW_SKIP_HEALTH = "1"
+    $env:MAW_S4_RUNTIME = Join-Path $script:isolatedBase "nonexistent-runtime.json"
+
     $script:scriptsDir = Join-Path $PSScriptRoot "..\antigravity\skills\claude-leader\scripts"
     $script:commonPath = Join-Path $script:scriptsDir "lib\maw-common.ps1"
     $script:libPath = Join-Path $script:scriptsDir "hooks\_shared\10-checkpoint-lib.ps1"
@@ -8,6 +32,19 @@ BeforeAll {
     . $script:commonPath
     . $script:libPath
     . $script:hooksPath
+}
+
+AfterAll {
+    if ($null -eq $script:origMawHome) { Remove-Item Env:\MAW_HOME -ErrorAction SilentlyContinue } else { $env:MAW_HOME = $script:origMawHome }
+    if ($null -eq $script:origUserProfile) { Remove-Item Env:\USERPROFILE -ErrorAction SilentlyContinue } else { $env:USERPROFILE = $script:origUserProfile }
+    if ($null -eq $script:origTemp) { Remove-Item Env:\TEMP -ErrorAction SilentlyContinue } else { $env:TEMP = $script:origTemp }
+    if ($null -eq $script:origTmp) { Remove-Item Env:\TMP -ErrorAction SilentlyContinue } else { $env:TMP = $script:origTmp }
+    if ($null -eq $script:origMawTest) { Remove-Item Env:\MAW_TEST -ErrorAction SilentlyContinue } else { $env:MAW_TEST = $script:origMawTest }
+    if ($null -eq $script:origSkipHealth) { Remove-Item Env:\MAW_SKIP_HEALTH -ErrorAction SilentlyContinue } else { $env:MAW_SKIP_HEALTH = $script:origSkipHealth }
+    if ($null -eq $script:origRuntime) { Remove-Item Env:\MAW_S4_RUNTIME -ErrorAction SilentlyContinue } else { $env:MAW_S4_RUNTIME = $script:origRuntime }
+    if ($script:isolatedBase -and (Test-Path -LiteralPath $script:isolatedBase)) {
+        Remove-Item -LiteralPath $script:isolatedBase -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Describe "S1 Checkpoints PowerShell Library" {
@@ -155,7 +192,7 @@ Describe "S1 Checkpoints PowerShell Library" {
                 agent   = "claude"
                 role    = "backend"
             }
-            $res = Invoke-MawHooks -Event "job-start" -Context $context -HooksRoot (Join-Path $script:scriptsDir "hooks")
+            $res = @(Invoke-MawHooks -Event "job-start" -Context $context -HooksRoot (Join-Path $script:scriptsDir "hooks"))[-1]
             $res.Block | Should -BeFalse
 
             # Ref should exist
@@ -168,7 +205,7 @@ Describe "S1 Checkpoints PowerShell Library" {
                 project = $script:hookRepo
                 round   = 1
             }
-            $res = Invoke-MawHooks -Event "round-start" -Context $context -HooksRoot (Join-Path $script:scriptsDir "hooks")
+            $res = @(Invoke-MawHooks -Event "round-start" -Context $context -HooksRoot (Join-Path $script:scriptsDir "hooks"))[-1]
             $res.Block | Should -BeFalse
         }
 
@@ -178,7 +215,7 @@ Describe "S1 Checkpoints PowerShell Library" {
                 agent   = "codex"
                 role    = "reviewer"
             }
-            $res = Invoke-MawHooks -Event "before-agent" -Context $context -HooksRoot (Join-Path $script:scriptsDir "hooks")
+            $res = @(Invoke-MawHooks -Event "before-agent" -Context $context -HooksRoot (Join-Path $script:scriptsDir "hooks"))[-1]
             $res.Block | Should -BeFalse
         }
     }

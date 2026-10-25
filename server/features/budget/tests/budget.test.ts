@@ -470,3 +470,70 @@ test('regression N4: syncLedger updates existing ledger row when late S5 human r
     cleanup();
   }
 });
+
+test('H3 & H4: createDefaultBudgetConfig matches spec §1.1 defaults and readAuditRows respects CachedInputTokens', () => {
+  const defaults = createDefaultBudgetConfig();
+  assert.equal(defaults.enabled, false);
+  assert.equal(defaults.estimate_next_call, false);
+  assert.deepEqual(defaults.caps.job, { usd: { warn: 5.0, block: 15.0 }, tokens: { warn: 0, block: 0 } });
+  assert.deepEqual(defaults.caps.team_run, { usd: { warn: 15.0, block: 40.0 } });
+  assert.deepEqual(defaults.caps.day, { usd: { warn: 50.0, block: 150.0 }, tokens: { warn: 0, block: 0 } });
+  assert.deepEqual(defaults.caps.project, { usd: { warn: 0, block: 0 }, period: 'month' });
+  assert.deepEqual(defaults.caps.agent_day, { usd: { warn: 0, block: 0 } });
+
+  const validatedEmpty = validateBudgetConfig({});
+  assert.equal(validatedEmpty.errorField, undefined);
+  assert.equal(validatedEmpty.config.enabled, false);
+  assert.equal(validatedEmpty.config.estimate_next_call, false);
+  assert.deepEqual(validatedEmpty.config.caps.day, {
+    usd: { warn: 50.0, block: 0 },
+    tokens: { warn: 0, block: 0 },
+  });
+
+  const { paths, cleanup } = createTempEnv();
+  try {
+    fs.mkdirSync(path.dirname(paths.auditFile), { recursive: true });
+    // Row 1: explicit CostUsd from invoke-codex.ps1 with CachedInputTokens
+    const row1 = {
+      Timestamp: new Date().toISOString(),
+      Tool: 'codex',
+      Role: 'reviewer',
+      Model: 'gpt-5-codex',
+      WorkDir: 'C:\\laragon\\www\\project-a',
+      PromptChars: 4000,
+      InputTokens: 500000,
+      CachedInputTokens: 450000,
+      OutputTokens: 2000,
+      CostUsd: 0.2575,
+      Score: '9.5',
+      Verdict: 'APPROVED',
+    };
+    // Row 2: CostUsd=0 fallback estimation with CachedInputTokens
+    const row2 = {
+      Timestamp: new Date().toISOString(),
+      Tool: 'codex',
+      Role: 'backend',
+      Model: 'gpt-5-codex',
+      WorkDir: 'C:\\laragon\\www\\project-a',
+      PromptChars: 4000,
+      InputTokens: 500000,
+      CachedInputTokens: 450000,
+      OutputTokens: 2000,
+      CostUsd: 0,
+      Score: '',
+      Verdict: 'COMPLETED',
+    };
+    fs.writeFileSync(
+      paths.auditFile,
+      JSON.stringify(row1) + '\n' + JSON.stringify(row2) + '\n',
+      'utf8'
+    );
+
+    const { rows } = readAuditRows(paths.auditFile, 0);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[0]!.cost_usd, 0.2575);
+    assert.equal(rows[1]!.cost_usd, 0.2575);
+  } finally {
+    cleanup();
+  }
+});

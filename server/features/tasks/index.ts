@@ -1,8 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { handleCancelJob } from '../../actions/jobs.ts';
-import { createFeatureContext, type MawFeature } from '../../lib/feature.ts';
-import { resolveServerPaths } from '../../lib/paths.ts';
+import type { MawFeature } from '../../lib/feature.ts';
 import { appendAudit, badRequest, conflict, notFound, stripAnsi } from './lib.ts';
 import { exportLibrary, importLibrary } from './library.ts';
 import { deletePreset, getPresets, savePreset } from './presets.ts';
@@ -11,6 +10,7 @@ import {
   getSchedulerStatus,
   handleTaskRetry,
   startCardJob,
+  stopScheduler,
   triggerImmediateTick,
 } from './scheduler.ts';
 import {
@@ -50,14 +50,27 @@ function readLogTail4Kb(logFile: string): string {
   }
 }
 
+function ensureSchedulerIfAllowed(ctx: Parameters<NonNullable<MawFeature['start']>>[0]): void {
+  if (process.env.MAW_BOARD_AUTOSTART !== '0' && process.env.MAW_TEST !== '1') {
+    ensureScheduler(ctx);
+  }
+}
+
 export const feature: MawFeature = {
   name: 'tasks',
   ui: {
     script: 'feat-tasks.js',
     style: 'feat-tasks.css',
   },
+  start: (ctx) => {
+    if (process.env.MAW_BOARD_AUTOSTART !== '0') {
+      ensureScheduler(ctx);
+    }
+  },
+  stop: () => {
+    stopScheduler();
+  },
   status: async (ctx) => {
-    ensureScheduler(ctx);
     const [counts, running, queued, config] = await Promise.all([
       getTaskCounts(ctx),
       getRunningCardsCount(ctx),
@@ -77,7 +90,7 @@ export const feature: MawFeature = {
     task_list: {
       method: 'GET',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const projectPath = req.url.searchParams.get('project_path') ?? undefined;
         const agent = req.url.searchParams.get('agent') ?? undefined;
         const status = req.url.searchParams.get('status') ?? undefined;
@@ -102,7 +115,7 @@ export const feature: MawFeature = {
     task_get: {
       method: 'GET',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const id = String(req.url.searchParams.get('id') ?? '').trim();
         if (!id) {
           throw badRequest("Parameter 'id' is required.");
@@ -129,7 +142,7 @@ export const feature: MawFeature = {
     task_create: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const task = await createCard(ctx, req.body);
         triggerImmediateTick(ctx);
         return {
@@ -142,7 +155,7 @@ export const feature: MawFeature = {
     task_update: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const id = String(req.body.id ?? '').trim();
         if (!id) {
           throw badRequest("Field 'id' is required.");
@@ -159,7 +172,7 @@ export const feature: MawFeature = {
     task_delete: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const id = String(req.body.id ?? '').trim();
         if (!id) {
           throw badRequest("Field 'id' is required.");
@@ -176,7 +189,7 @@ export const feature: MawFeature = {
     task_move: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const id = String(req.body.id ?? '').trim();
         if (!id) {
           throw badRequest("Field 'id' is required.");
@@ -197,7 +210,7 @@ export const feature: MawFeature = {
     task_start: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const id = String(req.body.id ?? '').trim();
         if (!id) {
           throw badRequest("Field 'id' is required.");
@@ -225,7 +238,7 @@ export const feature: MawFeature = {
     task_cancel: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const id = String(req.body.id ?? '').trim();
         if (!id) {
           throw badRequest("Field 'id' is required.");
@@ -257,13 +270,21 @@ export const feature: MawFeature = {
 
         if (cancelJobId) {
           try {
-            await handleCancelJob({ job_id: cancelJobId }, ctx.paths);
+            if (typeof ctx.cancelJob === 'function') {
+              await ctx.cancelJob(cancelJobId);
+            } else {
+              await handleCancelJob({ job_id: cancelJobId }, ctx.paths);
+            }
           } catch {
             // Ignore if already dead
           }
         }
 
-        appendAudit(ctx.paths.auditFile, 'task_cancel', { id: patched.id, title: cardTitle, job_id: cancelJobId });
+        appendAudit(ctx.paths, 'task_cancel', {
+          id: patched.id,
+          title: cardTitle,
+          job_id: cancelJobId,
+        });
         triggerImmediateTick(ctx);
 
         return {
@@ -276,7 +297,7 @@ export const feature: MawFeature = {
     task_retry: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const task = await handleTaskRetry(ctx, req.body);
         return {
           ok: true,
@@ -288,7 +309,7 @@ export const feature: MawFeature = {
     task_config_save: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const config = await saveConfig(ctx, req.body);
         triggerImmediateTick(ctx);
         return {
@@ -301,7 +322,7 @@ export const feature: MawFeature = {
     task_bulk_create: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const tasks = await bulkCreateCards(ctx, {
           tasks: Array.isArray(req.body.tasks) ? req.body.tasks : [],
           created_by: req.body.created_by as any,
@@ -317,7 +338,7 @@ export const feature: MawFeature = {
     template_list: {
       method: 'GET',
       handler: async (ctx) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const templates = await getTemplates(ctx);
         return {
           ok: true,
@@ -329,7 +350,7 @@ export const feature: MawFeature = {
     template_save: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const template = await saveTemplate(ctx, req.body);
         return {
           ok: true,
@@ -341,7 +362,7 @@ export const feature: MawFeature = {
     template_delete: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const id = String(req.body.id ?? '').trim();
         if (!id) {
           throw badRequest("Field 'id' is required.");
@@ -357,7 +378,7 @@ export const feature: MawFeature = {
     preset_list: {
       method: 'GET',
       handler: async (ctx) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const presets = await getPresets(ctx);
         return {
           ok: true,
@@ -369,7 +390,7 @@ export const feature: MawFeature = {
     preset_save: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const preset = await savePreset(ctx, req.body);
         return {
           ok: true,
@@ -381,7 +402,7 @@ export const feature: MawFeature = {
     preset_delete: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const id = String(req.body.id ?? '').trim();
         if (!id) {
           throw badRequest("Field 'id' is required.");
@@ -397,7 +418,7 @@ export const feature: MawFeature = {
     library_export: {
       method: 'GET',
       handler: async (ctx) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const library = await exportLibrary(ctx);
         return {
           ok: true,
@@ -409,7 +430,7 @@ export const feature: MawFeature = {
     library_import: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
+        ensureSchedulerIfAllowed(ctx);
         const overwrite = Boolean(req.body.overwrite);
         const result = await importLibrary(ctx, req.body.library, overwrite);
         return result;
@@ -419,25 +440,3 @@ export const feature: MawFeature = {
 };
 
 export default feature;
-
-// Auto-start rule from design §1.3:
-// auto-start at module load ONLY when process.argv[1] ends with server\main.ts or server/main.ts and MAW_BOARD_AUTOSTART !== '0';
-// otherwise lazily via ensureScheduler(ctx) from status() and from every S2 route.
-if (
-  typeof process.argv[1] === 'string' &&
-  (process.argv[1].endsWith('server\\main.ts') || process.argv[1].endsWith('server/main.ts')) &&
-  process.env.MAW_BOARD_AUTOSTART !== '0'
-) {
-  let projectsRoot: string | undefined;
-  for (let i = 2; i < process.argv.length; i++) {
-    const arg = process.argv[i]!;
-    if (arg === '--projects-root' && i + 1 < process.argv.length) {
-      projectsRoot = process.argv[++i]!;
-    } else if (arg.startsWith('--projects-root=')) {
-      projectsRoot = arg.slice(16);
-    }
-  }
-  const defaultPaths = resolveServerPaths({ projectsRoot });
-  const defaultCtx = createFeatureContext(defaultPaths);
-  ensureScheduler(defaultCtx);
-}

@@ -22,6 +22,9 @@ param(
     [string]$EffortOverride = "",
 
     [Parameter(Mandatory=$false)]
+    [string]$ResumeId = "",
+
+    [Parameter(Mandatory=$false)]
     [switch]$IncludeGitDiff,
 
     [Parameter(Mandatory=$false)]
@@ -134,6 +137,12 @@ if ($normModel -and $cliCfg.model_args -and $cliCfg.model_args.Count -gt 0) {
 if ($normEffort -and $cliCfg.effort_args -and $cliCfg.effort_args.Count -gt 0) {
     foreach ($ea in @($cliCfg.effort_args)) {
         $rawTokens.Add([string]$ea)
+    }
+}
+
+if ($ResumeId -and $cliCfg.resume_args -and $cliCfg.resume_args.Count -gt 0) {
+    foreach ($rsa in @($cliCfg.resume_args)) {
+        $rawTokens.Add(([string]$rsa).Replace("{session_id}", $ResumeId))
     }
 }
 
@@ -305,25 +314,11 @@ try {
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
 
-    $outQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     $allStdout = [System.Collections.Generic.List[string]]::new()
     $allStderr = [System.Collections.Generic.List[string]]::new()
 
-    $outSub = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -MessageData $outQueue -Action {
-        if ($null -ne $EventArgs.Data) {
-            $Event.MessageData.Enqueue("O:" + $EventArgs.Data)
-        }
-    }
-    $errSub = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -MessageData $outQueue -Action {
-        if ($null -ne $EventArgs.Data) {
-            $Event.MessageData.Enqueue("E:" + $EventArgs.Data)
-        }
-    }
-
     $isStreamText = ($cliCfg.output -eq "text")
     [void]$proc.Start()
-    $proc.BeginOutputReadLine()
-    $proc.BeginErrorReadLine()
 
     try {
         if ($promptVia -eq "stdin" -and $Prompt.Length -gt 0) {
@@ -340,42 +335,51 @@ try {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $timedOut = $false
 
-    while (-not $proc.HasExited) {
-        $item = $null
-        while ($outQueue.TryDequeue([ref]$item)) {
-            $prefix = $item.Substring(0, 2)
-            $line = $item.Substring(2)
-            if ($prefix -eq "O:") { $allStdout.Add($line) } else { $allStderr.Add($line) }
-            if ($isStreamText) {
-                Write-Output $line
-            }
-        }
+    $outTask = $proc.StandardOutput.ReadLineAsync()
+    $errTask = $proc.StandardError.ReadLineAsync()
+
+    while ($null -ne $outTask -or $null -ne $errTask) {
         if ($sw.ElapsedMilliseconds -ge $timeoutMs) {
             $timedOut = $true
             try { & taskkill.exe /PID $proc.Id /T /F 2>$null | Out-Null } catch {}
             try { $proc.Kill() } catch {}
             break
         }
-        Start-Sleep -Milliseconds 50
+
+        $activeTasks = [System.Collections.Generic.List[System.Threading.Tasks.Task]]::new()
+        if ($null -ne $outTask) { $activeTasks.Add($outTask) }
+        if ($null -ne $errTask) { $activeTasks.Add($errTask) }
+
+        [void][System.Threading.Tasks.Task]::WaitAny($activeTasks.ToArray(), 50)
+
+        while ($null -ne $outTask -and $outTask.IsCompleted) {
+            $line = if ($outTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { $outTask.Result } else { $null }
+            if ($null -eq $line) {
+                $outTask = $null
+            } else {
+                $allStdout.Add($line)
+                if ($isStreamText) {
+                    Write-Output $line
+                }
+                $outTask = $proc.StandardOutput.ReadLineAsync()
+            }
+        }
+
+        while ($null -ne $errTask -and $errTask.IsCompleted) {
+            $line = if ($errTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) { $errTask.Result } else { $null }
+            if ($null -eq $line) {
+                $errTask = $null
+            } else {
+                $allStderr.Add($line)
+                if ($isStreamText) {
+                    Write-Output $line
+                }
+                $errTask = $proc.StandardError.ReadLineAsync()
+            }
+        }
     }
 
     $proc.WaitForExit(2000) | Out-Null
-    Start-Sleep -Milliseconds 50
-
-    Unregister-Event -SourceIdentifier $outSub.Name -ErrorAction SilentlyContinue
-    Unregister-Event -SourceIdentifier $errSub.Name -ErrorAction SilentlyContinue
-    Remove-Job -Id $outSub.Id -Force -ErrorAction SilentlyContinue
-    Remove-Job -Id $errSub.Id -Force -ErrorAction SilentlyContinue
-
-    $item = $null
-    while ($outQueue.TryDequeue([ref]$item)) {
-        $prefix = $item.Substring(0, 2)
-        $line = $item.Substring(2)
-        if ($prefix -eq "O:") { $allStdout.Add($line) } else { $allStderr.Add($line) }
-        if ($isStreamText) {
-            Write-Output $line
-        }
-    }
 
     $rawCombined = (($allStdout + $allStderr) -join "`n").Trim()
     $parsedResponse = $rawCombined
@@ -398,6 +402,9 @@ try {
         }
 
         if ($null -ne $parsedJson) {
+            if ($null -ne $parsedJson.session_id -and ([string]$parsedJson.session_id).Trim()) {
+                Write-Output ((@{ type = "session"; session_id = ([string]$parsedJson.session_id).Trim() }) | ConvertTo-Json -Compress)
+            }
             if ($null -ne $parsedJson.response -and ([string]$parsedJson.response).Trim()) {
                 $parsedResponse = ([string]$parsedJson.response).Trim()
                 Write-Output $parsedResponse
@@ -439,12 +446,6 @@ try {
 
     # Write telemetry audit line to multi-ai-audit.jsonl (SPEC §7.3)
     try {
-        $auditFile = Join-Path $env:USERPROFILE ".gemini\antigravity\multi-ai-audit.jsonl"
-        $auditDir = Split-Path -Parent $auditFile
-        if (-not (Test-Path -LiteralPath $auditDir)) {
-            New-Item -ItemType Directory -Path $auditDir -Force | Out-Null
-        }
-
         if ($null -eq $inTokens -or $inTokens -le 0) {
             $inTokens = [Math]::Max(1, [int][Math]::Ceiling($Prompt.Length / 3.8))
         }
@@ -470,7 +471,7 @@ try {
         $auditRole = if ($env:MAW_ROLE) { $env:MAW_ROLE } else { $normRole }
         $effModel = if ($normModel) { $normModel } elseif ($entry.models.Count -gt 0) { $entry.models[0] } else { $normAgent }
 
-        [ordered]@{
+        $auditEntry = [ordered]@{
             Timestamp    = (Get-Date).ToString("o")
             Tool         = $normAgent
             Agent        = $normAgent
@@ -485,7 +486,8 @@ try {
             CostUsd      = $costUsd
             Score        = $vr.Score
             Verdict      = $verdict
-        } | ConvertTo-Json -Compress | Add-Content -Path $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue
+        }
+        Write-MawAuditEntry -Entry $auditEntry | Out-Null
     } catch {}
 
     exit $exitCode

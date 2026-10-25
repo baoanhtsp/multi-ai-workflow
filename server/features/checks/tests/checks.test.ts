@@ -776,3 +776,99 @@ test('regression Item 11: checks_cancel prevents saving finished results on canc
     cleanup();
   }
 });
+
+test('H2: comment-only TODO scanning ignores string literals and default todo_max is -1 (report-only)', async () => {
+  const { dir, paths, cleanup } = createTempProject();
+  try {
+    const detected = detectChecks(dir);
+    assert.equal(detected.todo_max, -1, 'detectChecks default todo_max must be -1');
+    const validated = validateChecksConfig({}, dir);
+    assert.equal(validated.config.todo_max, -1, 'validateChecksConfig default todo_max must be -1');
+
+    // Write tracked files with both string literals and real comments
+    fs.writeFileSync(
+      path.join(dir, 'ui-labels.js'),
+      [
+        "const label1 = 'TODO còn mở';",
+        'const label2 = "FIXME: not a real comment";',
+        'const label3 = `XXX inside template literal`;',
+        'const pattern = /\\b(TODO|FIXME|XXX|HACK)\\b/;',
+        "const url = 'https://example.com/TODO';",
+        '// Real comment mentioning quoted UI label \'TODO còn mở\' should not count',
+        '// TODO: real JS line comment',
+        '/* FIXME: real block comment */',
+        ' * XXX: real JSDoc line',
+      ].join('\n') + '\n',
+      'utf8'
+    );
+
+    fs.writeFileSync(
+      path.join(dir, 'misc.ps1'),
+      [
+        "$msg = 'TODO inside PowerShell single-quoted string'",
+        '$msg2 = "FIXME inside PowerShell double-quoted string"',
+        '# TODO: real PowerShell hash comment',
+        "' TODO: real PowerShell/VB apostrophe line comment",
+      ].join('\n') + '\n',
+      'utf8'
+    );
+
+    fs.writeFileSync(
+      path.join(dir, 'markup.html'),
+      [
+        '<div>TODO in HTML text</div>',
+        '<!-- HACK: real HTML comment -->',
+      ].join('\n') + '\n',
+      'utf8'
+    );
+
+    fs.writeFileSync(
+      path.join(dir, 'query.sql'),
+      [
+        "SELECT 'TODO in SQL string';",
+        '-- TODO: real SQL comment',
+        '; FIXME: real INI/ASM comment',
+        'REM XXX: real batch comment',
+      ].join('\n') + '\n',
+      'utf8'
+    );
+
+    child_process.execFileSync(
+      'git',
+      ['add', 'ui-labels.js', 'misc.ps1', 'markup.html', 'query.sql'],
+      { cwd: dir, windowsHide: true }
+    );
+
+    const todos = scanTrackedTodos(dir, ['TODO', 'FIXME', 'XXX', 'HACK']);
+    // Expected 9 real comments:
+    // ui-labels.js: // TODO, /* FIXME */, * XXX (3)
+    // misc.ps1: # TODO, ' TODO (2)
+    // markup.html: <!-- HACK --> (1)
+    // query.sql: -- TODO, ; FIXME, REM XXX (3)
+    assert.equal(todos.count, 9, `Expected 9 comment TODOs, got ${todos.count}: ${JSON.stringify(todos.matches)}`);
+    assert.ok(!todos.matches.some((m) => m.text.includes('còn mở')));
+    assert.ok(!todos.matches.some((m) => m.text.includes('not a real comment')));
+
+    // Verify computeGate with default todo_max (-1) is report-only (state 'warn', gate green true)
+    const gate = await computeGate(
+      paths,
+      dir,
+      {
+        version: 1,
+        checks: [],
+        todo_patterns: ['TODO', 'FIXME', 'XXX', 'HACK'],
+        todo_max: -1,
+        require_clean_git: false,
+        min_review_score: 0,
+        spec_guard: false,
+      },
+      []
+    );
+    const todoItem = gate.items.find((i) => i.id === 'todo');
+    assert.ok(todoItem);
+    assert.equal(todoItem.state, 'warn');
+    assert.equal(gate.green, true, 'report-only todo_max=-1 must not fail the gate');
+  } finally {
+    cleanup();
+  }
+});

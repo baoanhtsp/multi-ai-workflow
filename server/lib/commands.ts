@@ -11,6 +11,11 @@ export interface ValidatedCommandInfo {
   team_spec: string;
   reviewers?: string[];
   implementer?: string;
+  agent_profile_id?: string;
+  conversation_id?: string;
+  resume_token?: string;
+  cli_args?: string[];
+  env?: Record<string, string>;
   project_path: string;
   prompt: string;
   command: string;
@@ -60,7 +65,7 @@ export function buildCommandSpec(
   let scriptPath = '';
   const tokens: ArgToken[] = [];
 
-  if (mode === 'task' || mode === 'team') {
+  if (mode === 'task' || mode === 'chat' || mode === 'team') {
     scriptPath = path.win32.join(scriptsDir, 'invoke-agent.ps1');
     tokens.push({ kind: 'str', name: '-Agent', value: agent });
     tokens.push({ kind: 'str', name: '-Role', value: role });
@@ -76,6 +81,9 @@ export function buildCommandSpec(
     }
     if (newSession) {
       tokens.push({ kind: 'flag', name: '-NewSession' });
+    }
+    if (info.resume_token && info.resume_token !== '') {
+      tokens.push({ kind: 'str', name: '-ResumeId', value: info.resume_token });
     }
     if (promptFile !== null) {
       tokens.push({ kind: 'str', name: '-PromptFile', value: promptFile });

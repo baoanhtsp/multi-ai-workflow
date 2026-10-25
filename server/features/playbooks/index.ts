@@ -3,7 +3,7 @@ import path from 'node:path';
 import type { MawFeature } from '../../lib/feature.ts';
 import { resolveProjectPath } from '../../lib/paths.ts';
 import { badRequest } from '../tasks/lib.ts';
-import { ensureScheduler, registerTicker, triggerImmediateTick } from '../tasks/scheduler.ts';
+import { registerTicker, triggerImmediateTick } from '../tasks/scheduler.ts';
 import { parsePlaybookContent, validatePlaybookFile } from './parser.ts';
 import {
   getPlaybookRuns,
@@ -21,7 +21,6 @@ export const feature: MawFeature = {
     playbook_list: {
       method: 'GET',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
         const rawProjectPath = String(req.url.searchParams.get('project_path') ?? '').trim();
         if (!rawProjectPath) {
           throw badRequest("Parameter 'project_path' is required.");
@@ -77,7 +76,6 @@ export const feature: MawFeature = {
     playbook_preview: {
       method: 'GET',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
         const rawProjectPath = String(req.url.searchParams.get('project_path') ?? '').trim();
         if (!rawProjectPath) {
           throw badRequest("Parameter 'project_path' is required.");
@@ -106,7 +104,6 @@ export const feature: MawFeature = {
     playbook_run: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
         const result = await startPlaybookRun(ctx, req.body);
         triggerImmediateTick(ctx);
         return {
@@ -120,7 +117,6 @@ export const feature: MawFeature = {
     playbook_runs: {
       method: 'GET',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
         const projectPath = req.url.searchParams.get('project_path') ?? undefined;
         const runs = await getPlaybookRuns(ctx, projectPath);
         return {
@@ -133,7 +129,6 @@ export const feature: MawFeature = {
     playbook_stop: {
       method: 'POST',
       handler: async (ctx, req) => {
-        ensureScheduler(ctx);
         const runId = String(req.body.run_id ?? '').trim();
         if (!runId) {
           throw badRequest("Field 'run_id' is required.");

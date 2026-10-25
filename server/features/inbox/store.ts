@@ -204,7 +204,29 @@ export function writeInboxData(paths: ServerPaths, data: InboxDataFile): void {
 
     const tempFile = `${itemsFile}.${process.pid}.${Date.now()}.tmp`;
     fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), 'utf8');
-    fs.renameSync(tempFile, itemsFile);
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        fs.renameSync(tempFile, itemsFile);
+        return;
+      } catch (err: unknown) {
+        const code = (err as { code?: string })?.code;
+        if ((code === 'EPERM' || code === 'EACCES' || code === 'EBUSY') && attempt < 4) {
+          const end = Date.now() + 15 * (attempt + 1);
+          while (Date.now() < end) {
+            // Short backoff for Windows concurrent reader/rename contention
+          }
+          continue;
+        }
+        try {
+          if (fs.existsSync(tempFile)) {
+            fs.unlinkSync(tempFile);
+          }
+        } catch {
+          // ignore cleanup error
+        }
+        throw err;
+      }
+    }
   });
 }
 

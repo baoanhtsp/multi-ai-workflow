@@ -7,10 +7,16 @@ import {
   handleInboxGet,
   handleInboxList,
 } from './actions.ts';
-import { startBackgroundScanner } from './scanner.ts';
+import { startBackgroundScanner, stopBackgroundScanner } from './scanner.ts';
 
 export const feature: MawFeature = {
   name: 'inbox',
+  start: (ctx) => {
+    startBackgroundScanner(ctx.paths);
+  },
+  stop: () => {
+    stopBackgroundScanner();
+  },
   routes: {
     inbox_list: {
       method: 'GET',
@@ -34,8 +40,6 @@ export const feature: MawFeature = {
     },
   },
   status: (ctx) => {
-    // Lazily start the background scanner on first status or route access
-    startBackgroundScanner(ctx.paths);
     return Promise.resolve(buildInboxStatusContribution(ctx.paths));
   },
   ui: {

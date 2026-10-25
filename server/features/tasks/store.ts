@@ -895,7 +895,7 @@ export async function deleteCard(
     }
 
     writeJsonAtomic(file, data);
-    appendAudit(ctx.paths.auditFile, 'task_delete', { id, title: card.title });
+    appendAudit(ctx.paths, 'task_delete', { id, title: card.title }, 'tasks');
     return id;
   });
 }

@@ -7,6 +7,10 @@ BeforeAll {
     $script:origRuntime = $env:MAW_S4_RUNTIME
     $script:origTemp = $env:TEMP
     $script:origTmp = $env:TMP
+    $script:origMawTest = $env:MAW_TEST
+    $script:origAuditFile = $env:MAW_AUDIT_FILE
+
+    $env:MAW_TEST = "1"
 
     $script:repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
     $script:hooksRoot = Join-Path $script:repoRoot "antigravity\skills\claude-leader\scripts\hooks"
@@ -22,6 +26,8 @@ AfterAll {
     $env:MAW_S4_RUNTIME = $script:origRuntime
     $env:TEMP = $script:origTemp
     $env:TMP = $script:origTmp
+    if ($null -eq $script:origMawTest) { Remove-Item Env:\MAW_TEST -ErrorAction SilentlyContinue } else { $env:MAW_TEST = $script:origMawTest }
+    if ($null -eq $script:origAuditFile) { Remove-Item Env:\MAW_AUDIT_FILE -ErrorAction SilentlyContinue } else { $env:MAW_AUDIT_FILE = $script:origAuditFile }
 }
 
 Describe "S4 Hook Wrappers" {

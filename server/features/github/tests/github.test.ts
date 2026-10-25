@@ -736,8 +736,9 @@ test('github: PR replay adopts existing open PR before calling gh pr create', as
       url: 'https://github.com/owner/repo/pull/42',
     });
 
-    // Check audit file for github_pr_adopt
-    const auditText = fs.readFileSync(ctx.paths.auditFile, 'utf8');
+    // Check action audit file ($MAW_HOME/audit.jsonl) for github_pr_adopt
+    const actionAuditFile = path.win32.join(ctx.paths.mawHome, 'audit.jsonl');
+    const auditText = fs.readFileSync(actionAuditFile, 'utf8');
     assert.ok(auditText.includes('github_pr_adopt'));
   } finally {
     cleanup();

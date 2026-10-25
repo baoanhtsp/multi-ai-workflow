@@ -445,9 +445,10 @@ test('playbooks: already-checked playbook item advances run without stalling or 
     assert.equal(runs2[0]!.cursor, 1);
     assert.equal(runs2[0]!.items[1]!.state, 'running');
 
-    // Check audit file: must NOT contain audit for Pre-checked item
-    if (fs.existsSync(ctx.paths.auditFile)) {
-      const auditLog = fs.readFileSync(ctx.paths.auditFile, 'utf8');
+    // Check action audit file ($MAW_HOME/audit.jsonl): must NOT contain audit for Pre-checked item
+    const actionAuditFile = path.win32.join(ctx.paths.mawHome, 'audit.jsonl');
+    if (fs.existsSync(actionAuditFile)) {
+      const auditLog = fs.readFileSync(actionAuditFile, 'utf8');
       assert.equal(auditLog.includes('Pre-checked item'), false);
     }
 
@@ -463,7 +464,7 @@ test('playbooks: already-checked playbook item advances run without stalling or 
     assert.equal(runs3[0]!.cursor, 2);
     assert.equal(runs3[0]!.status, 'done');
 
-    const auditLogFinal = fs.readFileSync(ctx.paths.auditFile, 'utf8');
+    const auditLogFinal = fs.readFileSync(actionAuditFile, 'utf8');
     assert.ok(auditLogFinal.includes('Fresh item'));
   } finally {
     cleanup();

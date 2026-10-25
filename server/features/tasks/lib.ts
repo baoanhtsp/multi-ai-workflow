@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { appendAuditEntry } from '../../lib/audit.ts';
+import { appendActionAudit } from '../../lib/feature.ts';
+import type { ServerPaths } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 
 export { ApiValidationError };
@@ -109,7 +110,7 @@ export function writeJsonAtomic(file: string, data: unknown): void {
       return;
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code;
-      if ((code === 'EPERM' || code === 'EBUSY') && attempt < 4) {
+      if ((code === 'EPERM' || code === 'EACCES' || code === 'EBUSY') && attempt < 4) {
         const end = Date.now() + 15 * (attempt + 1);
         while (Date.now() < end) {
           // busy wait short backoff
@@ -158,14 +159,18 @@ class FileMutex {
 export const fileMutex = new FileMutex();
 
 export function appendAudit(
-  auditFile: string,
+  paths: ServerPaths,
   action: string,
-  details?: Record<string, unknown>
+  details?: Record<string, unknown>,
+  featureName = 'tasks'
 ): void {
-  appendAuditEntry(auditFile, {
-    Timestamp: new Date().toISOString(),
+  const nowIso = new Date().toISOString();
+  appendActionAudit(paths, {
+    feature: featureName,
+    Timestamp: nowIso,
     Tool: 'maw-board',
     Action: action,
+    action,
     ...(details ?? {}),
   });
 }

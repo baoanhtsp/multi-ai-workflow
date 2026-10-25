@@ -59,6 +59,18 @@ function Write-ManagedFile([string]$dest, [string]$content, [bool]$useBom) {
 
     $enc = New-Object System.Text.UTF8Encoding($useBom)
     [System.IO.File]::WriteAllText($dest, $content, $enc)
+
+    # Prune old .bak-* files for this target, keeping only the last 3
+    if ($parent -and (Test-Path -LiteralPath $parent -PathType Container)) {
+        $leafName = Split-Path -Leaf $dest
+        $baks = @(Get-ChildItem -LiteralPath $parent -Filter "$leafName.bak-*" -File -ErrorAction SilentlyContinue |
+            Sort-Object -Property Name -Descending)
+        if ($baks.Count -gt 3) {
+            foreach ($oldBak in ($baks | Select-Object -Skip 3)) {
+                Remove-Item -LiteralPath $oldBak.FullName -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 
 # 2. Helper to replace hardcoded C:\Users\Admin with current user's $env:USERPROFILE

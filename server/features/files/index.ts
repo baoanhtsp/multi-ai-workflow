@@ -107,8 +107,9 @@ export const feature: MawFeature = {
 
     files_config: {
       method: 'POST',
+      methods: ['GET', 'POST'],
       handler: async (ctx, req) => {
-        if (req.body.editor !== undefined) {
+        if (req.body?.editor !== undefined) {
           const validated = validateEditorConfig(req.body.editor);
           saveEditorConfig(validated, ctx.paths);
           return {

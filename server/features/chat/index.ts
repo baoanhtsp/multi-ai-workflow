@@ -173,7 +173,7 @@ export const feature: MawFeature = {
             cost_usd: 0,
             tokens_in: 0,
             tokens_out: 0,
-            context: { used_tokens: 0, window_tokens: getWindowTokens(agent.platform), pct: 0 },
+            context: { used_tokens: 0, window_tokens: getWindowTokens(agent.platform, ctx), pct: 0 },
             last_status: '',
             last_error: '',
           };

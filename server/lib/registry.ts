@@ -29,6 +29,7 @@ export interface AgentCliConfig {
   model_args: string[];
   effort_args: string[];
   resume_args: string[] | null;
+  policy_args?: Record<string, string[]> | null;
   output: 'text' | 'gemini-json';
   max_arg_chars: number;
   pricing: AgentCliPricing;
@@ -47,6 +48,8 @@ export interface AgentEntry {
   login_cmd: string[] | null;
   status_cmd: string[] | null;
   resume_args: string[] | null;
+  context_window: number | null;
+  policy_args: Record<string, string[]> | null;
   capabilities: AgentCapabilities;
   cli: AgentCliConfig | null;
 }
@@ -89,6 +92,19 @@ function parseNullableCmdArray(raw: unknown): string[] | null {
   return items.length > 0 ? items : null;
 }
 
+function parseNullablePolicyArgs(raw: unknown): Record<string, string[]> | null {
+  if (!isPlainObject(raw)) {
+    return null;
+  }
+  const out: Record<string, string[]> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (Array.isArray(v)) {
+      out[k] = v.map((x) => String(x ?? ''));
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 function mergeRawAgentObjects(
   base: AgentEntry,
   override: Record<string, unknown>
@@ -106,6 +122,8 @@ function mergeRawAgentObjects(
     login_cmd: base.login_cmd ? [...base.login_cmd] : null,
     status_cmd: base.status_cmd ? [...base.status_cmd] : null,
     resume_args: base.resume_args ? [...base.resume_args] : null,
+    context_window: base.context_window ?? null,
+    policy_args: base.policy_args ? { ...base.policy_args } : null,
     capabilities: { ...base.capabilities },
     cli: base.cli
       ? {
@@ -115,6 +133,7 @@ function mergeRawAgentObjects(
           model_args: [...base.cli.model_args],
           effort_args: [...base.cli.effort_args],
           resume_args: base.cli.resume_args ? [...base.cli.resume_args] : null,
+          policy_args: base.cli.policy_args ? { ...base.cli.policy_args } : null,
           pricing: { ...base.cli.pricing },
         }
       : null,
@@ -122,11 +141,18 @@ function mergeRawAgentObjects(
 
   for (const [k, v] of Object.entries(override)) {
     if (v === undefined) continue;
-    if (v === null && k !== 'login_cmd' && k !== 'status_cmd' && k !== 'resume_args') {
+    if (
+      v === null &&
+      k !== 'login_cmd' &&
+      k !== 'status_cmd' &&
+      k !== 'resume_args' &&
+      k !== 'context_window' &&
+      k !== 'policy_args'
+    ) {
       continue;
     }
     if (
-      (k === 'capabilities' || k === 'detect' || k === 'cli') &&
+      (k === 'capabilities' || k === 'detect' || k === 'cli' || k === 'policy_args') &&
       isPlainObject(v) &&
       isPlainObject(merged[k])
     ) {
@@ -295,6 +321,7 @@ function validateAgentEntry(
       ? raw.cli.effort_args.map((x) => String(x ?? ''))
       : [];
     const cliResumeArgs = parseNullableCmdArray(raw.cli.resume_args);
+    const cliPolicyArgs = parseNullablePolicyArgs(raw.cli.policy_args);
 
     const outputRaw = String(raw.cli.output ?? 'text')
       .trim()
@@ -323,6 +350,7 @@ function validateAgentEntry(
       model_args: modelArgs,
       effort_args: effortArgs,
       resume_args: cliResumeArgs,
+      policy_args: cliPolicyArgs,
       output: outputRaw as AgentCliConfig['output'],
       max_arg_chars: maxArgChars,
       pricing: {
@@ -342,6 +370,21 @@ function validateAgentEntry(
     cliConfig.resume_args = [...resumeArgs];
   }
 
+  const contextWindow =
+    typeof raw.context_window === 'number' &&
+    Number.isFinite(raw.context_window) &&
+    raw.context_window > 0
+      ? Math.trunc(raw.context_window)
+      : null;
+
+  let policyArgs = parseNullablePolicyArgs(raw.policy_args);
+  if (!policyArgs && cliConfig?.policy_args) {
+    policyArgs = { ...cliConfig.policy_args };
+  }
+  if (cliConfig && !cliConfig.policy_args && policyArgs) {
+    cliConfig.policy_args = { ...policyArgs };
+  }
+
   return {
     id,
     label,
@@ -358,6 +401,8 @@ function validateAgentEntry(
     login_cmd: loginCmd,
     status_cmd: statusCmd,
     resume_args: resumeArgs,
+    context_window: contextWindow,
+    policy_args: policyArgs,
     capabilities,
     cli: cliConfig,
   };
@@ -384,7 +429,7 @@ export function loadAgentRegistry(
   }
 
   const mawHome =
-    (options?.mawHome ?? process.env.MAW_HOME ?? '').trim() ||
+    (options?.mawHome ?? paths.mawHome ?? process.env.MAW_HOME ?? '').trim() ||
     path.win32.join(paths.userProfile, '.maw');
   const userPath = path.win32.join(mawHome, 'agents.json');
 

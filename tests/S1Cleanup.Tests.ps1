@@ -73,11 +73,15 @@ Describe "S1 Cleanup End-to-End" {
         $script:origTmp = $env:TMP
         $script:origTemp = $env:TEMP
         $script:origMawHome = $env:MAW_HOME
+        $script:origUserProfile = $env:USERPROFILE
+        $script:origMawTest = $env:MAW_TEST
         $script:origSweep = $env:MAW_CLEANUP_SWEEP
 
         $env:TMP = $script:tempDir
         $env:TEMP = $script:tempDir
         $env:MAW_HOME = $script:mawHome
+        $env:USERPROFILE = $script:testBase
+        $env:MAW_TEST = "1"
         $env:MAW_CLEANUP_SWEEP = "0"
 
         $argList = @($script:serverMain, "--port", "$($script:port)", "--projects-root", $script:projectsRoot)
@@ -111,6 +115,8 @@ Describe "S1 Cleanup End-to-End" {
         $env:TMP = $script:origTmp
         $env:TEMP = $script:origTemp
         $env:MAW_HOME = $script:origMawHome
+        $env:USERPROFILE = $script:origUserProfile
+        if ($null -eq $script:origMawTest) { Remove-Item Env:\MAW_TEST -ErrorAction SilentlyContinue } else { $env:MAW_TEST = $script:origMawTest }
         $env:MAW_CLEANUP_SWEEP = $script:origSweep
 
         if (Test-Path -LiteralPath $script:testBase) {

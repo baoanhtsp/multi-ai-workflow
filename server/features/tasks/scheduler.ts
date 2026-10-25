@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { handleCancelJob, refreshJobMetaStatus, type JobMeta } from '../../actions/jobs.ts';
 import { createFeatureContext, type MawFeatureContext } from '../../lib/feature.ts';
+import { logServerError } from '../../lib/logger.ts';
 import { isProcessRunning } from '../../lib/proc.ts';
 import {
   ApiValidationError,
@@ -219,10 +220,41 @@ export function tryAcquireLeaderLock(ctx: MawFeatureContext): boolean {
       fs.closeSync(fd);
     }
     myLeaderToken = token;
+    pruneStaleSchedulerLocks(path.dirname(lockFile), 3);
     return true;
   } catch {
     myLeaderToken = null;
     return false;
+  }
+}
+
+export function pruneStaleSchedulerLocks(tasksDir: string, keep = 3): void {
+  try {
+    if (!fs.existsSync(tasksDir)) return;
+    const staleFiles = fs
+      .readdirSync(tasksDir)
+      .filter((name) => name.startsWith('scheduler.lock.stale-'))
+      .map((name) => {
+        const fullPath = path.win32.join(tasksDir, name);
+        let mtimeMs = 0;
+        try {
+          mtimeMs = fs.statSync(fullPath).mtimeMs;
+        } catch {
+          mtimeMs = 0;
+        }
+        return { name, fullPath, mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs || b.name.localeCompare(a.name));
+
+    for (let i = keep; i < staleFiles.length; i++) {
+      try {
+        fs.unlinkSync(staleFiles[i]!.fullPath);
+      } catch {
+        // Best-effort cleanup
+      }
+    }
+  } catch {
+    // Best-effort cleanup
   }
 }
 
@@ -577,6 +609,7 @@ export async function startCardJob(
       budget_usd: preset?.budget_usd,
       max_rounds: preset?.max_fix_rounds,
       new_session: newSession,
+      source: { feature: 'tasks', task_id: currentCard.id },
     };
 
     // Restart safety: record starting intent before calling startJob
@@ -632,14 +665,22 @@ export async function startCardJob(
 
     if (cardWasAlreadyRunning) {
       try {
-        await handleCancelJob({ job_id: jobId }, ctx.paths);
+        if (typeof ctx.cancelJob === 'function') {
+          await ctx.cancelJob(jobId);
+        } else {
+          await handleCancelJob({ job_id: jobId }, ctx.paths);
+        }
       } catch {}
       throw conflict(`Card ${card.id} is already running.`);
     }
 
     if (!patched) {
       try {
-        await handleCancelJob({ job_id: jobId }, ctx.paths);
+        if (typeof ctx.cancelJob === 'function') {
+          await ctx.cancelJob(jobId);
+        } else {
+          await handleCancelJob({ job_id: jobId }, ctx.paths);
+        }
       } catch {}
       throw notFound(`Task card not found: ${card.id}`);
     }
@@ -1044,7 +1085,13 @@ export function ensureScheduler(ctx: MawFeatureContext): void {
     return;
   }
   schedulerTimer = setInterval(() => {
-    tick(ctx).catch(() => {});
+    try {
+      tick(ctx).catch((err) => {
+        logServerError('tasks:schedulerTick', err, ctx.paths.mawHome);
+      });
+    } catch (err) {
+      logServerError('tasks:schedulerInterval', err, ctx.paths.mawHome);
+    }
   }, 3000);
   schedulerTimer.unref();
 }
@@ -1055,7 +1102,13 @@ export function triggerImmediateTick(ctx: MawFeatureContext): void {
   }
   debounceTickTimer = setTimeout(() => {
     debounceTickTimer = null;
-    tick(ctx).catch(() => {});
+    try {
+      tick(ctx).catch((err) => {
+        logServerError('tasks:immediateTick', err, ctx.paths.mawHome);
+      });
+    } catch (err) {
+      logServerError('tasks:immediateTickTimeout', err, ctx.paths.mawHome);
+    }
   }, 200);
   debounceTickTimer.unref();
 }

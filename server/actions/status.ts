@@ -3,7 +3,11 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { getAuditStats } from '../lib/audit.ts';
-import { createFeatureContext, type MawFeature } from '../lib/feature.ts';
+import {
+  createFeatureContext,
+  type MawFeature,
+  type RegisteredFeatureRoute,
+} from '../lib/feature.ts';
 import { getTempDir, isDirectorySafe, isFileSafe, type ServerPaths } from '../lib/paths.ts';
 import { loadAgentRegistry } from '../lib/registry.ts';
 import { detectRegistryAgents, getCodexModels, getDetectedToolVersions } from '../lib/versions.ts';
@@ -100,8 +104,8 @@ export async function getBridgeStatus(bridgeFile: string): Promise<Record<string
   };
 }
 
-function loadLineCountCache(): Record<string, number> {
-  const cacheFile = path.win32.join(getTempDir(), 'agy_dashboard_linecache.json');
+function loadLineCountCache(tempDir?: string): Record<string, number> {
+  const cacheFile = path.win32.join(tempDir || getTempDir(), 'agy_dashboard_linecache.json');
   if (!isFileSafe(cacheFile)) {
     return {};
   }
@@ -116,8 +120,8 @@ function loadLineCountCache(): Record<string, number> {
   return {};
 }
 
-function saveLineCountCache(cache: Record<string, number>): void {
-  const cacheFile = path.win32.join(getTempDir(), 'agy_dashboard_linecache.json');
+function saveLineCountCache(cache: Record<string, number>, tempDir?: string): void {
+  const cacheFile = path.win32.join(tempDir || getTempDir(), 'agy_dashboard_linecache.json');
   const keys = Object.keys(cache);
   let trimmed = cache;
   if (keys.length > 64) {
@@ -372,11 +376,15 @@ export function getLocalProjects(projectsRoot: string): Array<Record<string, unk
 
 export async function handleStatus(
   paths: ServerPaths,
-  loadedFeatures: MawFeature[] = []
+  loadedFeatures: MawFeature[] = [],
+  ctxOptions?: {
+    routes?: Map<string, RegisteredFeatureRoute>;
+    serverUrl?: string;
+  }
 ): Promise<Record<string, unknown>> {
-  const lineCache = loadLineCountCache();
+  const lineCache = loadLineCountCache(paths.tempDir);
   const conversations = getConversations(paths.presenceDir, paths.brainDir, lineCache);
-  saveLineCountCache(lineCache);
+  saveLineCountCache(lineCache, paths.tempDir);
 
   const registry = loadAgentRegistry(paths);
   const codexModels = getCodexModels(paths.userProfile);
@@ -415,15 +423,17 @@ export async function handleStatus(
       login_cmd: entry.login_cmd ? [...entry.login_cmd] : null,
       status_cmd: entry.status_cmd ? [...entry.status_cmd] : null,
       resume_args: entry.resume_args ? [...entry.resume_args] : null,
+      context_window: entry.context_window ?? null,
+      policy_args: entry.policy_args ? { ...entry.policy_args } : null,
       capabilities: { ...entry.capabilities },
     };
   });
 
-  const featureList = ['agents', 'sse', 'registry'];
+  const featureList = ['agents', 'sse', 'registry', 'chat-resume'];
   const featureData: Record<string, unknown> = {};
   const featureErrors: Record<string, string> = {};
   const uiFeatures: Array<{ name: string; script: string; style?: string }> = [];
-  const featCtx = createFeatureContext(paths, registry);
+  const featCtx = createFeatureContext(paths, registry, ctxOptions);
 
   for (const feat of loadedFeatures) {
     if (!featureList.includes(feat.name)) {

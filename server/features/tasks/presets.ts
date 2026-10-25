@@ -241,7 +241,7 @@ export async function deletePreset(
       throw notFound(`Preset not found: ${id}`);
     }
     writeJsonAtomic(file, data);
-    appendAudit(ctx.paths.auditFile, 'preset_delete', { id });
+    appendAudit(ctx.paths, 'preset_delete', { id }, 'tasks');
     return id;
   });
 }

@@ -1,9 +1,45 @@
 BeforeAll {
+    $script:origMawHome = $env:MAW_HOME
+    $script:origUserProfile = $env:USERPROFILE
+    $script:origTemp = $env:TEMP
+    $script:origTmp = $env:TMP
+    $script:origMawTest = $env:MAW_TEST
+    $script:origAuditFile = $env:MAW_AUDIT_FILE
+
+    $script:isoBase = Join-Path ([System.IO.Path]::GetTempPath()) ("maw-common-iso-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    $script:isoMaw = Join-Path $script:isoBase ".maw"
+    $script:isoUser = Join-Path $script:isoBase "user"
+    $script:isoTemp = Join-Path $script:isoBase "tmp"
+    New-Item -ItemType Directory -Path $script:isoMaw -Force | Out-Null
+    New-Item -ItemType Directory -Path $script:isoUser -Force | Out-Null
+    New-Item -ItemType Directory -Path $script:isoTemp -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $script:isoUser "AppData\Local\Microsoft\Windows\PowerShell\ScheduledJobs") -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $script:isoUser "AppData\Roaming\Microsoft\Windows\PowerShell") -Force | Out-Null
+
+    $env:MAW_HOME = $script:isoMaw
+    $env:USERPROFILE = $script:isoUser
+    $env:TEMP = $script:isoTemp
+    $env:TMP = $script:isoTemp
+    $env:MAW_TEST = "1"
+    $env:MAW_AUDIT_FILE = Join-Path $script:isoUser ".gemini\antigravity\multi-ai-audit.jsonl"
+
     $script:RepoRoot = Split-Path -Parent $PSScriptRoot
     $script:CommonScript = Join-Path $script:RepoRoot "antigravity\skills\claude-leader\scripts\lib\maw-common.ps1"
     $script:HooksScript  = Join-Path $script:RepoRoot "antigravity\skills\claude-leader\scripts\lib\maw-hooks.ps1"
     . $script:CommonScript
     . $script:HooksScript
+}
+
+AfterAll {
+    if ($null -eq $script:origMawHome) { Remove-Item Env:\MAW_HOME -ErrorAction SilentlyContinue } else { $env:MAW_HOME = $script:origMawHome }
+    if ($null -eq $script:origUserProfile) { Remove-Item Env:\USERPROFILE -ErrorAction SilentlyContinue } else { $env:USERPROFILE = $script:origUserProfile }
+    if ($null -eq $script:origTemp) { Remove-Item Env:\TEMP -ErrorAction SilentlyContinue } else { $env:TEMP = $script:origTemp }
+    if ($null -eq $script:origTmp) { Remove-Item Env:\TMP -ErrorAction SilentlyContinue } else { $env:TMP = $script:origTmp }
+    if ($null -eq $script:origMawTest) { Remove-Item Env:\MAW_TEST -ErrorAction SilentlyContinue } else { $env:MAW_TEST = $script:origMawTest }
+    if ($null -eq $script:origAuditFile) { Remove-Item Env:\MAW_AUDIT_FILE -ErrorAction SilentlyContinue } else { $env:MAW_AUDIT_FILE = $script:origAuditFile }
+    if ($script:isoBase -and (Test-Path -LiteralPath $script:isoBase)) {
+        Remove-Item -LiteralPath $script:isoBase -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Describe "ConvertTo-NativeArgument & Invoke-NativeProcess" {
@@ -386,7 +422,7 @@ Describe "F0 Script Hooks (Invoke-MawHooks) & Antigravity Parallel Conversation 
             [System.IO.File]::WriteAllText((Join-Path $mainRepo "README.md"), "# test`n")
             & git -C $mainRepo add README.md
             & git -C $mainRepo commit -m "init" 2>$null | Out-Null
-            & git -C $mainRepo worktree add -b feat/s1 $linkedWt 2>$null | Out-Null
+            & git -C $mainRepo worktree add -q -b feat/s1 $linkedWt 2>$null | Out-Null
 
             $resolvedMain = Resolve-GitMainWorktreePath -WorkDir $linkedWt
             (Normalize-MawWorkspacePath $resolvedMain) | Should -Be (Normalize-MawWorkspacePath $mainRepo)
@@ -411,6 +447,91 @@ Describe "F0 Script Hooks (Invoke-MawHooks) & Antigravity Parallel Conversation 
             $pidWt | Should -Be "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
         } finally {
             Remove-Item -LiteralPath $tmpBase -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe "Codex Cached Input Token Pricing & Audit Guard (v5 Hardening H4 / H5)" {
+    It "Prices cached input tokens at 0.25/MTok and uncached input at 2.50/MTok for Codex (H4)" {
+        # 500,000 total input tokens (450,000 cached + 50,000 uncached) and 2,000 output tokens:
+        # Uncached: 50,000 * $2.50 / 1M = $0.125
+        # Cached:   450,000 * $0.25 / 1M = $0.1125
+        # Output:   2,000 * $10.00 / 1M = $0.02
+        # Total:    $0.2575
+        $cost = Get-MawTokenCostUsd -Model "gpt-5-codex" -Tool "codex" -InputTokens 500000 -CachedInputTokens 450000 -OutputTokens 2000
+        $cost | Should -Be 0.2575
+
+        # Without cached tokens, 500,000 input + 2,000 output = $1.27
+        $fullCost = Get-MawTokenCostUsd -Model "gpt-5-codex" -Tool "codex" -InputTokens 500000 -CachedInputTokens 0 -OutputTokens 2000
+        $fullCost | Should -Be 1.27
+    }
+
+    It "Extracts cached_input_tokens from sample Codex JSON stream and writes InputTokens, CachedInputTokens, and CostUsd to isolated MAW_AUDIT_FILE (H4.3)" {
+        $tmpDir = Join-Path $env:TEMP ("maw_codex_price_" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+        $fakeBinDir = Join-Path $tmpDir "bin"
+        New-Item -ItemType Directory -Path $fakeBinDir -Force | Out-Null
+        $auditOut = Join-Path $tmpDir "codex-audit.jsonl"
+
+        # Create a fake codex.ps1 that emits JSONL with turn.completed including cached_input_tokens
+        $fakeCodexPs1 = Join-Path $fakeBinDir "codex.ps1"
+        $ps1Body = @'
+$null = @($input)
+Write-Output '{"type":"thread.started","thread_id":"th_123"}'
+Write-Output '{"type":"item.completed","item":{"type":"agent_message","text":"Review complete.\nSCORE: 9.5/10\nVERDICT: APPROVED"}}'
+Write-Output '{"type":"turn.completed","usage":{"input_tokens":500000,"cached_input_tokens":450000,"output_tokens":2000}}'
+exit 0
+'@
+        [System.IO.File]::WriteAllText($fakeCodexPs1, $ps1Body, (New-Object System.Text.UTF8Encoding($false)))
+
+        $prevPath = $env:PATH
+        $prevAudit = $env:MAW_AUDIT_FILE
+        $prevSkip = $env:MAW_SKIP_HEALTH
+        try {
+            $env:PATH = "$fakeBinDir;$prevPath"
+            $env:MAW_AUDIT_FILE = $auditOut
+            $env:MAW_SKIP_HEALTH = "1"
+            $invokeCodex = Join-Path $script:RepoRoot "antigravity\skills\claude-leader\scripts\invoke-codex.ps1"
+            $out = & $invokeCodex -Role "critic" -WorkDir $tmpDir -Prompt "Sample review prompt" 2>&1
+            $LASTEXITCODE | Should -Be 0
+
+            Test-Path -LiteralPath $auditOut | Should -BeTrue
+            $row = (Get-Content -LiteralPath $auditOut -Raw -Encoding UTF8).Trim() | ConvertFrom-Json
+            $row.Tool | Should -Be "codex"
+            $row.InputTokens | Should -Be 500000
+            $row.CachedInputTokens | Should -Be 450000
+            $row.OutputTokens | Should -Be 2000
+            [double]$row.CostUsd | Should -Be 0.2575
+            $row.Verdict | Should -Be "APPROVED"
+        } finally {
+            $env:PATH = $prevPath
+            $env:MAW_AUDIT_FILE = $prevAudit
+            $env:MAW_SKIP_HEALTH = $prevSkip
+            Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "Refuses to write to real user profile audit file when MAW_TEST=1 (H5.1)" {
+        $realProf = [Environment]::GetFolderPath("UserProfile")
+        $realAudit = Join-Path $realProf ".gemini\antigravity\multi-ai-audit.jsonl"
+
+        $prevTest = $env:MAW_TEST
+        $prevAudit = $env:MAW_AUDIT_FILE
+        $prevUser = $env:USERPROFILE
+        try {
+            $env:MAW_TEST = "1"
+            Remove-Item Env:\MAW_AUDIT_FILE -ErrorAction SilentlyContinue
+            $env:USERPROFILE = $realProf
+
+            $resolved = Resolve-MawAuditFilePath 3>$null
+            $resolved | Should -BeNullOrEmpty
+
+            $wrote = Write-MawAuditEntry -Entry @{ Tool = "test"; CostUsd = 0 } 3>$null
+            $wrote | Should -BeFalse
+        } finally {
+            $env:MAW_TEST = $prevTest
+            $env:MAW_AUDIT_FILE = $prevAudit
+            $env:USERPROFILE = $prevUser
         }
     }
 }

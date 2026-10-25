@@ -1,7 +1,15 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { getTempDir, isDirectorySafe, isFileSafe } from './paths.ts';
+import { logServerError } from './logger.ts';
+import {
+  getRealSystemPaths,
+  getTempDir,
+  isDirectorySafe,
+  isFileSafe,
+  isTestContext,
+  sameWinPath,
+} from './paths.ts';
 
 export interface AuditLogRow {
   Timestamp: string;
@@ -11,6 +19,7 @@ export interface AuditLogRow {
   WorkDir: string;
   PromptChars: number;
   InputTokens: number;
+  CachedInputTokens?: number;
   OutputTokens: number;
   CostUsd: number;
   Score: string;
@@ -59,30 +68,44 @@ export function estimateEntryTelemetry(entry: Record<string, unknown>): {
       ? Math.trunc(rawOut)
       : Math.max(1, Math.ceil((outputChars > 0 ? outputChars : 1600) / 3.8));
 
+  const hasExplicitCost =
+    entry.CostUsd !== undefined && entry.CostUsd !== null && String(entry.CostUsd).trim() !== '';
   const rawCost = Number(entry.CostUsd ?? 0);
+  const rawCached = Math.max(0, Math.trunc(Number(entry.CachedInputTokens ?? 0) || 0));
   let costUsd: number;
-  if (Number.isFinite(rawCost) && rawCost > 0) {
+  if (hasExplicitCost && Number.isFinite(rawCost) && (rawCost > 0 || (rawIn === 0 && rawOut === 0 && promptChars === 0 && outputChars === 0))) {
     costUsd = rawCost;
   } else {
     let inRate = 3.0;
+    let cachedInRate = 0.3;
     let outRate = 15.0;
     if (model.includes('opus')) {
       inRate = 15.0;
+      cachedInRate = 1.5;
       outRate = 75.0;
     } else if (model.includes('haiku')) {
       inRate = 0.8;
+      cachedInRate = 0.08;
       outRate = 4.0;
     } else if (model.includes('fable')) {
       inRate = 6.0;
+      cachedInRate = 0.6;
       outRate = 30.0;
     } else if (tool === 'codex' || model.includes('gpt')) {
       inRate = 2.5;
+      cachedInRate = 0.25;
       outRate = 10.0;
     } else if (tool === 'antigravity' || model.includes('gemini')) {
       inRate = 1.25;
+      cachedInRate = 0.125;
       outRate = 5.0;
     }
-    costUsd = roundTo((inTokens * inRate + outTokens * outRate) / 1_000_000, 5);
+    const cachedIn = Math.min(inTokens, rawCached);
+    const uncachedIn = Math.max(0, inTokens - cachedIn);
+    costUsd = roundTo(
+      (uncachedIn * inRate + cachedIn * cachedInRate + outTokens * outRate) / 1_000_000,
+      5
+    );
   }
 
   return {
@@ -138,7 +161,7 @@ export function getAuditStats(auditFile: string): AuditStats {
   }
 
   const sig = `${mtime}|${size}`;
-  const cacheFile = path.win32.join(getTempDir(), 'agy_dashboard_auditcache_v21.json');
+  const cacheFile = `${auditFile}.cache.json`;
   if (isFileSafe(cacheFile)) {
     try {
       const cached = JSON.parse(fs.readFileSync(cacheFile, 'utf8')) as {
@@ -202,7 +225,7 @@ export function getAuditStats(auditFile: string): AuditStats {
       4
     );
 
-    recentRing.push({
+    const rowItem: AuditLogRow = {
       Timestamp: String(entry.Timestamp ?? ''),
       Tool: tool,
       Role: role,
@@ -214,7 +237,11 @@ export function getAuditStats(auditFile: string): AuditStats {
       CostUsd: tel.cost_usd,
       Score: String(entry.Score ?? ''),
       Verdict: verdict,
-    });
+    };
+    if (entry.CachedInputTokens !== undefined && entry.CachedInputTokens !== null) {
+      rowItem.CachedInputTokens = Math.max(0, Math.trunc(Number(entry.CachedInputTokens) || 0));
+    }
+    recentRing.push(rowItem);
     if (recentRing.length > 20) {
       recentRing.shift();
     }
@@ -240,6 +267,19 @@ export function getAuditStats(auditFile: string): AuditStats {
 }
 
 export function appendAuditEntry(auditFile: string, entry: Record<string, unknown>): void {
+  const realAuditFile = path.win32.join(
+    getRealSystemPaths().userProfile,
+    '.gemini',
+    'antigravity',
+    'multi-ai-audit.jsonl'
+  );
+  if (isTestContext() && sameWinPath(auditFile, realAuditFile)) {
+    logServerError(
+      'audit:appendAuditEntry',
+      new Error(`Refused to write to real AI audit log in test context: ${auditFile}`)
+    );
+    return;
+  }
   const dir = path.dirname(auditFile);
   if (!isDirectorySafe(dir)) {
     fs.mkdirSync(dir, { recursive: true });

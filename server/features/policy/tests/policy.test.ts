@@ -558,3 +558,163 @@ test('regression Item 5: policy_preview redacts project .env secrets and custom 
   }
 });
 
+test('H1.4 & H1.5: server survives blocked job + budget_save + concurrent scanner/inbox contention, and prunes stale scheduler locks', async () => {
+  const { createMawHttpServer } = await import('../../../http.ts');
+  const { createFeatureContext, startServerFeatures, stopServerFeatures } = await import('../../../lib/feature.ts');
+  const { runJobScanner } = await import('../../inbox/scanner.ts');
+  const { syncAttentionToInbox } = await import('../lib/inbox-bridge.ts');
+  const { pruneStaleSchedulerLocks } = await import('../../tasks/scheduler.ts');
+
+  const tmp = path.win32.join(
+    os.tmpdir(),
+    `maw_test_h14_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+  );
+  const mawHome = path.join(tmp, '.maw');
+  const userProfile = path.join(tmp, 'user');
+  const jobsDir = path.join(tmp, 'maw_jobs');
+  const tempDir = path.join(tmp, 'temp');
+  fs.mkdirSync(mawHome, { recursive: true });
+  fs.mkdirSync(userProfile, { recursive: true });
+  fs.mkdirSync(jobsDir, { recursive: true });
+  fs.mkdirSync(tempDir, { recursive: true });
+
+  const oldTemp = process.env.TEMP;
+  const oldTmp = process.env.TMP;
+  process.env.TEMP = tempDir;
+  process.env.TMP = tempDir;
+
+  // Test H1.5: create 6 stale scheduler lock files and verify pruneStaleSchedulerLocks keeps only 3 newest
+  const tasksDir = path.join(mawHome, 'data', 'tasks');
+  fs.mkdirSync(tasksDir, { recursive: true });
+  for (let i = 1; i <= 6; i++) {
+    const f = path.join(tasksDir, `scheduler.lock.stale-100${i}-${1700000000000 + i * 1000}`);
+    fs.writeFileSync(f, JSON.stringify({ pid: 1000 + i, token: `tok_${i}` }), 'utf8');
+    const t = new Date(1700000000000 + i * 1000);
+    fs.utimesSync(f, t, t);
+  }
+  pruneStaleSchedulerLocks(tasksDir, 3);
+  const remainingStale = fs
+    .readdirSync(tasksDir)
+    .filter((n) => n.startsWith('scheduler.lock.stale-'))
+    .sort();
+  assert.equal(remainingStale.length, 3, 'pruneStaleSchedulerLocks must keep at most 3 newest stale locks');
+  assert.ok(remainingStale.some((n) => n.includes('1006')));
+  assert.ok(remainingStale.some((n) => n.includes('1005')));
+  assert.ok(remainingStale.some((n) => n.includes('1004')));
+
+  // Test H1.4: start server + features, seed a blocked job, fire budget_save + concurrent scanner & status requests
+  const { server, getPaths, loadedFeatures } = createMawHttpServer({
+    repoRoot: path.resolve(import.meta.dirname, '..', '..', '..', '..'),
+    mawHome,
+    userProfile,
+    jobsDir,
+    tempDir,
+    projectsRoot: tmp,
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address() as { port: number };
+  const serverUrl = `http://127.0.0.1:${addr.port}`;
+  const paths = getPaths();
+
+  const startCtx = createFeatureContext(paths, undefined, {
+    routes: loadedFeatures.routes,
+    serverUrl,
+  });
+  await startServerFeatures(loadedFeatures.features, startCtx);
+
+  try {
+    // Seed a blocked job in jobsDir
+    const blockedJobId = 'job_blocked_h14';
+    fs.writeFileSync(
+      path.join(jobsDir, `${blockedJobId}.json`),
+      JSON.stringify({
+        job_id: blockedJobId,
+        mode: 'task',
+        agent: 'claude',
+        role: 'backend',
+        project_path: tmp,
+        status: 'FAILED',
+        exit_code: 1,
+        started_at: new Date(Date.now() - 5000).toISOString(),
+        finished_at: new Date().toISOString(),
+      }),
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(jobsDir, `${blockedJobId}.log`),
+      'HOOK_BLOCKED (before-agent): Daily budget cap reached ($20.00 / $20.00)\n',
+      'utf8'
+    );
+
+    const requestJson = (action: string, method: 'GET' | 'POST', body?: unknown) =>
+      new Promise<{ statusCode: number; data: Record<string, unknown> }>((resolve, reject) => {
+        const payload = body !== undefined ? JSON.stringify(body) : '';
+        const req = http.request(
+          `${serverUrl}/api?action=${action}`,
+          {
+            method,
+            headers: {
+              Host: `127.0.0.1:${addr.port}`,
+              'X-MAW-Request': '1',
+              ...(method === 'POST'
+                ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
+                : {}),
+            },
+          },
+          (res) => {
+            let raw = '';
+            res.on('data', (c) => (raw += c));
+            res.on('end', () => {
+              try {
+                resolve({ statusCode: res.statusCode ?? 0, data: JSON.parse(raw) });
+              } catch (e) {
+                reject(e);
+              }
+            });
+          }
+        );
+        req.on('error', reject);
+        if (method === 'POST' && payload) req.write(payload);
+        req.end();
+      });
+
+    // Hammer budget_save (enabled: false), status, inbox_list, recovery_list, fallback_get, and scanner concurrently
+    await Promise.all([
+      requestJson('budget_save', 'POST', {
+        version: 1,
+        enabled: false,
+        caps: {
+          job: { usd: { warn: 5, block: 15 }, tokens: { warn: 0, block: 0 } },
+          team_run: { usd: { warn: 15, block: 40 } },
+          day: { usd: { warn: 50, block: 150 }, tokens: { warn: 0, block: 0 } },
+          project: { usd: { warn: 0, block: 0 }, period: 'month' },
+          agent_day: { usd: { warn: 0, block: 0 } },
+        },
+        projects: {},
+        estimate_next_call: false,
+      }),
+      runJobScanner(paths),
+      syncAttentionToInbox(startCtx),
+      requestJson('status', 'GET'),
+      requestJson('inbox_list', 'GET'),
+      requestJson('recovery_list', 'GET'),
+      requestJson('fallback_get', 'GET'),
+    ]);
+
+    const finalStatus = await requestJson('status', 'GET');
+    assert.equal(finalStatus.statusCode, 200);
+    assert.equal(finalStatus.data.ok, true);
+  } finally {
+    await stopServerFeatures(loadedFeatures.features);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    process.env.TEMP = oldTemp;
+    process.env.TMP = oldTmp;
+    try {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    } catch {
+      // Ignore
+    }
+  }
+});
+

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { handleCancelJob, refreshJobMetaStatus, type JobMeta } from '../../actions/jobs.ts';
 import { handleSpecGuard } from '../../actions/specGuard.ts';
 import type { MawFeatureContext } from '../../lib/feature.ts';
+import { logServerError } from '../../lib/logger.ts';
 import { isFileSafe } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import {
@@ -44,8 +45,13 @@ export const PLATFORM_WINDOW_TOKENS: Record<string, number> = {
   aider: 128000,
 };
 
-export function getWindowTokens(platform: string): number {
-  return PLATFORM_WINDOW_TOKENS[platform.toLowerCase()] ?? 128000;
+export function getWindowTokens(platform: string, ctx?: MawFeatureContext): number {
+  const lower = platform.toLowerCase();
+  const regAgent = ctx?.registry?.agents?.find((a) => a.id.toLowerCase() === lower);
+  if (regAgent && typeof regAgent.context_window === 'number' && regAgent.context_window > 0) {
+    return regAgent.context_window;
+  }
+  return PLATFORM_WINDOW_TOKENS[lower] ?? 128000;
 }
 
 export function newSessionFor(ctx: MawFeatureContext, platform: string): boolean {
@@ -117,9 +123,10 @@ export function computeContextMeter(
   messages: Message[],
   summarySeq: number,
   platform: string,
-  lastTokensIn: number | null
+  lastTokensIn: number | null,
+  ctx?: MawFeatureContext
 ): { used_tokens: number; window_tokens: number; pct: number } {
-  const window_tokens = getWindowTokens(platform);
+  const window_tokens = getWindowTokens(platform, ctx);
   let charCount = (summary || '').length;
   for (const m of messages) {
     if (m.seq > summarySeq) {
@@ -385,8 +392,14 @@ export function ensureTickStarted(ctx: MawFeatureContext): void {
   if (!tickTimer) {
     s6StateStorage.exit(() => {
       tickTimer = setInterval(() => {
-        if (lastKnownCtx) {
-          tick(lastKnownCtx).catch(() => {});
+        try {
+          if (lastKnownCtx) {
+            tick(lastKnownCtx).catch((err) => {
+              logServerError('chat:tick', err, lastKnownCtx?.paths.mawHome);
+            });
+          }
+        } catch (err) {
+          logServerError('chat:tickInterval', err, lastKnownCtx?.paths.mawHome);
         }
       }, 2000);
       tickTimer.unref();
@@ -544,10 +557,17 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
       if (parsed.tokens_in) conv.tokens_in += parsed.tokens_in;
       if (parsed.tokens_out) conv.tokens_out += parsed.tokens_out;
 
-      if (parsed.resume_token) {
+      const sessionRefId =
+        typeof meta.session_ref === 'string'
+          ? meta.session_ref
+          : meta.session_ref && typeof meta.session_ref === 'object'
+            ? meta.session_ref.id
+            : '';
+      const resumeTok = parsed.resume_token || sessionRefId || '';
+      if (resumeTok) {
         conv.resume = {
           platform: conv.platform,
-          token: parsed.resume_token,
+          token: resumeTok,
           session: conv.session,
         };
       }
@@ -561,7 +581,8 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         msgs,
         conv.summary_seq,
         conv.platform,
-        parsed.tokens_in
+        parsed.tokens_in,
+        ctx
       );
 
       conv.active_job_id = '';
@@ -798,10 +819,26 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
 
     const parsed = parseJobLog(logText, { isFailed: statusUpper === 'FAILED' });
     const metaAny = meta as unknown as Record<string, unknown>;
-    if (typeof metaAny.worktree === 'string' && metaAny.worktree) {
+    const wtObj =
+      metaAny.worktree && typeof metaAny.worktree === 'object'
+        ? (metaAny.worktree as Record<string, unknown>)
+        : null;
+    const wtPath =
+      typeof metaAny.worktree === 'string'
+        ? metaAny.worktree
+        : typeof wtObj?.path === 'string'
+          ? wtObj.path
+          : '';
+    const wtBranch =
+      typeof metaAny.branch === 'string' && metaAny.branch
+        ? metaAny.branch
+        : typeof wtObj?.branch === 'string'
+          ? wtObj.branch
+          : '';
+    if (wtPath) {
       h.isolated = true;
-      h.worktree = metaAny.worktree;
-      h.branch = String(metaAny.branch ?? '');
+      h.worktree = wtPath;
+      h.branch = wtBranch;
     }
 
     if (statusUpper === 'CANCELLED') {
@@ -1322,9 +1359,29 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
           const jobMetaFile = path.win32.join(ctx.paths.jobsDir, `${h.job_id}.json`);
           if (isFileSafe(jobMetaFile)) {
             try {
-              const meta = JSON.parse(fs.readFileSync(jobMetaFile, 'utf8')) as JobMeta & { worktree?: string };
-              if (meta.worktree) {
-                h.worktree = meta.worktree;
+              const meta = JSON.parse(fs.readFileSync(jobMetaFile, 'utf8')) as JobMeta & {
+                worktree?: string | { id?: string; path?: string; branch?: string; port?: number };
+                branch?: string;
+              };
+              const wtObj =
+                meta.worktree && typeof meta.worktree === 'object'
+                  ? (meta.worktree as { path?: string; branch?: string })
+                  : null;
+              const wtPath =
+                typeof meta.worktree === 'string'
+                  ? meta.worktree
+                  : typeof wtObj?.path === 'string'
+                    ? wtObj.path
+                    : '';
+              const wtBranch =
+                typeof meta.branch === 'string' && meta.branch
+                  ? meta.branch
+                  : typeof wtObj?.branch === 'string'
+                    ? wtObj.branch
+                    : '';
+              if (wtPath) {
+                h.worktree = wtPath;
+                if (wtBranch) h.branch = wtBranch;
                 h.isolated = true;
                 isConfirmedIsolated = true;
               }
@@ -1617,6 +1674,12 @@ export async function startTurnJob(
     }
   }
 
+  const isResuming = Boolean(
+    conv.resume?.token &&
+      conv.resume.platform?.toLowerCase() === targetPlatform.toLowerCase() &&
+      conv.resume.session === conv.session
+  );
+
   const promptText = buildPrompt({
     agent: {
       name: agent.name,
@@ -1630,7 +1693,7 @@ export async function startTurnJob(
     summary: conv.summary,
     session: conv.session,
     memoryContext: memContext,
-    recentMessages: relevantHistory,
+    recentMessages: isResuming ? [] : relevantHistory,
     teamMembers,
     attachmentLines: (item.attachments ?? []).map((a) => `Attached image: ${a.path || a.name}`),
   });
@@ -1653,12 +1716,12 @@ export async function startTurnJob(
   }
 
   // Item 4: new_session helper
-  const newSession = newSessionFor(ctx, targetPlatform);
+  const newSession = isResuming ? false : newSessionFor(ctx, targetPlatform);
 
   let jobRes: Record<string, unknown>;
   try {
     jobRes = await ctx.startJob({
-      mode: 'task',
+      mode: 'chat',
       agent: targetPlatform,
       role: agent.role || 'backend',
       model: targetModel || undefined,
@@ -1667,6 +1730,11 @@ export async function startTurnJob(
       project_path: agent.workdir,
       prompt: promptText,
       isolate: false,
+      agent_profile_id: agent.id,
+      conversation_id: conv.id,
+      resume_token: isResuming ? conv.resume?.token : undefined,
+      cli_args: Array.isArray(agent.cli_args) && agent.cli_args.length > 0 ? agent.cli_args : undefined,
+      env: agent.env && Object.keys(agent.env).length > 0 ? agent.env : undefined,
     });
   } catch (err: unknown) {
     // If startJob fails, message status becomes failed

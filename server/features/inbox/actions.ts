@@ -1,6 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import type { MawFeatureContext, MawFeatureRequest } from '../../lib/feature.ts';
+import {
+  appendActionAudit,
+  type MawFeatureContext,
+  type MawFeatureRequest,
+} from '../../lib/feature.ts';
 import type { ServerPaths } from '../../lib/paths.ts';
 import { isDirectorySafe, isFileSafe } from '../../lib/paths.ts';
 import { isProcessRunning } from '../../lib/proc.ts';
@@ -53,19 +57,12 @@ function logInboxAudit(
   action: string,
   by: string
 ): void {
-  try {
-    const dataDir = ctx.paths.featureDataDir('inbox');
-    const auditFile = path.win32.join(dataDir, 'audit.jsonl');
-    const line = JSON.stringify({
-      ts: new Date().toISOString(),
-      id,
-      action,
-      by,
-    }) + '\n';
-    fs.appendFileSync(auditFile, line, 'utf8');
-  } catch {
-    // Ignore audit log error
-  }
+  appendActionAudit(ctx.paths, {
+    feature: 'inbox',
+    action,
+    id,
+    by,
+  });
 }
 
 function atomicWriteJournal(claimFile: string, data: Record<string, unknown>): void {
@@ -551,7 +548,10 @@ export async function performInboxAction(
       }
 
       // 2. Dispatch job
-      const jobResult = await ctx.startJob(item.retry as unknown as Record<string, unknown>);
+      const jobResult = await ctx.startJob({
+        ...(item.retry as unknown as Record<string, unknown>),
+        source: { feature: 'inbox', inbox_id: normId },
+      });
       const newJobId = (jobResult.job_id as string) ?? '';
 
       const resolution = {
@@ -689,6 +689,7 @@ export async function performInboxAction(
       const followUpBody = {
         ...item.retry,
         prompt: followUpPrompt,
+        source: { feature: 'inbox', inbox_id: normId },
       };
       let followUpJobId = '';
       try {

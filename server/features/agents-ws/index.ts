@@ -5,7 +5,7 @@ import type { MawFeature, MawFeatureContext } from '../../lib/feature.ts';
 import { getTempDir, resolveProjectPath } from '../../lib/paths.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
 import { detectRegistryAgents, getCodexModels, getDetectedToolVersions } from '../../lib/versions.ts';
-import { readConversationMessages, tick } from '../chat/tick.ts';
+import { isWorktreeFeatureAvailable, readConversationMessages, tick } from '../chat/tick.ts';
 import type { Conversation } from '../chat/types.ts';
 import type { Handoff } from '../handoffs/types.ts';
 import { AGENT_ID_REGEX, generateAgentId, generateGroupId, GROUP_ID_REGEX } from './lib/ids.ts';
@@ -343,8 +343,8 @@ export const feature: MawFeature = {
           deleted: deletedAgents.slice(0, 20),
           platforms,
           features: {
-            isolate: false,
-            resume: false,
+            isolate: isWorktreeFeatureAvailable(ctx),
+            resume: true,
           },
         };
       },
@@ -360,7 +360,7 @@ export const feature: MawFeature = {
         if (refresh) {
           // Item 6 (Codex Pass 6): Bypass detection cache, clear S6-side in-memory cache and tempDir cache files
           cachedPlatformsData = null;
-          const tempDir = getTempDir();
+          const tempDir = ctx.paths.tempDir || getTempDir();
           let clearedAll = true;
 
           try {
