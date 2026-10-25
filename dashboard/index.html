@@ -267,6 +267,12 @@
   .page-head .page-desc { font-size: 13px; color: var(--muted); margin-top: 3px; }
   .page-head .spacer { flex: 1; }
   #tabsCard > .tabs, #tabsCard > .tab-groups { display: none; }
+  .subtabs { display: flex; gap: 2px; margin: -6px 0 18px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: thin; }
+  .subtabs button { flex: none; padding: 9px 12px 8px; font-size: 13.5px; font-weight: 500; color: var(--muted); white-space: nowrap; background: none; border: 0; border-bottom: 2px solid transparent; cursor: pointer; }
+  .subtabs button:hover { color: var(--text); }
+  .subtabs button[aria-selected="true"] { color: var(--text); font-weight: 600; border-bottom-color: var(--accent); }
+  .subtabs button:focus-visible { outline: none; box-shadow: var(--focus); border-radius: 4px; }
+  [data-skin="neon"] .subtabs button[aria-selected="true"] { border-bottom-color: #22d3ee; }
   /* A feature page wider than the screen scrolls inside itself, never the whole app. */
   #tabsCard > [data-panel], #view-dashboard > .page { min-width: 0; max-width: 100%; overflow-x: auto; }
   .app-main > .maw-view { min-width: 0; max-width: 100%; overflow-x: auto; }
@@ -711,6 +717,7 @@
       <div class="page-desc" id="pageDesc"></div>
     </div>
   </div>
+  <div class="subtabs hidden" id="pageTabs" role="tablist"></div>
 
   <section class="page" data-page="overview">
     <div class="grid g-kpi" id="kpiRow" aria-label="Summary"></div>
@@ -1021,7 +1028,9 @@ const I18N = {
     agentsReady: 'AI sẵn sàng {n}/{total}',
     viewDashboard: 'Bảng điều khiển',
     navMenu: 'Menu', navCollapse: 'Thu gọn menu', navPages: 'Trang', cmdkPh: 'Tìm nhanh…', prefsBtn: 'Giao diện', prefLang: 'Ngôn ngữ', prefTheme: 'Chủ đề',
-    navSec_operate: 'Điều phối', navSec_project: 'Dự án', navSec_monitor: 'Giám sát', navSec_quality: 'Chi phí & chất lượng', navSec_system: 'Hệ thống', navSec_other: 'Khác',
+    navGrp_work: 'Làm việc', navGrp_manage: 'Quản lý',
+    hub_project: 'Dự án', hub_activity: 'Hoạt động', hub_quality: 'Chi phí & chất lượng', hub_settings: 'Cài đặt', hub_other: 'Khác',
+    sub_project: 'Tổng quan', sub_agents: 'Agent',
     nav_overview: 'Tổng quan', nav_dispatch: 'Giao việc', nav_project: 'Tổng quan dự án', nav_agents: 'Agent',
     navDesc_overview: 'Số liệu chính, job gần đây và tình trạng các AI.',
     navDesc_dispatch: 'Phân vai cho AI, mô tả việc cần làm và chạy.',
@@ -1277,7 +1286,9 @@ const I18N = {
     agentsReady: 'AI ready {n}/{total}',
     viewDashboard: 'Dashboard',
     navMenu: 'Menu', navCollapse: 'Collapse menu', navPages: 'Pages', cmdkPh: 'Quick search…', prefsBtn: 'Display', prefLang: 'Language', prefTheme: 'Theme',
-    navSec_operate: 'Operate', navSec_project: 'Project', navSec_monitor: 'Monitor', navSec_quality: 'Cost & quality', navSec_system: 'System', navSec_other: 'Other',
+    navGrp_work: 'Work', navGrp_manage: 'Manage',
+    hub_project: 'Project', hub_activity: 'Activity', hub_quality: 'Cost & quality', hub_settings: 'Settings', hub_other: 'Other',
+    sub_project: 'Overview', sub_agents: 'Agents',
     nav_overview: 'Overview', nav_dispatch: 'New task', nav_project: 'Project overview', nav_agents: 'Agents',
     navDesc_overview: 'Key numbers, recent jobs and the state of every AI.',
     navDesc_dispatch: 'Assign roles to AIs, describe the work and run it.',
@@ -2676,12 +2687,16 @@ $('viewNav').addEventListener('click', e => { const b = e.target.closest('[data-
 // ---------- App shell: side navigation and pages ----------
 // Every screen is a page: a built-in section (overview, dispatch, project, agents), a tab panel
 // (built-in or added by a feature with MAW.addTab) or a full view (MAW.addView). The nav groups them.
-const NAV = [
-  { id: 'operate', items: ['overview', 'dispatch', 'workspace', 'board', 'inbox'] },
-  { id: 'project', items: ['project', 'review', 'files', 'checkpoints', 'worktrees', 'checks'] },
-  { id: 'monitor', items: ['timeline', 'audit', 'sessions', 'stats'] },
-  { id: 'quality', items: ['budget', 'scoreboard', 'policy'] },
-  { id: 'system', items: ['agents', 'health', 'mcp', 'notify'] }
+// The side menu shows hubs. A hub with several pages shows them as sub-tabs under the page title.
+const HUBS = [
+  { id: 'overview', group: 'work', pages: ['overview'] },
+  { id: 'dispatch', group: 'work', pages: ['dispatch'] },
+  { id: 'workspace', group: 'work', pages: ['workspace'] },
+  { id: 'board', group: 'work', pages: ['board'] },
+  { id: 'project', group: 'manage', pages: ['project', 'review', 'files', 'checkpoints', 'worktrees', 'checks'] },
+  { id: 'activity', group: 'manage', pages: ['inbox', 'timeline', 'audit', 'sessions'] },
+  { id: 'quality', group: 'manage', pages: ['budget', 'scoreboard', 'stats', 'policy'] },
+  { id: 'settings', group: 'manage', pages: ['agents', 'health', 'mcp', 'notify'] }
 ];
 const SECTION_PAGES = ['overview', 'dispatch', 'project', 'agents'];
 var currentPage = null;
@@ -2701,32 +2716,61 @@ function pageTitle(id) {
   return id;
 }
 function pageCount(id) { return pageKind(id) === 'tab' ? (tabBtn(id).querySelector('.count')?.textContent || '').trim() : ''; }
-function sectionOf(id) { return (NAV.find(s => s.items.includes(id)) || { id: 'other' }).id; }
-// All existing pages, grouped in nav order; pages nobody placed land in "Khác".
-function navModel() {
-  const placed = new Set(NAV.flatMap(s => s.items));
+// Hubs with the pages that exist right now; pages nobody placed go to an "Khác" hub.
+function hubModel() {
+  const placed = new Set(HUBS.flatMap(h => h.pages));
   const extra = [...topTabs().map(b => b.dataset.tab), ...Object.keys(MAW_VIEWS || {})].filter(id => !placed.has(id) && pageKind(id));
-  return [...NAV, { id: 'other', items: extra }]
-    .map(s => ({ id: s.id, items: s.items.filter(id => pageKind(id)) }))
-    .filter(s => s.items.length);
+  return [...HUBS, { id: 'other', group: 'manage', pages: extra }]
+    .map(h => ({ ...h, pages: h.pages.filter(id => pageKind(id)) }))
+    .filter(h => h.pages.length);
 }
+function hubOf(id) { return hubModel().find(h => h.pages.includes(id)) || { id: 'other', group: 'manage', pages: [id] }; }
+function hubTitle(h) { return h.pages.length === 1 && h.id !== 'other' ? pageTitle(h.pages[0]) : t('hub_' + h.id); }
+function subTitle(id) { return I18N[LANG]['sub_' + id] || pageTitle(id); }
+// Sum of the pages' counters ("99+" stays "99+").
+function hubCount(h) {
+  let n = 0, plus = false;
+  for (const id of h.pages) { const c = pageCount(id); if (c.endsWith('+')) plus = true; n += parseInt(c, 10) || 0; }
+  return plus || n > 99 ? '99+' : n ? String(n) : '';
+}
+// Flat list of pages for the command palette.
+function navModel() { return hubModel().map(h => ({ id: h.id, title: hubTitle(h), items: h.pages })); }
 function renderNav() {
   const nav = $('sideNav');
   if (!nav) return;
-  nav.innerHTML = navModel().map(s => `<div class="nav-sec"><h3>${esc(t('navSec_' + s.id))}</h3>${s.items.map(id => {
-    const n = pageCount(id);
-    return `<button type="button" class="nav-item" data-page="${esc(id)}"${id === currentPage ? ' aria-current="page"' : ''}>${esc(pageTitle(id))}${n ? `<span class="count">${esc(n)}</span>` : ''}</button>`;
-  }).join('')}</div>`).join('') + `<div class="nav-foot"><button type="button" class="nav-item" data-act="collapse">${esc(t('navCollapse'))}</button></div>`;
+  const hubs = hubModel();
+  const cur = currentPage ? hubOf(currentPage).id : '';
+  nav.innerHTML = ['work', 'manage'].map(g => {
+    const list = hubs.filter(h => h.group === g);
+    if (!list.length) return '';
+    return `<div class="nav-sec"><h3>${esc(t('navGrp_' + g))}</h3>${list.map(h => {
+      const n = hubCount(h);
+      return `<button type="button" class="nav-item" data-hub="${esc(h.id)}"${h.id === cur ? ' aria-current="page"' : ''}>${esc(hubTitle(h))}${n ? `<span class="count">${esc(n)}</span>` : ''}</button>`;
+    }).join('')}</div>`;
+  }).join('') + `<div class="nav-foot"><button type="button" class="nav-item" data-act="collapse">${esc(t('navCollapse'))}</button></div>`;
+  if (currentPage && pageKind(currentPage) !== 'view') renderSubTabs(currentPage);
   syncPaletteSource();
+}
+function renderSubTabs(id) {
+  const h = hubOf(id);
+  const box = $('pageTabs');
+  box.classList.toggle('hidden', h.pages.length < 2);
+  box.innerHTML = h.pages.length < 2 ? '' : h.pages.map(p => {
+    const n = pageCount(p);
+    return `<button type="button" role="tab" data-sub="${esc(p)}" aria-selected="${p === id}">${esc(subTitle(p))}${n ? `<span class="count">${esc(n)}</span>` : ''}</button>`;
+  }).join('');
 }
 // Coalesced repaint. setTimeout, not requestAnimationFrame: rAF is paused while the tab is in the background.
 let navTimer = 0;
 function scheduleNav() { if (!navTimer) navTimer = setTimeout(() => { navTimer = 0; renderNav(); }, 0); }
 function renderPageHead(id) {
-  const sec = sectionOf(id);
-  $('pageCrumb').textContent = t('navSec_' + sec);
-  $('pageTitle').textContent = pageTitle(id);
+  const h = hubOf(id);
+  const multi = h.pages.length > 1;
+  // A hub page shows the hub as the title; single pages show their own title under the group name.
+  $('pageCrumb').textContent = multi ? t('navGrp_' + h.group) + ' / ' + hubTitle(h) : t('navGrp_' + h.group);
+  $('pageTitle').textContent = multi ? subTitle(id) : pageTitle(id);
   $('pageDesc').textContent = I18N[LANG]['navDesc_' + id] || '';
+  renderSubTabs(id);
 }
 // Shows a page. Unknown pages (a feature that has not loaded yet) are remembered and opened when it registers.
 function showPage(id, opts = {}) {
@@ -2743,16 +2787,24 @@ function showPage(id, opts = {}) {
     if (k === 'tab') switchTabPanel(id);
     renderPageHead(id);
   }
-  if (!opts.fromStore || !pendingPage) store.set('maw_page', id);
+  if (!opts.fromStore || !pendingPage) { store.set('maw_page', id); store.set('maw_hub_' + hubOf(id).id, id); }
   if (opts.hash !== false) { try { history.replaceState(null, '', '#/' + id); } catch { /* file:// */ } }
   $('app').classList.remove('nav-open');
   renderNav();
   if (!opts.keepScroll) window.scrollTo(0, 0);
   emit('page', id);
 }
+// Opens a page the way the user would: through its tab button when it has one, so feature listeners fire.
+function goPage(id) { const tb = tabBtn(id); tb ? tb.click() : showPage(id); }
 $('sideNav').addEventListener('click', e => {
-  const b = e.target.closest('[data-page]');
-  if (b) { const tb = tabBtn(b.dataset.page); tb ? tb.click() : showPage(b.dataset.page); return; }
+  const b = e.target.closest('[data-hub]');
+  if (b) {
+    const h = hubModel().find(x => x.id === b.dataset.hub);
+    if (!h) return;
+    const last = store.get('maw_hub_' + h.id);
+    goPage(h.pages.includes(last) ? last : h.pages[0]);
+    return;
+  }
   if (e.target.closest('[data-act="collapse"]')) { $('app').classList.add('nav-collapsed'); store.set('maw_nav', 'collapsed'); }
 });
 $('navToggle').onclick = () => {
@@ -2762,6 +2814,7 @@ $('navToggle').onclick = () => {
 };
 $('navBackdrop').onclick = () => $('app').classList.remove('nav-open');
 if (store.get('maw_nav') === 'collapsed') $('app').classList.add('nav-collapsed');
+$('pageTabs').addEventListener('click', e => { const b = e.target.closest('[data-sub]'); if (b) goPage(b.dataset.sub); });
 // Links anywhere in the page: <button data-goto="inbox">.
 document.addEventListener('click', e => { const g = e.target.closest('[data-goto]'); if (g && !g.closest('#sideNav')) { const tb = tabBtn(g.dataset.goto); tb ? tb.click() : showPage(g.dataset.goto); } });
 window.addEventListener('hashchange', () => { const id = location.hash.replace(/^#\/?/, ''); if (id && id !== currentPage) showPage(id, { hash: false, fromStore: true }); });
@@ -2784,7 +2837,7 @@ function syncPaletteSource() {
   pagesSourceAdded = true;
   MAW.palette.addSource({
     id: 'pages', title: () => t('navPages'),
-    items: async () => navModel().flatMap(s => s.items.map(id => ({ label: pageTitle(id), hint: t('navSec_' + s.id), keywords: id, run: () => { const tb = tabBtn(id); tb ? tb.click() : showPage(id); } })))
+    items: async () => navModel().flatMap(s => s.items.map(id => ({ label: subTitle(id), hint: s.title, keywords: id + ' ' + pageTitle(id), run: () => goPage(id) })))
   });
 }
 
