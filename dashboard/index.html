@@ -83,15 +83,14 @@
   .topbar { position: sticky; top: 0; z-index: 20; background: var(--surface); border-bottom: 1px solid var(--border); }
   /* Header: brand | project | (space) | tools. Narrow screens move the project picker to its own row. */
   .topbar .wrap {
-    display: grid; grid-template-columns: auto minmax(0, 320px) auto minmax(0, 1fr); grid-template-areas: "brand proj views tools";
+    display: grid; grid-template-columns: auto minmax(0, 320px) auto minmax(0, 1fr); grid-template-areas: "brand proj search tools";
     align-items: center; gap: 10px 18px; min-height: 56px; padding-top: 10px; padding-bottom: 10px;
   }
   .brand { grid-area: brand; min-width: 0; }
   .brand h1 { font-size: 15px; white-space: nowrap; }
   .proj-pick { grid-area: proj; }
   .tools { grid-area: tools; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
-  #viewNav { grid-area: views; justify-self: start; }
-  #viewNav button { white-space: nowrap; }
+  .brand { display: flex; align-items: center; gap: 10px; }
   .tools .sep { width: 1px; height: 20px; background: var(--border); margin: 0 2px; flex: none; }
   .tools .pill { max-width: 280px; }
   .btn-group { display: inline-flex; flex: none; }
@@ -104,11 +103,10 @@
   .prefs { display: flex; gap: 6px; flex: none; }
   @media (max-width: 1180px) {
     .proj-pop { width: 100%; max-width: none; }
-    .topbar .wrap { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "brand tools" "proj views"; }
+    .topbar .wrap { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "brand tools" "proj search"; }
   }
   @media (max-width: 640px) {
-    .topbar .wrap { grid-template-columns: minmax(0, 1fr); grid-template-areas: "brand" "tools" "views" "proj"; }
-    #viewNav { justify-self: stretch; display: flex; } #viewNav button { flex: 1; }
+    .topbar .wrap { grid-template-columns: minmax(0, 1fr); grid-template-areas: "brand" "tools" "proj" "search"; }
     .tools { justify-content: flex-start; flex-wrap: wrap; }
     .tools .sep { display: none; }
   }
@@ -232,8 +230,94 @@
   .guide-body b { color: var(--text); font-weight: 600; }
 
   /* work area */
-  .g-work { grid-template-columns: minmax(0, 1.75fr) minmax(320px, 1fr); gap: 20px; align-items: start; }
+  .page + .page { margin-top: 0; }
   .stack-lg > * + * { margin-top: 20px; }
+
+  /* ---------- App shell: header, side navigation, pages, job dock ---------- */
+  :root { --hdr-h: 57px; --nav-w: 232px; }
+  .topbar .wrap { max-width: none; }
+  .nav-toggle { display: none; }
+  .app { display: grid; grid-template-columns: var(--nav-w) minmax(0, 1fr); min-height: calc(100vh - var(--hdr-h)); }
+  .app.nav-collapsed { grid-template-columns: minmax(0, 1fr); }
+  .app.nav-collapsed .sidenav { display: none; }
+  .app.nav-collapsed ~ .jobdock { left: 0; }
+  .sidenav {
+    position: sticky; top: var(--hdr-h); align-self: start; height: calc(100vh - var(--hdr-h)); overflow-y: auto; overscroll-behavior: contain;
+    display: flex; flex-direction: column; padding: 16px 10px 12px; background: var(--surface); border-right: 1px solid var(--border);
+  }
+  .nav-sec + .nav-sec { margin-top: 16px; }
+  .nav-sec h3 { padding: 0 10px 6px; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); }
+  .nav-item {
+    display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; margin: 1px 0;
+    font-size: 13.5px; color: var(--muted); text-align: left; background: none; border: 0; border-radius: 6px; cursor: pointer;
+  }
+  .nav-item:hover { color: var(--text); background: var(--hover); }
+  .nav-item:focus-visible { outline: none; box-shadow: var(--focus); }
+  .nav-item[aria-current="page"] { color: var(--accent); background: var(--accent-soft); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+  .nav-item .count { margin-left: auto; }
+  .nav-foot { margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border); }
+  .nav-foot .nav-item { font-size: 12.5px; color: var(--faint); }
+  .nav-backdrop { display: none; }
+  .app-main { min-width: 0; }
+  body.has-dock .app-main { padding-bottom: calc(var(--dock-h, 0px) + 16px); }
+  #view-dashboard { max-width: 1320px; margin: 0 auto; padding: 22px 24px 40px; }
+  .page-head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 16px; margin-bottom: 18px; }
+  .page-head .crumb { font-size: 12px; color: var(--faint); }
+  .page-head h1 { font-size: 21px; font-weight: 650; letter-spacing: -.01em; margin-top: 2px; }
+  .page-head .page-desc { font-size: 13px; color: var(--muted); margin-top: 3px; }
+  .page-head .spacer { flex: 1; }
+  #tabsCard > .tabs, #tabsCard > .tab-groups { display: none; }
+  /* A feature page wider than the screen scrolls inside itself, never the whole app. */
+  #tabsCard > [data-panel], #view-dashboard > .page { min-width: 0; max-width: 100%; overflow-x: auto; }
+  .app-main > .maw-view { min-width: 0; max-width: 100%; overflow-x: auto; }
+  /* The page title already names these cards. */
+  #view-dashboard > .page[data-page="dispatch"] > .card > .card-h > h2,
+  #view-dashboard > .page[data-page="project"] > .card > .card-h > h2,
+  #view-dashboard > .page[data-page="agents"] > .card > .card-h > h2 { display: none; }
+  .g-ov { grid-template-columns: minmax(0, 1.6fr) minmax(300px, 1fr); gap: 20px; align-items: start; margin-top: 20px; }
+  .ov-job { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 4px 12px; width: 100%; padding: 10px 16px; text-align: left; background: none; border: 0; border-top: 1px solid var(--border); cursor: pointer; color: inherit; }
+  .ov-job:first-child { border-top: 0; }
+  .ov-job:hover { background: var(--hover); }
+  .ov-job .t { font-weight: 600; font-size: 13px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ov-job .s { grid-column: 2 / -1; font-size: 12px; color: var(--faint); }
+  .ov-agent { display: flex; align-items: center; gap: 10px; padding: 8px 16px; border-top: 1px solid var(--border); font-size: 13px; }
+  .ov-agent:first-child { border-top: 0; }
+  .ov-agent .spacer { flex: 1; }
+  .quick { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .quick .btn { justify-content: flex-start; }
+  /* header: search, preferences menu */
+  .cmdk-btn { grid-area: search; display: inline-flex; align-items: center; gap: 10px; height: 32px; padding: 0 8px 0 11px; min-width: 200px; color: var(--faint); background: var(--surface-2); border: 1px solid var(--border); border-radius: 6px; font-size: 13px; cursor: pointer; }
+  .cmdk-btn:hover { color: var(--muted); border-color: var(--border-strong); }
+  .cmdk-btn kbd { margin-left: auto; font-size: 10.5px; padding: 0 5px; color: var(--faint); background: var(--surface); border: 1px solid var(--border); border-radius: 4px; }
+  .menu-wrap { position: relative; }
+  .menu-pop { position: absolute; z-index: 50; top: calc(100% + 6px); right: 0; min-width: 240px; padding: 10px; background: var(--surface); border: 1px solid var(--border-strong); border-radius: 8px; box-shadow: 0 12px 32px rgba(0, 0, 0, .18); }
+  .menu-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 2px; }
+  .menu-row .lbl { margin: 0; font-size: 12.5px; color: var(--muted); }
+  /* live job dock */
+  .jobdock { position: fixed; z-index: 30; left: var(--nav-w); right: 0; bottom: 0; background: var(--surface); border-top: 1px solid var(--border-strong); box-shadow: 0 -8px 24px rgba(0, 0, 0, .10); }
+  .jobdock .card-h { padding: 8px 16px; }
+  .jobdock .card-h h2 { font-size: 13px; }
+  .jobdock .log { max-height: 34vh; min-height: 120px; margin: 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; }
+  .jobdock.collapsed .log { display: none; }
+  [data-skin="neon"] .sidenav { background: rgba(6, 8, 22, .72); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); }
+  [data-skin="neon"] .nav-item[aria-current="page"] { color: #22d3ee; background: rgba(34, 211, 238, .08); box-shadow: inset 2px 0 0 #22d3ee; }
+  [data-skin="neon"] .jobdock, [data-skin="neon"] .menu-pop { background: rgba(10, 13, 32, .96); backdrop-filter: blur(14px); }
+  @media (max-width: 1024px) {
+    .app { grid-template-columns: minmax(0, 1fr); }
+    .nav-toggle { display: inline-flex; }
+    .sidenav { position: fixed; z-index: 60; top: 0; left: 0; bottom: 0; width: 272px; height: 100vh; transform: translateX(-105%); transition: transform .2s ease; box-shadow: 0 0 40px rgba(0, 0, 0, .25); }
+    .app.nav-open .sidenav { transform: none; }
+    .app.nav-open .nav-backdrop { display: block; position: fixed; inset: 0; z-index: 55; background: rgba(0, 0, 0, .35); }
+    .app.nav-collapsed .sidenav { display: flex; }
+    .nav-foot [data-act="collapse"] { display: none; }
+    .jobdock { left: 0; }
+    .g-ov { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (max-width: 760px) {
+    #view-dashboard { padding: 16px 16px 32px; }
+    .cmdk-btn { min-width: 0; }
+    .cmdk-btn kbd { display: none; }
+  }
   .ai-chip.is-missing { opacity: .6; border-style: dashed; }
   .ai-chip.pick[aria-pressed="false"] { opacity: .55; }
   .ai-chip.pick[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
@@ -557,6 +641,7 @@
 <header class="topbar">
   <div class="wrap">
     <div class="brand" data-i18n-title="subtitle">
+      <button type="button" id="navToggle" class="btn btn-sm nav-toggle" data-i18n="navMenu" aria-controls="sideNav"></button>
       <h1>Multi-AI Workflow</h1>
     </div>
     <div class="proj-pick" id="projPick">
@@ -578,7 +663,8 @@
         </div>
       </div>
     </div>
-    <div id="viewNav" class="seg hidden" role="tablist" aria-label="Views"></div>
+    <div id="viewNav" class="hidden" aria-hidden="true"></div>
+    <button type="button" id="cmdkBtn" class="cmdk-btn hidden"><span data-i18n="cmdkPh"></span><kbd>Ctrl K</kbd></button>
     <div class="tools">
       <span id="featHeader" class="row-wrap"></span>
       <span id="modeBadge" class="pill warn hidden" data-i18n="demoBadge"></span>
@@ -589,30 +675,64 @@
         <button id="refreshBtn" type="button" class="btn btn-sm" data-i18n="refreshNow"></button>
         <label class="btn btn-sm btn-toggle" data-i18n-title="autoRefreshTip"><input type="checkbox" id="autoToggle" checked><span data-i18n="autoRefresh"></span></label>
       </div>
-      <span class="sep" aria-hidden="true"></span>
-      <div class="prefs">
-        <div class="seg" role="group" aria-label="Language">
-          <button id="langVi" type="button" onclick="setLang('vi')">VI</button>
-          <button id="langEn" type="button" onclick="setLang('en')">EN</button>
-        </div>
-        <div class="seg" role="group" aria-label="Theme" id="themeSeg">
-          <button type="button" data-theme-pref="light" data-i18n="themeLight"></button>
-          <button type="button" data-theme-pref="dark" data-i18n="themeDark"></button>
-          <button type="button" data-theme-pref="neon" data-i18n="themeNeon"></button>
+      <div class="menu-wrap" id="prefsWrap">
+        <button type="button" id="prefsBtn" class="btn btn-sm" aria-haspopup="true" aria-expanded="false" data-i18n="prefsBtn"></button>
+        <div id="prefsPop" class="menu-pop hidden">
+          <div class="menu-row">
+            <span class="lbl" data-i18n="prefLang"></span>
+            <div class="seg" role="group" aria-label="Language">
+              <button id="langVi" type="button" onclick="setLang('vi')">VI</button>
+              <button id="langEn" type="button" onclick="setLang('en')">EN</button>
+            </div>
+          </div>
+          <div class="menu-row">
+            <span class="lbl" data-i18n="prefTheme"></span>
+            <div class="seg" role="group" aria-label="Theme" id="themeSeg">
+              <button type="button" data-theme-pref="light" data-i18n="themeLight"></button>
+              <button type="button" data-theme-pref="dark" data-i18n="themeDark"></button>
+              <button type="button" data-theme-pref="neon" data-i18n="themeNeon"></button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   </div>
 </header>
 
-<main class="wrap" id="view-dashboard">
+<div class="app" id="app">
+  <nav id="sideNav" class="sidenav" aria-label="Menu"></nav>
+  <div class="nav-backdrop" id="navBackdrop"></div>
+  <div class="app-main" id="appMain">
+<main id="view-dashboard">
+  <div class="page-head">
+    <div>
+      <div class="crumb" id="pageCrumb"></div>
+      <h1 id="pageTitle"></h1>
+      <div class="page-desc" id="pageDesc"></div>
+    </div>
+  </div>
 
-  <!-- KPI strip -->
-  <section class="grid g-kpi" id="kpiRow" aria-label="Summary"></section>
+  <section class="page" data-page="overview">
+    <div class="grid g-kpi" id="kpiRow" aria-label="Summary"></div>
+    <div class="grid g-ov">
+      <div class="card">
+        <div class="card-h"><h2 data-i18n="ovRecent"></h2><span class="spacer"></span><button type="button" class="btn-link" data-goto="timeline" data-i18n="ovAllJobs"></button></div>
+        <div id="ovJobs"></div>
+      </div>
+      <div class="stack-lg">
+        <div class="card">
+          <div class="card-h"><h2 data-i18n="ovQuickTitle"></h2></div>
+          <div class="card-b quick" id="ovQuick"></div>
+        </div>
+        <div class="card">
+          <div class="card-h"><h2 data-i18n="agentsTitle"></h2><span class="spacer"></span><button type="button" class="btn-link" data-goto="agents" data-i18n="ovAllAgents"></button></div>
+          <div id="ovAgents"></div>
+        </div>
+      </div>
+    </div>
+  </section>
 
-  <section class="grid g-work">
-    <!-- LEFT: task form + job -->
-    <div class="stack-lg">
+  <section class="page hidden" data-page="dispatch">
       <div class="card">
         <div class="card-h">
           <h2 data-i18n="dispTitle"></h2>
@@ -705,20 +825,9 @@
         </div>
       </div>
 
-      <div id="liveJobBox" class="card hidden">
-        <div class="card-h">
-          <h2 data-i18n="liveJobTitle"></h2>
-          <span id="liveJobHead" class="row-wrap sub mono"></span>
-          <span class="spacer"></span>
-          <span id="jobActions" class="row-wrap"></span>
-          <button id="cancelJobBtn" type="button" class="btn btn-sm btn-danger hidden" data-i18n="cancelJob"></button>
-        </div>
-        <pre id="liveJobLog" class="log mono"></pre>
-      </div>
-    </div>
+  </section>
 
-    <!-- RIGHT: project context + agents -->
-    <aside class="stack-lg">
+  <section class="page hidden" data-page="project">
       <div class="card" id="projectCard">
         <div class="card-h">
           <h2 data-i18n="projTitle"></h2>
@@ -742,15 +851,16 @@
         </div>
       </div>
 
+  </section>
+
+  <section class="page hidden" data-page="agents">
       <div class="card">
         <div class="card-h"><h2 data-i18n="agentsTitle"></h2><span id="agentsCount" class="meta mono"></span></div>
         <div id="agents" class="list"></div>
         <div class="card-b sub faint agents-hint" data-i18n-html="agentsHint"></div>
       </div>
-    </aside>
   </section>
 
-  <!-- TABS: history, sessions, stats, notifications -->
   <section class="card" id="tabsCard">
     <div class="tab-groups" id="tabGroups" role="tablist" aria-label="Tab groups"></div>
     <div class="tabs" role="tablist">
@@ -813,8 +923,24 @@
     </div>
   </section>
 
+
   <footer><span id="lastUpdate">—</span> · Multi-AI Workflow Dashboard</footer>
 </main>
+  </div>
+</div>
+
+<div id="liveJobBox" class="jobdock hidden" role="region" aria-label="Job">
+        <div class="card-h">
+          <h2 data-i18n="liveJobTitle"></h2>
+          <span id="liveJobHead" class="row-wrap sub mono"></span>
+          <span class="spacer"></span>
+          <span id="jobActions" class="row-wrap"></span>
+          <button id="cancelJobBtn" type="button" class="btn btn-sm btn-danger hidden" data-i18n="cancelJob"></button>
+          <button id="dockToggle" type="button" class="btn btn-sm" data-i18n="dockCollapse"></button>
+          <button id="dockClose" type="button" class="btn btn-sm" data-i18n="dockClose"></button>
+        </div>
+        <pre id="liveJobLog" class="log mono"></pre>
+</div>
 
 <div id="toasts" class="toasts" aria-live="polite"></div>
 
@@ -894,6 +1020,21 @@ const I18N = {
     agentsTitle: 'Agent',
     agentsReady: 'AI sẵn sàng {n}/{total}',
     viewDashboard: 'Bảng điều khiển',
+    navMenu: 'Menu', navCollapse: 'Thu gọn menu', navPages: 'Trang', cmdkPh: 'Tìm nhanh…', prefsBtn: 'Giao diện', prefLang: 'Ngôn ngữ', prefTheme: 'Chủ đề',
+    navSec_operate: 'Điều phối', navSec_project: 'Dự án', navSec_monitor: 'Giám sát', navSec_quality: 'Chi phí & chất lượng', navSec_system: 'Hệ thống', navSec_other: 'Khác',
+    nav_overview: 'Tổng quan', nav_dispatch: 'Giao việc', nav_project: 'Tổng quan dự án', nav_agents: 'Agent',
+    navDesc_overview: 'Số liệu chính, job gần đây và tình trạng các AI.',
+    navDesc_dispatch: 'Phân vai cho AI, mô tả việc cần làm và chạy.',
+    navDesc_project: 'SPEC.md, kiểm tra phân quyền, Git và thao tác trên dự án đang chọn.',
+    navDesc_agents: 'Các AI trong registry: đã cài, phiên bản, vai trò.',
+    navDesc_audit: 'Mọi lượt gọi AI: token, chi phí, điểm và kết luận.',
+    navDesc_sessions: 'Các hội thoại Antigravity gần đây.',
+    navDesc_stats: 'Thống kê theo vai, công cụ và model.',
+    navDesc_notify: 'Thông báo Windows, webhook và Telegram khi job kết thúc.',
+    ovRecent: 'Job gần đây', ovAllJobs: 'Xem dòng thời gian', ovQuickTitle: 'Thao tác nhanh', ovAllAgents: 'Xem tất cả', ovNoJobs: 'Chưa có job nào.',
+    ovNewTask: 'Giao việc mới', ovBoard: 'Mở bảng việc', ovWorkspace: 'Không gian agent', ovInbox: 'Hộp thư', ovReview: 'Review thay đổi', ovHealth: 'Kiểm tra sức khỏe',
+    dockCollapse: 'Thu gọn', dockExpand: 'Mở rộng', dockClose: 'Đóng',
+
     tabGroup_activity: 'Hoạt động', tabGroup_code: 'Mã nguồn', tabGroup_cost: 'Chi phí & chất lượng', tabGroup_system: 'Hệ thống', tabGroup_other: 'Khác',
     bridgeOn: 'Bridge trực tuyến', bridgeOff: 'Bridge ngoại tuyến',
     agentStatusBtn: 'Trạng thái', agentWaitBtn: 'Chờ kết quả',
@@ -1135,6 +1276,21 @@ const I18N = {
     agentsTitle: 'Agents',
     agentsReady: 'AI ready {n}/{total}',
     viewDashboard: 'Dashboard',
+    navMenu: 'Menu', navCollapse: 'Collapse menu', navPages: 'Pages', cmdkPh: 'Quick search…', prefsBtn: 'Display', prefLang: 'Language', prefTheme: 'Theme',
+    navSec_operate: 'Operate', navSec_project: 'Project', navSec_monitor: 'Monitor', navSec_quality: 'Cost & quality', navSec_system: 'System', navSec_other: 'Other',
+    nav_overview: 'Overview', nav_dispatch: 'New task', nav_project: 'Project overview', nav_agents: 'Agents',
+    navDesc_overview: 'Key numbers, recent jobs and the state of every AI.',
+    navDesc_dispatch: 'Assign roles to AIs, describe the work and run it.',
+    navDesc_project: 'SPEC.md, ownership checks, Git and actions for the selected project.',
+    navDesc_agents: 'AIs in the registry: installed, version, role.',
+    navDesc_audit: 'Every AI call: tokens, cost, score and verdict.',
+    navDesc_sessions: 'Recent Antigravity conversations.',
+    navDesc_stats: 'Breakdown by role, tool and model.',
+    navDesc_notify: 'Windows, webhook and Telegram notifications when a job ends.',
+    ovRecent: 'Recent jobs', ovAllJobs: 'Open timeline', ovQuickTitle: 'Quick actions', ovAllAgents: 'See all', ovNoJobs: 'No jobs yet.',
+    ovNewTask: 'New task', ovBoard: 'Open the board', ovWorkspace: 'Agent workspace', ovInbox: 'Inbox', ovReview: 'Review changes', ovHealth: 'Health check',
+    dockCollapse: 'Collapse', dockExpand: 'Expand', dockClose: 'Close',
+
     tabGroup_activity: 'Activity', tabGroup_code: 'Code', tabGroup_cost: 'Cost & quality', tabGroup_system: 'System', tabGroup_other: 'Other',
     bridgeOn: 'Bridge online', bridgeOff: 'Bridge offline',
     agentStatusBtn: 'Status', agentWaitBtn: 'Wait for result',
@@ -1347,7 +1503,7 @@ function setLang(lang) {
   renderJobHead();
   renderGuard();
   renderProjectActions();
-  if (typeof renderViewNav === 'function' && MAW_VIEWS) renderViewNav();
+  if (typeof renderNav === 'function' && MAW_VIEWS) { renderNav(); if (currentPage && pageKind(currentPage) !== 'view') renderPageHead(currentPage); }
   emit('lang', LANG);
 }
 
@@ -1630,9 +1786,11 @@ function render() {
   fillNotify();
   ensureGit();
   loadFeatureUis(d);
+  renderOverview(d);
   emit('data', d);
   renderJobActions();
-  renderTabGroups();
+  syncPaletteSource();
+  scheduleNav();
   if (!state.job && !state.adopted) {
     state.adopted = true;
     const rj = (d.jobs || []).find(j => j.status === 'RUNNING');
@@ -2382,53 +2540,18 @@ $('guideBtn').onclick = () => {
   $('guideBtn').setAttribute('aria-expanded', String(!hidden));
 };
 
-// ---------- Tabs (remembered per browser), grouped so 16+ feature tabs stay readable ----------
-const TAB_GROUPS = [
-  { id: 'activity', tabs: ['audit', 'inbox', 'timeline', 'sessions'] },
-  { id: 'code', tabs: ['review', 'files', 'checkpoints', 'worktrees', 'checks'] },
-  { id: 'cost', tabs: ['budget', 'scoreboard', 'policy', 'stats'] },
-  { id: 'system', tabs: ['health', 'mcp', 'notify'] }
-];
-const tabGroupOf = id => (TAB_GROUPS.find(g => g.tabs.includes(id)) || { id: 'other' }).id;
+// ---------- Tab panels are pages (the hidden tab buttons stay: feature scripts click them) ----------
 const topTabs = () => [...document.querySelectorAll('#tabsCard > .tabs > [data-tab]')];
-let currentTabGroup = null;
-function renderTabGroups() {
-  const tabs = topTabs().filter(b => !b.classList.contains('hidden'));
-  const present = [...TAB_GROUPS.map(g => g.id), 'other'].filter(g => tabs.some(b => tabGroupOf(b.dataset.tab) === g));
-  const box = $('tabGroups');
-  // A single group needs no group row.
-  if (present.length < 2) { box.innerHTML = ''; tabs.forEach(b => b.classList.remove('grp-hidden')); return; }
-  if (!present.includes(currentTabGroup)) currentTabGroup = present[0];
-  box.innerHTML = present.map(g => {
-    // Sum the counters of the group's tabs (e.g. inbox items) so attention stays visible from any group.
-    const n = tabs.filter(b => tabGroupOf(b.dataset.tab) === g).reduce((a, b) => a + (parseInt(b.querySelector('.count')?.textContent || '0', 10) || 0), 0);
-    return `<button type="button" data-group="${g}" aria-pressed="${g === currentTabGroup}">${esc(t('tabGroup_' + g))}<span class="count">${n ? (n > 99 ? '99+' : n) : ''}</span></button>`;
-  }).join('');
-  tabs.forEach(b => b.classList.toggle('grp-hidden', tabGroupOf(b.dataset.tab) !== currentTabGroup));
-}
-function selectTab(name, persist = true) {
+function renderTabGroups() { scheduleNav(); }
+function switchTabPanel(name) {
   // Only the top-level tabs / panels: feature panels may contain their own [data-tab] / [data-panel] widgets.
   topTabs().forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
   document.querySelectorAll('#tabsCard > [data-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
-  currentTabGroup = tabGroupOf(name);
-  renderTabGroups();
-  if (persist) store.set('maw_tab', name);
 }
-$('tabGroups').addEventListener('click', e => {
-  const g = e.target.closest('[data-group]');
-  if (!g) return;
-  currentTabGroup = g.dataset.group;
-  const first = topTabs().find(b => !b.classList.contains('hidden') && tabGroupOf(b.dataset.tab) === currentTabGroup);
-  if (first) selectTab(first.dataset.tab); else renderTabGroups();
-});
-// Delegated, so tabs added later by feature plugins work too.
+// Kept for feature scripts: "select a tab" = open that page.
+function selectTab(name) { if (currentPage !== name) showPage(name); else switchTabPanel(name); }
+// Delegated, so tabs added later by feature plugins work too (their click listeners still fire).
 document.querySelector('#tabsCard > .tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) selectTab(b.dataset.tab); });
-// A stored feature tab is restored by MAW.addTab once its script loads, so keep it in storage meanwhile.
-{
-  const stored = store.get('maw_tab');
-  const builtin = ['audit', 'sessions', 'stats', 'notify'].includes(stored);
-  selectTab(builtin ? stored : 'audit', builtin);
-}
 
 // ---------- Feature plugins (SPEC §9.0) ----------
 // Each server feature may ship `dashboard/feat-<name>.js`; it talks to the page only through window.MAW.
@@ -2466,7 +2589,7 @@ window.MAW = {
     };
     MAW.on('data', paint); MAW.on('lang', paint);
     if (state.data) paint();
-    if (store.get('maw_tab') === id) selectTab(id); else renderTabGroups();
+    if (pendingPage === id) showPage(id); else scheduleNav();
     return { button: btn, panel, setCount: n => { btn.lastElementChild.textContent = n || ''; renderTabGroups(); } };
   },
   // Buttons on the live job header, e.g. "Rollback", "Retry with…", "Steer".
@@ -2483,8 +2606,8 @@ window.MAW = {
     $('view-dashboard').after(el);
     MAW_VIEWS[id] = { title, onShow, el };
     try { render?.(el); } catch (e) { console.error(`[view ${id}]`, e); }
-    renderViewNav();
-    if (store.get('maw_view') === id) showView(id);
+    scheduleNav();
+    if (pendingPage === id) showPage(id);
     return el;
   },
   showView: id => showView(id),
@@ -2536,24 +2659,165 @@ function renderProjectActions() {
 // Views: "dashboard" is the built-in one; features may add more (MAW.addView).
 var MAW_VIEWS = {};
 var currentView = 'dashboard';
-function renderViewNav() {
-  const nav = $('viewNav'), ids = Object.keys(MAW_VIEWS);
-  nav.classList.toggle('hidden', !ids.length);
-  if (!ids.length) return;
-  const label = id => id === 'dashboard' ? t('viewDashboard') : (typeof MAW_VIEWS[id].title === 'function' ? MAW_VIEWS[id].title() : MAW_VIEWS[id].title);
-  nav.innerHTML = ['dashboard', ...ids].map(id => `<button type="button" role="tab" data-view="${esc(id)}" aria-pressed="${id === currentView}">${esc(label(id))}</button>`).join('');
-}
-function showView(id) {
+function renderViewNav() { scheduleNav(); }
+function showView(id, fromPage) {
+  // Called by features (e.g. showView('board')): route through the page system so the nav follows.
+  if (!fromPage) { showPage(id === 'dashboard' ? (SECTION_PAGES.includes(currentPage) || pageKind(currentPage) === 'tab' ? currentPage : 'overview') : id); return; }
   if (id !== 'dashboard' && !MAW_VIEWS[id]) id = 'dashboard';
   currentView = id;
   $('view-dashboard').classList.toggle('hidden', id !== 'dashboard');
   for (const [k, v] of Object.entries(MAW_VIEWS)) v.el.classList.toggle('hidden', k !== id);
-  store.set('maw_view', id);
-  renderViewNav();
+  scheduleNav();
   if (id !== 'dashboard') { try { MAW_VIEWS[id].onShow?.(MAW_VIEWS[id].el); } catch (e) { console.error(`[view ${id}]`, e); } }
   emit('view', id);
 }
 $('viewNav').addEventListener('click', e => { const b = e.target.closest('[data-view]'); if (b) showView(b.dataset.view); });
+
+// ---------- App shell: side navigation and pages ----------
+// Every screen is a page: a built-in section (overview, dispatch, project, agents), a tab panel
+// (built-in or added by a feature with MAW.addTab) or a full view (MAW.addView). The nav groups them.
+const NAV = [
+  { id: 'operate', items: ['overview', 'dispatch', 'workspace', 'board', 'inbox'] },
+  { id: 'project', items: ['project', 'review', 'files', 'checkpoints', 'worktrees', 'checks'] },
+  { id: 'monitor', items: ['timeline', 'audit', 'sessions', 'stats'] },
+  { id: 'quality', items: ['budget', 'scoreboard', 'policy'] },
+  { id: 'system', items: ['agents', 'health', 'mcp', 'notify'] }
+];
+const SECTION_PAGES = ['overview', 'dispatch', 'project', 'agents'];
+var currentPage = null;
+var pendingPage = null;
+const tabBtn = id => document.querySelector(`#tabsCard > .tabs > [data-tab="${id}"]`);
+function pageKind(id) {
+  if (SECTION_PAGES.includes(id)) return 'section';
+  if (MAW_VIEWS && MAW_VIEWS[id]) return 'view';
+  const b = tabBtn(id);
+  return b && !b.classList.contains('hidden') ? 'tab' : null;
+}
+function pageTitle(id) {
+  const k = pageKind(id);
+  if (k === 'section') return t('nav_' + id);
+  if (k === 'view') { const v = MAW_VIEWS[id].title; return typeof v === 'function' ? v() : v; }
+  if (k === 'tab') return tabBtn(id).firstElementChild?.textContent.trim() || id;
+  return id;
+}
+function pageCount(id) { return pageKind(id) === 'tab' ? (tabBtn(id).querySelector('.count')?.textContent || '').trim() : ''; }
+function sectionOf(id) { return (NAV.find(s => s.items.includes(id)) || { id: 'other' }).id; }
+// All existing pages, grouped in nav order; pages nobody placed land in "Khác".
+function navModel() {
+  const placed = new Set(NAV.flatMap(s => s.items));
+  const extra = [...topTabs().map(b => b.dataset.tab), ...Object.keys(MAW_VIEWS || {})].filter(id => !placed.has(id) && pageKind(id));
+  return [...NAV, { id: 'other', items: extra }]
+    .map(s => ({ id: s.id, items: s.items.filter(id => pageKind(id)) }))
+    .filter(s => s.items.length);
+}
+function renderNav() {
+  const nav = $('sideNav');
+  if (!nav) return;
+  nav.innerHTML = navModel().map(s => `<div class="nav-sec"><h3>${esc(t('navSec_' + s.id))}</h3>${s.items.map(id => {
+    const n = pageCount(id);
+    return `<button type="button" class="nav-item" data-page="${esc(id)}"${id === currentPage ? ' aria-current="page"' : ''}>${esc(pageTitle(id))}${n ? `<span class="count">${esc(n)}</span>` : ''}</button>`;
+  }).join('')}</div>`).join('') + `<div class="nav-foot"><button type="button" class="nav-item" data-act="collapse">${esc(t('navCollapse'))}</button></div>`;
+  syncPaletteSource();
+}
+// Coalesced repaint. setTimeout, not requestAnimationFrame: rAF is paused while the tab is in the background.
+let navTimer = 0;
+function scheduleNav() { if (!navTimer) navTimer = setTimeout(() => { navTimer = 0; renderNav(); }, 0); }
+function renderPageHead(id) {
+  const sec = sectionOf(id);
+  $('pageCrumb').textContent = t('navSec_' + sec);
+  $('pageTitle').textContent = pageTitle(id);
+  $('pageDesc').textContent = I18N[LANG]['navDesc_' + id] || '';
+}
+// Shows a page. Unknown pages (a feature that has not loaded yet) are remembered and opened when it registers.
+function showPage(id, opts = {}) {
+  const kind = pageKind(id);
+  if (!kind) { if (opts.fromStore) pendingPage = id; id = 'overview'; }
+  else if (pendingPage === id) pendingPage = null;
+  currentPage = id;
+  const k = pageKind(id);
+  if (k === 'view') showView(id, true);
+  else {
+    showView('dashboard', true);
+    document.querySelectorAll('#view-dashboard > .page').forEach(p => p.classList.toggle('hidden', p.dataset.page !== id));
+    $('tabsCard').classList.toggle('hidden', k !== 'tab');
+    if (k === 'tab') switchTabPanel(id);
+    renderPageHead(id);
+  }
+  if (!opts.fromStore || !pendingPage) store.set('maw_page', id);
+  if (opts.hash !== false) { try { history.replaceState(null, '', '#/' + id); } catch { /* file:// */ } }
+  $('app').classList.remove('nav-open');
+  renderNav();
+  if (!opts.keepScroll) window.scrollTo(0, 0);
+  emit('page', id);
+}
+$('sideNav').addEventListener('click', e => {
+  const b = e.target.closest('[data-page]');
+  if (b) { const tb = tabBtn(b.dataset.page); tb ? tb.click() : showPage(b.dataset.page); return; }
+  if (e.target.closest('[data-act="collapse"]')) { $('app').classList.add('nav-collapsed'); store.set('maw_nav', 'collapsed'); }
+});
+$('navToggle').onclick = () => {
+  const app = $('app');
+  if (window.matchMedia('(max-width: 1024px)').matches) app.classList.toggle('nav-open');
+  else { app.classList.toggle('nav-collapsed'); store.set('maw_nav', app.classList.contains('nav-collapsed') ? 'collapsed' : 'open'); }
+};
+$('navBackdrop').onclick = () => $('app').classList.remove('nav-open');
+if (store.get('maw_nav') === 'collapsed') $('app').classList.add('nav-collapsed');
+// Links anywhere in the page: <button data-goto="inbox">.
+document.addEventListener('click', e => { const g = e.target.closest('[data-goto]'); if (g && !g.closest('#sideNav')) { const tb = tabBtn(g.dataset.goto); tb ? tb.click() : showPage(g.dataset.goto); } });
+window.addEventListener('hashchange', () => { const id = location.hash.replace(/^#\/?/, ''); if (id && id !== currentPage) showPage(id, { hash: false, fromStore: true }); });
+// Keep the sticky offsets in sync with the real header height (it wraps on narrow screens).
+new ResizeObserver(() => document.documentElement.style.setProperty('--hdr-h', document.querySelector('.topbar').offsetHeight + 'px')).observe(document.querySelector('.topbar'));
+
+// ---------- Header: preferences menu and quick search ----------
+$('prefsBtn').onclick = e => {
+  e.stopPropagation();
+  const open = $('prefsPop').classList.toggle('hidden') === false;
+  $('prefsBtn').setAttribute('aria-expanded', String(open));
+};
+document.addEventListener('click', e => { if (!e.target.closest('#prefsWrap')) { $('prefsPop').classList.add('hidden'); $('prefsBtn').setAttribute('aria-expanded', 'false'); } });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') { $('prefsPop').classList.add('hidden'); $('app').classList.remove('nav-open'); } });
+$('cmdkBtn').onclick = () => (window.MAW?.palette ? MAW.palette.open() : openProjPop());
+let pagesSourceAdded = false;
+function syncPaletteSource() {
+  $('cmdkBtn').classList.toggle('hidden', !window.MAW?.palette);
+  if (pagesSourceAdded || !window.MAW?.palette) return;
+  pagesSourceAdded = true;
+  MAW.palette.addSource({
+    id: 'pages', title: () => t('navPages'),
+    items: async () => navModel().flatMap(s => s.items.map(id => ({ label: pageTitle(id), hint: t('navSec_' + s.id), keywords: id, run: () => { const tb = tabBtn(id); tb ? tb.click() : showPage(id); } })))
+  });
+}
+
+// ---------- Overview page ----------
+function renderOverview(d) {
+  const jobs = (d.jobs || []).slice(0, 8);
+  $('ovJobs').innerHTML = jobs.length ? jobs.map(j => `<button type="button" class="ov-job" data-job="${esc(j.job_id)}">
+      ${statusBadge(j.status)}<span class="t">${esc([j.agent || j.mode ? agentLabel(j.agent || j.mode) : '', j.role || ''].filter(Boolean).join(' · ') || j.job_id)}</span>
+      <span class="sub mono">${esc(String(j.started_at || '').replace('T', ' ').slice(5, 16))}</span>
+      <span class="s">${esc(j.project_name || '')}${j.exit_code != null && j.exit_code !== 0 ? ' · exit ' + esc(j.exit_code) : ''}</span>
+    </button>`).join('') : `<div class="empty">${esc(t('ovNoJobs'))}</div>`;
+  const ids = Object.keys(AGENTS);
+  $('ovAgents').innerHTML = ids.map(id => `<div class="ov-agent"><span class="dot" style="background:${AGENTS[id].color}"></span><span>${esc(agentLabel(id))}</span><span class="spacer"></span>${AGENTS[id].installed ? badge(t('agentInstalled'), 'b-ok') : badge(t('agentMissing'), '')}</div>`).join('');
+  const quick = [['dispatch', 'ovNewTask'], ['board', 'ovBoard'], ['workspace', 'ovWorkspace'], ['inbox', 'ovInbox'], ['review', 'ovReview'], ['health', 'ovHealth']]
+    .filter(([id]) => pageKind(id));
+  $('ovQuick').innerHTML = quick.map(([id, k]) => `<button type="button" class="btn" data-goto="${id}">${esc(t(k))}</button>`).join('');
+}
+$('ovJobs').addEventListener('click', e => { const b = e.target.closest('[data-job]'); if (b) MAW.openJob(b.dataset.job); });
+
+// ---------- Job dock ----------
+function syncDock() {
+  const box = $('liveJobBox');
+  const on = !box.classList.contains('hidden');
+  document.body.classList.toggle('has-dock', on);
+  document.documentElement.style.setProperty('--dock-h', on ? box.offsetHeight + 'px' : '0px');
+}
+new ResizeObserver(syncDock).observe($('liveJobBox'));
+new MutationObserver(syncDock).observe($('liveJobBox'), { attributes: true, attributeFilter: ['class'] });
+$('dockToggle').onclick = () => {
+  const c = $('liveJobBox').classList.toggle('collapsed');
+  $('dockToggle').textContent = t(c ? 'dockExpand' : 'dockCollapse');
+};
+$('dockClose').onclick = () => { if (state.job?.status !== 'RUNNING') $('liveJobBox').classList.add('hidden'); };
 
 // Loads every feature UI the server announces (once per page).
 function loadFeatureUis(d) {
@@ -2571,6 +2835,10 @@ function loadFeatureUis(d) {
   }
 }
 
+{
+  const fromHash = location.hash.replace(/^#\/?/, '');
+  showPage(fromHash || store.get('maw_page') || 'overview', { fromStore: true });
+}
 $('refreshBtn').onclick = () => load(true);
 $('autoToggle').onchange = setAuto;
 
@@ -2671,7 +2939,8 @@ function startJobStream(j) {
 function startJob(r, opts = {}) {
   stopJobPoll();
   state.job = { id: r.job_id, pid: r.pid || 0, status: 'RUNNING', exitCode: undefined, offset: 0, elapsed: 0, timer: null, es: null, busy: false, fails: 0, quiet: !!opts.quiet };
-  $('liveJobBox').classList.remove('hidden');
+  $('liveJobBox').classList.remove('hidden', 'collapsed');
+  $('dockToggle').textContent = t('dockCollapse');
   $('liveJobLog').textContent = '';
   $('cancelJobBtn').disabled = false;
   setRunBusy(true);
