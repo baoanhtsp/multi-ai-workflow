@@ -138,45 +138,51 @@ function Rotate-MawLogFile {
     param(
         [string]$FilePath,
         [long]$MaxBytes = 5242880,
-        [int]$Keep = 3,
-        [switch]$ArchiveForStartProcess
+        [int]$Keep = 3
     )
     if (-not (Test-Path -LiteralPath $FilePath)) {
         return
     }
     try {
         $item = Get-Item -LiteralPath $FilePath -ErrorAction Stop
-        if ($item.Length -le 0) {
+        if ($item.Length -lt $MaxBytes) {
             return
         }
-        $rot1 = "$FilePath.1"
-        $rot1Len = if (Test-Path -LiteralPath $rot1) { (Get-Item -LiteralPath $rot1).Length } else { 0 }
-
-        # Rotate .1 -> .2 -> .3 when current file >= 5 MB, or when archiving into .1 would exceed 5 MB
-        if ($item.Length -ge $MaxBytes -or ($ArchiveForStartProcess -and ($rot1Len + $item.Length) -ge $MaxBytes)) {
-            for ($i = $Keep; $i -ge 1; $i--) {
-                $src = if ($i -eq 1) { $FilePath } else { "$FilePath.$($i - 1)" }
-                $dst = "$FilePath.$i"
-                if (Test-Path -LiteralPath $src) {
-                    if (Test-Path -LiteralPath $dst) {
-                        Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue
-                    }
-                    Move-Item -LiteralPath $src -Destination $dst -Force -ErrorAction SilentlyContinue
+        for ($i = $Keep; $i -ge 1; $i--) {
+            $src = if ($i -eq 1) { $FilePath } else { "$FilePath.$($i - 1)" }
+            $dst = "$FilePath.$i"
+            if (Test-Path -LiteralPath $src) {
+                if (Test-Path -LiteralPath $dst) {
+                    Remove-Item -LiteralPath $dst -Force -ErrorAction SilentlyContinue
                 }
-            }
-        } elseif ($ArchiveForStartProcess) {
-            # Start-Process -RedirectStandardOutput overwrites target; append prior log to .1 so history is retained
-            $bytes = [System.IO.File]::ReadAllBytes($FilePath)
-            $fs = [System.IO.File]::Open($rot1, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
-            try {
-                $fs.Write($bytes, 0, $bytes.Length)
-            } finally {
-                $fs.Close()
+                Move-Item -LiteralPath $src -Destination $dst -Force -ErrorAction SilentlyContinue
             }
         }
     } catch {
         # Best-effort rotation
     }
+}
+
+function Quote-CmdArg {
+    param([string]$Value)
+    return '"' + ($Value -replace '"', '""') + '"'
+}
+
+function Get-ChildNodeProcess {
+    param([int]$WrapperPid, [int]$TargetPort)
+    $listenPids = Get-ListeningProcessIds -TargetPort $TargetPort
+    if ($listenPids.Count -gt 0) {
+        $p = Get-Process -Id $listenPids[0] -ErrorAction SilentlyContinue
+        if ($p) { return $p }
+    }
+    try {
+        $cim = Get-CimInstance Win32_Process -Filter "ParentProcessId = $WrapperPid AND Name = 'node.exe'" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($cim -and $cim.ProcessId) {
+            $p = Get-Process -Id ([int]$cim.ProcessId) -ErrorAction SilentlyContinue
+            if ($p) { return $p }
+        }
+    } catch {}
+    return $null
 }
 
 function Test-DashboardReady {
@@ -197,42 +203,64 @@ if (-not (Test-DashboardReady -Url $statusUrl)) {
         exit 1
     }
 
-    $qMain = if ($serverMain -match '\s') { '"' + $serverMain + '"' } else { $serverMain }
-    $nodeArgs = @($qMain, "--port", "$Port")
+    $nodeArgs = @((Quote-CmdArg $serverMain), "--port", "$Port")
     if ($ProjectsRoot -and $ProjectsRoot.Trim() -ne "") {
-        $trimmedRoot = $ProjectsRoot.Trim()
-        $qRoot = if ($trimmedRoot -match '\s') { '"' + $trimmedRoot + '"' } else { $trimmedRoot }
-        $nodeArgs += @("--projects-root", $qRoot)
+        $nodeArgs += @("--projects-root", (Quote-CmdArg $ProjectsRoot.Trim()))
     }
 
     if (-not (Test-Path -LiteralPath $logsDir)) {
         New-Item -ItemType Directory -Path $logsDir -Force | Out-Null
     }
     Rotate-MawLogFile -FilePath $serverLog
-    Rotate-MawLogFile -FilePath $outLog -ArchiveForStartProcess
-    Rotate-MawLogFile -FilePath $errLog -ArchiveForStartProcess
+    Rotate-MawLogFile -FilePath $outLog
+    Rotate-MawLogFile -FilePath $errLog
 
     Write-Host "[Mission Control] Starting Node.js ($nodeVerRaw) server on $dashboardUrl ..." -ForegroundColor Cyan
     Write-Host "[Mission Control] Logs: $serverLog | stdout: $outLog | stderr: $errLog" -ForegroundColor DarkGray
-    $proc = Start-Process -FilePath $nodeCmd.Source -ArgumentList $nodeArgs -WorkingDirectory $repoRoot -WindowStyle Hidden -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
+    # Launch via ShellExecute (no -RedirectStandard*) so cmd.exe/node.exe do not inherit caller stdout/stderr pipe handles (H7)
+    $cmdInner = "$(Quote-CmdArg $nodeCmd.Source) $($nodeArgs -join ' ') 1>>$(Quote-CmdArg $outLog) 2>>$(Quote-CmdArg $errLog)"
+    $cmdArgLine = "/d /s /c `"$cmdInner`""
+    $wrapperProc = Start-Process -FilePath $env:ComSpec -ArgumentList $cmdArgLine -WorkingDirectory $repoRoot -WindowStyle Hidden -PassThru
 
+    $nodeProc = $null
     $ready = $false
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         Start-Sleep -Milliseconds 250
+        if (-not $nodeProc) {
+            $nodeProc = Get-ChildNodeProcess -WrapperPid $wrapperProc.Id -TargetPort $Port
+        }
         if (Test-DashboardReady -Url $statusUrl) {
+            if (-not $nodeProc) {
+                $nodeProc = Get-ChildNodeProcess -WrapperPid $wrapperProc.Id -TargetPort $Port
+            }
             $ready = $true
             break
         }
-        if ($proc.HasExited) {
-            throw "Mission Control server process (PID $($proc.Id)) exited prematurely with code $($proc.ExitCode)."
+        $wrapperProc.Refresh()
+        if ($wrapperProc.HasExited) {
+            $deadPid = if ($nodeProc) { $nodeProc.Id } else { $wrapperProc.Id }
+            throw "Mission Control server process (PID $deadPid) exited prematurely with code $($wrapperProc.ExitCode)."
+        }
+        if ($nodeProc) {
+            $nodeProc.Refresh()
+            if ($nodeProc.HasExited) {
+                throw "Mission Control server process (PID $($nodeProc.Id)) exited prematurely with code $($nodeProc.ExitCode)."
+            }
         }
     }
 
     if (-not $ready) {
-        try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+        if ($nodeProc) {
+            try { Stop-Process -Id $nodeProc.Id -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        try { Stop-Process -Id $wrapperProc.Id -Force -ErrorAction SilentlyContinue } catch {}
         throw "Mission Control server on $dashboardUrl did not become ready within 10 seconds."
     }
-    Write-Host "[Mission Control] Server is ONLINE (PID $($proc.Id)) -> $dashboardUrl" -ForegroundColor Green
+    $onlinePid = if ($nodeProc) { $nodeProc.Id } else {
+        $listenPids = Get-ListeningProcessIds -TargetPort $Port
+        if ($listenPids.Count -gt 0) { $listenPids[0] } else { $wrapperProc.Id }
+    }
+    Write-Host "[Mission Control] Server is ONLINE (PID $onlinePid) -> $dashboardUrl" -ForegroundColor Green
 } else {
     Write-Host "[Mission Control] Server is already running -> $dashboardUrl" -ForegroundColor Green
 }

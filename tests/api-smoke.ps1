@@ -661,7 +661,58 @@ try {
     if ($rMcpApply.StatusCode -ne 400) { throw "Test 19g failed: mcp_apply without confirm expected 400, got $($rMcpApply.StatusCode) ($($rMcpApply.Body))" }
     Write-Host "  [PASS] 19. v5.0 S3 smoke: health_check, inbox_add/list/act, timeline, mcp_config, mcp_apply unconfirmed -> 400" -ForegroundColor Green
 
-    Write-Host "[api-smoke] All v4.0 + v5.0 Node.js API security, Registry, C1/C2 runner survival, Council, S1 & S3 smoke assertions PASSED!" -ForegroundColor Cyan
+    # 20. H7: start-dashboard.ps1 piped output returns in < 30s without handle-inheritance hang, writes logs, and -Stop terminates node
+    $h7Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $h7Listener.Start()
+    $h7Port = ([System.Net.IPEndPoint]$h7Listener.LocalEndpoint).Port
+    $h7Listener.Stop()
+    $h7MawHome = Join-Path $spaceTempDir ".maw-h7"
+    New-Item -ItemType Directory -Path $h7MawHome -Force | Out-Null
+    $startDashScript = Join-Path $repoRoot "start-dashboard.ps1"
+    try {
+        $env:TMP             = $spaceTempDir
+        $env:TEMP            = $spaceTempDir
+        $env:MAW_HOME        = $h7MawHome
+        $env:USERPROFILE     = $smokeUserProfile
+        $env:MAW_TEST        = "1"
+        $env:MAW_SKIP_HEALTH = "1"
+
+        $h7Sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $h7Psi = New-Object System.Diagnostics.ProcessStartInfo
+        $h7Psi.FileName = "powershell.exe"
+        $h7Psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"& '$($startDashScript.Replace("'", "''"))' -Port $h7Port -NoBrowser | Select-Object -Last 6`""
+        $h7Psi.UseShellExecute = $false
+        $h7Psi.RedirectStandardOutput = $true
+        $h7Psi.RedirectStandardError = $true
+        $h7Psi.CreateNoWindow = $true
+        $h7Proc = [System.Diagnostics.Process]::Start($h7Psi)
+        $h7OutTask = $h7Proc.StandardOutput.ReadToEndAsync()
+        $h7ErrTask = $h7Proc.StandardError.ReadToEndAsync()
+        if (-not $h7Proc.WaitForExit(30000) -or -not $h7OutTask.Wait(5000)) {
+            try { $h7Proc.Kill() } catch {}
+            throw "Test 20 (H7) failed: start-dashboard.ps1 piped output hung (> 30s) due to inherited stdout/stderr handles"
+        }
+        $h7Sw.Stop()
+        $h7Out = $h7OutTask.Result
+        if ($h7Out -notmatch "Server is ONLINE \(PID (\d+)\)") {
+            throw "Test 20 (H7) failed: expected 'Server is ONLINE (PID <id>)' in piped output, got:`n$h7Out`nERR:`n$($h7ErrTask.Result)"
+        }
+        $h7OutLog = Join-Path $h7MawHome "logs\server.out.log"
+        if (-not (Test-Path -LiteralPath $h7OutLog)) {
+            throw "Test 20 (H7) failed: expected $h7OutLog to be created"
+        }
+        Write-Host "  [PASS] 20. H7 start-dashboard.ps1 piped output returned in $([int]$h7Sw.ElapsedMilliseconds)ms (< 30s) without handle hang" -ForegroundColor Green
+    } finally {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startDashScript -Port $h7Port -Stop | Out-Null
+        $env:TMP         = $origTmp
+        $env:TEMP        = $origTemp
+        $env:MAW_HOME    = $origMawHome
+        $env:USERPROFILE = $origUserProfile
+        if ($null -eq $origMawTest) { Remove-Item Env:\MAW_TEST -ErrorAction SilentlyContinue } else { $env:MAW_TEST = $origMawTest }
+        if ($null -eq $origSkipHealth) { Remove-Item Env:\MAW_SKIP_HEALTH -ErrorAction SilentlyContinue } else { $env:MAW_SKIP_HEALTH = $origSkipHealth }
+    }
+
+    Write-Host "[api-smoke] All v4.0 + v5.0 Node.js API security, Registry, C1/C2 runner survival, Council, S1, S3 & H7 smoke assertions PASSED!" -ForegroundColor Cyan
     exit 0
 } catch {
     Write-Error "[api-smoke] FAILED: $($_.Exception.Message)"

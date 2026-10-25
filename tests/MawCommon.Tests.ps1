@@ -534,4 +534,40 @@ exit 0
             $env:USERPROFILE = $prevUser
         }
     }
+
+    It "start-dashboard.ps1 piped through Select-Object returns in < 30s without handle inheritance hang and stops cleanly (H7)" {
+        $h7Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $h7Listener.Start()
+        $h7Port = ([System.Net.IPEndPoint]$h7Listener.LocalEndpoint).Port
+        $h7Listener.Stop()
+
+        $startDashScript = Join-Path $script:RepoRoot "start-dashboard.ps1"
+        $prevSkip = $env:MAW_SKIP_HEALTH
+        try {
+            $env:MAW_SKIP_HEALTH = "1"
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "powershell.exe"
+            $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"& '$($startDashScript.Replace("'", "''"))' -Port $h7Port -NoBrowser | Select-Object -Last 6`""
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            $psi.CreateNoWindow = $true
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $outTask = $p.StandardOutput.ReadToEndAsync()
+            $errTask = $p.StandardError.ReadToEndAsync()
+            $exited = $p.WaitForExit(30000)
+            $pipeClosed = $outTask.Wait(5000)
+            $sw.Stop()
+
+            $exited | Should -BeTrue
+            $pipeClosed | Should -BeTrue
+            $sw.ElapsedMilliseconds | Should -BeLessThan 30000
+            $outTask.Result | Should -Match "Server is ONLINE \(PID \d+\)"
+            Test-Path -LiteralPath (Join-Path $env:MAW_HOME "logs\server.out.log") | Should -BeTrue
+        } finally {
+            $env:MAW_SKIP_HEALTH = $prevSkip
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $startDashScript -Port $h7Port -Stop | Out-Null
+        }
+    }
 }
