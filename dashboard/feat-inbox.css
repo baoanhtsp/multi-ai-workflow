@@ -1,10 +1,10 @@
 /* S3 — attention inbox (bell, drawer, list) + Telegram settings. Theme tokens only. */
-.s3-bell { cursor: pointer; background: var(--surface); gap: 5px; font-variant-numeric: tabular-nums; }
-.s3-bell:hover { background: var(--hover); color: var(--text); }
-.s3-bell.is-zero { opacity: .75; }
-.s3-bell.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
-.s3-bell.err { color: var(--err); border-color: var(--err); background: var(--err-soft); }
-.s3-bell-n { font-weight: 600; min-width: 1ch; text-align: center; }
+.s3-bell { font-variant-numeric: tabular-nums; }
+/* Count badge on the bell icon; coloured by the worst open item. */
+.s3-bell-n { position: absolute; top: -3px; right: -5px; min-width: 18px; height: 18px; padding: 0 5px; font-size: 10.5px; font-weight: 700; line-height: 18px; text-align: center; color: #fff; background: var(--muted); border-radius: 999px; box-shadow: 0 0 0 2px var(--surface); }
+.s3-bell.is-zero .s3-bell-n { display: none; }
+.s3-bell.warn .s3-bell-n { background: var(--warn); }
+.s3-bell.err .s3-bell-n { background: var(--err); }
 
 .s3-drawer { position: fixed; top: 64px; right: 16px; z-index: 58; width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 88px); display: flex; flex-direction: column; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 18px 48px rgba(0, 0, 0, .28); }
 .s3-drawer-h { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
