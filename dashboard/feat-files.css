@@ -57,3 +57,7 @@
   .fl-root.show-view .fl-view { display: flex; }
   .fl-back { display: inline-flex; }
 }
+
+/* Tree markers without emoji: folders get a small filled square, files nothing. */
+.fl-ico { width: 8px; flex: none; color: var(--faint); font-size: 11px; text-align: center; }
+.fl-ico.is-dir::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 2px; background: var(--border-strong); }

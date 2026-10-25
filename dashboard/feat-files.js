@@ -10,7 +10,7 @@
 
   MAW.addI18n('vi', {
     'fl.tab': 'Tệp', 'fl.files': 'Tệp', 'fl.history': 'Lịch sử', 'fl.search': 'Tìm tệp theo tên…',
-    'fl.dotfiles': 'Tệp ẩn', 'fl.refresh': 'Làm mới', 'fl.editorCfg': 'Trình soạn thảo',
+    'fl.dotfiles': 'Tệp ẩn', 'fl.refresh': 'Làm mới', 'fl.editorBtn': 'Trình soạn thảo', 'fl.editorCfg': 'Trình soạn thảo',
     'fl.pickProject': 'Chọn một dự án trước.', 'fl.empty': 'Thư mục trống.', 'fl.noMatch': 'Không tìm thấy tệp nào.',
     'fl.pickFile': 'Chọn một tệp để xem.', 'fl.binary': 'Tệp nhị phân — không hiển thị.', 'fl.tooLarge': 'Tệp lớn hơn 1 MB — không hiển thị.',
     'fl.openEditor': 'Mở trong editor', 'fl.diff': 'Diff', 'fl.opened': 'Đã mở trong editor.', 'fl.truncated': 'Danh sách bị cắt bớt.',
@@ -21,7 +21,7 @@
   });
   MAW.addI18n('en', {
     'fl.tab': 'Files', 'fl.files': 'Files', 'fl.history': 'History', 'fl.search': 'Find files by name…',
-    'fl.dotfiles': 'Dotfiles', 'fl.refresh': 'Refresh', 'fl.editorCfg': 'Editor',
+    'fl.dotfiles': 'Dotfiles', 'fl.refresh': 'Refresh', 'fl.editorBtn': 'Editor', 'fl.editorCfg': 'Editor',
     'fl.pickProject': 'Pick a project first.', 'fl.empty': 'Empty folder.', 'fl.noMatch': 'No files found.',
     'fl.pickFile': 'Select a file to view it.', 'fl.binary': 'Binary file — not shown.', 'fl.tooLarge': 'File is larger than 1 MB — not shown.',
     'fl.openEditor': 'Open in editor', 'fl.diff': 'Diff', 'fl.opened': 'Opened in the editor.', 'fl.truncated': 'The list was cut short.',
@@ -53,7 +53,7 @@
         <input class="input fl-q" type="search" placeholder="${esc(t('fl.search'))}" aria-label="${esc(t('fl.search'))}">
         <label class="check sub"><input type="checkbox" class="fl-dot"> <span data-i="fl.dotfiles"></span></label>
         <button type="button" class="btn btn-sm" data-a="refresh" title="${esc(t('fl.refresh'))}" aria-label="${esc(t('fl.refresh'))}">↻</button>
-        <button type="button" class="btn btn-sm" data-a="editor" title="${esc(t('fl.editorCfg'))}" aria-label="${esc(t('fl.editorCfg'))}">⚙</button>
+        <button type="button" class="btn btn-sm" data-a="editor" title="${esc(t('fl.editorCfg'))}" aria-label="${esc(t('fl.editorCfg'))}">${esc(t('fl.editorBtn'))}</button>
       </div>
       <div class="fl-tabs seg" role="tablist"><button type="button" role="tab" data-tab="files"></button><button type="button" role="tab" data-tab="history"></button></div>
       <div class="fl-body">
@@ -91,7 +91,7 @@
       return `<div class="fl-row${S.selected === e.path ? ' is-sel' : ''}${e.deleted ? ' is-del' : ''}" role="treeitem" tabindex="-1"
           data-path="${esc(e.path)}" data-type="${esc(e.type)}" ${isDir ? `aria-expanded="${open}"` : ''} style="--d:${depth}">
         <span class="fl-chev">${isDir ? (open ? '▾' : '▸') : ''}</span>
-        <span class="fl-ico">${isDir ? '📁' : e.type === 'link' ? '🔗' : '📄'}</span>
+        <span class="fl-ico${isDir ? ' is-dir' : ''}">${e.type === 'link' ? '↗' : ''}</span>
         <span class="fl-name truncate">${esc(e.name)}</span>${inside}${g}
       </div>`;
     }
@@ -118,7 +118,7 @@
         tree.innerHTML = !r ? '<div class="fl-row">…</div>' : r.error ? `<div class="fl-row t-err">${esc(r.error)}</div>`
           : !r.results.length ? `<div class="empty">${esc(t('fl.noMatch'))}</div>`
           : r.results.map(e => `<div class="fl-row fl-hit${S.selected === e.path ? ' is-sel' : ''}" role="treeitem" tabindex="-1" data-path="${esc(e.path)}" data-type="${esc(e.type)}" style="--d:0">
-              <span class="fl-ico">${e.type === 'dir' ? '📁' : '📄'}</span><span class="fl-name truncate">${esc(e.name)} <span class="faint">${esc(e.path)}</span></span>
+              <span class="fl-ico${e.type === 'dir' ? ' is-dir' : ''}"></span><span class="fl-name truncate">${esc(e.name)} <span class="faint">${esc(e.path)}</span></span>
               ${e.git ? `<span class="fl-dot-g g-${GIT_CLS[e.git] || 'm'}">${esc(e.git)}</span>` : ''}</div>`).join('')
             + (r.truncated ? `<div class="fl-row sub">${esc(t('fl.truncated'))}</div>` : '');
       } else tree.innerHTML = treeHtml('', 0);

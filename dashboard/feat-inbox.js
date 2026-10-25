@@ -246,12 +246,11 @@
             <div class="seg" role="group" data-status></div>
             <select class="input s3-sel" data-kind aria-label="kind"></select></div>
           <div class="s3-tools"><button type="button" class="btn btn-sm" data-reload></button><button type="button" class="btn btn-sm btn-danger" data-clear></button></div></div>
-          <div class="s3-list" data-list></div></section>
-        <section class="s3-sec" data-tg></section></div>`;
+          <div class="s3-list" data-list></div></section></div>`;
       panel.addEventListener('click', async e => {
         const s = e.target.closest('[data-st]');
         if (s) { filter.status = s.dataset.st; fetchItems(true); return; }
-        if (e.target.closest('[data-reload]')) { fetchItems(true); loadTg(); return; }
+        if (e.target.closest('[data-reload]')) { fetchItems(true); return; }
         if (e.target.closest('[data-clear]')) {
           if (!confirm(t('s3iClearAsk'))) return;
           try {
@@ -262,9 +261,6 @@
           fetchItems(true);
           return;
         }
-        if (e.target.closest('[data-tgsave]')) { saveTg(); return; }
-        if (e.target.closest('[data-tgtest]')) { testTg(); return; }
-        if (e.target.closest('[data-gonotify]')) { const b = document.querySelector('#tabsCard [data-tab="notify"]'); b?.click(); return; }
         if (e.target.closest('[data-list]')) onListClick(e);
       });
       panel.querySelector('[data-kind]').addEventListener('change', e => { filter.kind = e.target.value; fetchItems(true); });
@@ -282,13 +278,28 @@
 
   function paintAll() { paintBell(); paintDrawer(); renderTab(); tab?.setCount(counts.open || M.state.data?.feature_data?.inbox?.open || ''); }
 
-  // ---------- Telegram ----------
+  // ---------- Telegram (shown on Settings > Notifications, next to the bot token) ----------
+  function tgBox() {
+    let box = document.querySelector('[data-tg]');
+    if (box) return box;
+    const host = document.querySelector('#tabsCard > [data-panel="notify"]');
+    if (!host) return null;
+    box = document.createElement('section');
+    box.className = 's3-sec s3-tg-settings'; box.dataset.tg = '';
+    host.appendChild(box);
+    box.addEventListener('click', e => {
+      if (e.target.closest('[data-tgsave]')) { saveTg(); return; }
+      if (e.target.closest('[data-tgtest]')) { testTg(); return; }
+      if (e.target.closest('[data-gonotify]')) { document.getElementById('cfgTgToken')?.focus(); }
+    });
+    return box;
+  }
   async function loadTg() {
     try { tg = await api('telegram_status'); } catch (e) { tg = { ok: false, error: e.message }; }
     paintTg();
   }
   function paintTg() {
-    const box = panel?.querySelector('[data-tg]');
+    const box = tgBox();
     if (!box) return;
     const h = `<div class="s3-sec-h"><div><h2>${esc(t('s3tTitle'))}</h2><p class="sub t-muted">${esc(t('s3tHint'))}</p></div></div>`;
     if (!tg) { box.innerHTML = h + '<div class="empty">…</div>'; return; }
@@ -320,7 +331,7 @@
 ${M.lang === 'vi' ? 'Trả lời (reply) một thông báo = trả lời / chỉ dẫn tiếp cho agent' : 'Reply to a notification = answer / follow-up for the agent'}</pre></details>`;
   }
   async function saveTg() {
-    const box = panel.querySelector('[data-tg]');
+    const box = tgBox();
     const body = {
       inbound: box.querySelector('[data-tgin]').checked,
       push_inbox: box.querySelector('[data-tgpush]').checked,
@@ -338,13 +349,14 @@ ${M.lang === 'vi' ? 'Trả lời (reply) một thông báo = trả lời / chỉ
     finally { tgBusy = false; }
   }
 
+  loadTg();
   tab = M.addTab({
     id: 'inbox',
     title: () => t('s3iTab'),
     render(p) {
       const first = !panel;
       panel = p;
-      if (first) { fetchItems(true); loadTg(); }
+      if (first) fetchItems(true);
       renderTab();
     }
   });

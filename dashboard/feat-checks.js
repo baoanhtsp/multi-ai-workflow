@@ -69,7 +69,7 @@
 
   M.addProjectAction({
     id: 's4-run-checks',
-    label: () => '✓ ' + t('s4cRunProj'),
+    label: () => t('s4cRunProj'),
     run: p => { runChecks(p.path); const b = document.querySelector('#tabsCard [data-tab="checks"]'); if (b) b.click(); },
   });
 

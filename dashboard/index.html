@@ -271,6 +271,17 @@
   #tabsCard.hidden { display: none; }
   #tabsCard > .companion-h { padding: 14px 16px 10px; font-size: 13px; font-weight: 650; color: var(--text); border-top: 1px solid var(--border); background: var(--surface-2); }
   #view-dashboard > .page[data-page="agents"] + #tabsCard, #view-dashboard > .page:not(.hidden) ~ #tabsCard:not(.hidden) { margin-top: 20px; }
+  /* Section headings inside feature pages: one size whatever level the feature used. */
+  #tabsCard > [data-panel] :is(h2, h3, h4) { font-size: 14px; font-weight: 650; color: var(--text); letter-spacing: 0; }
+  /* The board view (S2) uses the same title and sub-tab style as hub pages. */
+  .tk-head .tk-h { font-size: 21px; font-weight: 650; letter-spacing: -.01em; }
+  .tk-tabs.seg { background: none; border: 0; border-bottom: 1px solid var(--border); border-radius: 0; padding: 0; gap: 2px; }
+  .tk-tabs.seg button { padding: 9px 12px 8px; font-size: 13.5px; font-weight: 500; color: var(--muted); background: none; border-radius: 0; border-bottom: 2px solid transparent; box-shadow: none; }
+  .tk-tabs.seg button[aria-pressed="true"] { color: var(--text); font-weight: 600; background: none; box-shadow: none; border-bottom-color: var(--accent); }
+  /* Project actions grouped by purpose. */
+  .act-groups { display: grid; gap: 10px; }
+  .act-group { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .act-group > .act-lbl { min-width: 92px; font-size: 12px; font-weight: 600; color: var(--muted); }
   .subtabs { display: flex; gap: 2px; margin: -6px 0 18px; border-bottom: 1px solid var(--border); overflow-x: auto; scrollbar-width: thin; }
   .subtabs button { flex: none; padding: 9px 12px 8px; font-size: 13.5px; font-weight: 500; color: var(--muted); white-space: nowrap; background: none; border: 0; border-bottom: 2px solid transparent; cursor: pointer; }
   .subtabs button:hover { color: var(--text); }
@@ -280,6 +291,9 @@
   /* A feature page wider than the screen scrolls inside itself, never the whole app. */
   #tabsCard > [data-panel], #view-dashboard > .page { min-width: 0; max-width: 100%; overflow-x: auto; }
   .app-main > .maw-view { min-width: 0; max-width: 100%; overflow-x: auto; }
+  /* Health (merged into Agents) shows the per-agent cards; the built-in card keeps only extras. */
+  #view-dashboard > .page[data-page="agents"] #agents:empty { display: none; }
+  #view-dashboard > .page[data-page="agents"] > .card > .card-h { display: none; }
   /* The page title already names these cards. */
   #view-dashboard > .page[data-page="dispatch"] > .card > .card-h > h2,
   #view-dashboard > .page[data-page="project"] > .card > .card-h > h2,
@@ -849,13 +863,16 @@
             <div id="projMeta" class="row-wrap"></div>
             <div id="projPath" class="mono sub faint truncate" style="margin-top:6px"></div>
           </div>
-          <div class="row-wrap">
-            <button id="initSpecBtn" type="button" class="btn btn-sm hidden" data-i18n="initSpec"></button>
-            <button id="specGuardBtn" type="button" class="btn btn-sm" data-i18n="specGuardBtn"></button>
-            <span id="projActions" class="row-wrap"></span>
-            <select id="guardOwner" class="select-sm" data-i18n-title="guardOwnerTitle" aria-label="SPEC Guard owner">
-              <option value="" data-i18n="guardOwnerAll"></option>
-            </select>
+          <div class="act-groups">
+            <div class="act-group" data-actgroup="check">
+              <span class="act-lbl" data-i18n="actGrpCheck"></span>
+              <button id="initSpecBtn" type="button" class="btn btn-sm hidden" data-i18n="initSpec"></button>
+              <button id="specGuardBtn" type="button" class="btn btn-sm" data-i18n="specGuardBtn"></button>
+              <select id="guardOwner" class="select-sm" data-i18n-title="guardOwnerTitle" aria-label="SPEC Guard owner">
+                <option value="" data-i18n="guardOwnerAll"></option>
+              </select>
+            </div>
+            <span id="projActions" class="hidden"></span>
           </div>
           <div id="specGuardOut" class="hidden callout" style="color:var(--text)"></div>
           <div id="gitBody" class="stack"></div>
@@ -1033,13 +1050,15 @@ const I18N = {
     viewDashboard: 'Bảng điều khiển',
     navMenu: 'Menu', navCollapse: 'Thu gọn menu', navPages: 'Trang', cmdkPh: 'Tìm nhanh…', prefsBtn: 'Giao diện', prefLang: 'Ngôn ngữ', prefTheme: 'Chủ đề',
     navGrp_work: 'Làm việc', navGrp_manage: 'Quản lý',
+    actGrpCheck: 'Kiểm tra', actGrp_check: 'Kiểm tra', actGrp_worktree: 'Worktree', actGrp_integrations: 'Tích hợp', actGrp_other: 'Khác',
+    projMissing: 'Chưa có {x}',
     hub_project: 'Dự án', hub_activity: 'Hoạt động', hub_quality: 'Chi phí & chất lượng', hub_settings: 'Cài đặt', hub_other: 'Khác',
     sub_project: 'Tổng quan', sub_agents: 'Agent', sub_audit: 'Nhật ký',
     nav_overview: 'Tổng quan', nav_dispatch: 'Giao việc', nav_project: 'Tổng quan dự án', nav_agents: 'Agent',
     navDesc_overview: 'Số liệu chính, job gần đây và tình trạng các AI.',
     navDesc_dispatch: 'Phân vai cho AI, mô tả việc cần làm và chạy.',
     navDesc_project: 'SPEC.md, kiểm tra phân quyền, Git và thao tác trên dự án đang chọn.',
-    navDesc_agents: 'Các AI trong registry: đã cài, phiên bản, vai trò; kèm các phiên Antigravity gần đây.',
+    navDesc_agents: 'Tình trạng từng AI (cài đặt, đăng nhập, model thực tế), kiểm tra sẵn sàng của team, Doctor và các phiên Antigravity.',
     navDesc_audit: 'Dòng thời gian các job và mọi lượt gọi AI: token, chi phí, điểm, kết luận.',
     navDesc_scoreboard: 'Xếp hạng AI theo vai, kèm thống kê theo vai, công cụ và model.',
     navDesc_sessions: 'Các hội thoại Antigravity gần đây.',
@@ -1292,13 +1311,15 @@ const I18N = {
     viewDashboard: 'Dashboard',
     navMenu: 'Menu', navCollapse: 'Collapse menu', navPages: 'Pages', cmdkPh: 'Quick search…', prefsBtn: 'Display', prefLang: 'Language', prefTheme: 'Theme',
     navGrp_work: 'Work', navGrp_manage: 'Manage',
+    actGrpCheck: 'Checks', actGrp_check: 'Checks', actGrp_worktree: 'Worktrees', actGrp_integrations: 'Integrations', actGrp_other: 'Other',
+    projMissing: 'No {x}',
     hub_project: 'Project', hub_activity: 'Activity', hub_quality: 'Cost & quality', hub_settings: 'Settings', hub_other: 'Other',
     sub_project: 'Overview', sub_agents: 'Agents', sub_audit: 'Log',
     nav_overview: 'Overview', nav_dispatch: 'New task', nav_project: 'Project overview', nav_agents: 'Agents',
     navDesc_overview: 'Key numbers, recent jobs and the state of every AI.',
     navDesc_dispatch: 'Assign roles to AIs, describe the work and run it.',
     navDesc_project: 'SPEC.md, ownership checks, Git and actions for the selected project.',
-    navDesc_agents: 'AIs in the registry: installed, version, role; plus recent Antigravity sessions.',
+    navDesc_agents: 'Every AI\'s state (installed, signed in, real model), team readiness, Doctor and Antigravity sessions.',
     navDesc_audit: 'The job timeline and every AI call: tokens, cost, score, verdict.',
     navDesc_scoreboard: 'AIs ranked per role, plus the breakdown by role, tool and model.',
     navDesc_sessions: 'Recent Antigravity conversations.',
@@ -1840,7 +1861,7 @@ function projMeta() {
   // "Create SPEC.md" is only offered when the project actually lacks one.
   $('initSpecBtn').classList.toggle('hidden', !p || p.has_spec);
   if (!p) { $('projMeta').innerHTML = `<span class="sub faint">${esc(t('noProject'))}</span>`; return; }
-  const f = (ok, l) => badge((ok ? '✓ ' : '✗ ') + l, ok ? 'b-ok' : '');
+  const f = (ok, l) => badge(ok ? l : t('projMissing', { x: l }), ok ? 'b-ok' : '');
   $('projMeta').innerHTML = f(p.has_git, 'Git') + f(p.has_spec, 'SPEC.md') + f(p.has_gemini_md, 'GEMINI.md');
 }
 
@@ -2116,7 +2137,8 @@ function renderAgentsCard(d) {
   const ids = Object.keys(AGENTS);
   const ready = ids.filter(id => AGENTS[id].installed).length;
   $('agentsCount').textContent = `${ready} / ${ids.length}`;
-  $('agents').innerHTML = ids.map(id => {
+  const compact = (d.features || []).includes('health');
+  $('agents').innerHTML = ids.filter(id => !compact || cap(id, 'sessions')).map(id => {
     const a = AGENTS[id], tool = tools[id];
     const summary = tool?.role_summary || (BUILTIN[id] ? t({ claude: 'roleCl', antigravity: 'roleAg', codex: 'roleCx' }[id]) : t('cliAgent'));
     const ver = a.version ? 'v' + String(a.version).replace(/^v/, '') : (id === 'antigravity' && b.ls_version ? b.ls_version : '—');
@@ -2687,16 +2709,38 @@ function renderJobActions() {
     box.appendChild(b);
   }
 }
+// Feature actions on the project page, grouped by purpose (unknown ids go to "Khác").
+const ACTION_GROUPS = [
+  { id: 'check', match: id => /^s4-|check/.test(id) },
+  { id: 'worktree', match: id => /^wt-/.test(id) },
+  { id: 'integrations', match: id => /^gh-/.test(id) },
+  { id: 'other', match: () => true }
+];
 function renderProjectActions() {
   const box = $('projActions');
   box.innerHTML = '';
+  document.querySelectorAll('[data-actgroup]:not([data-actgroup="check"])').forEach(g => g.remove());
+  document.querySelectorAll('[data-actgroup="check"] .feat-act').forEach(b => b.remove());
   if (!MAW_PROJECT_ACTIONS) return;
+  const host = document.querySelector('.act-groups');
   for (const a of MAW_PROJECT_ACTIONS) {
+    const gid = ACTION_GROUPS.find(g => g.match(a.id || '')).id;
+    let g = host.querySelector(`[data-actgroup="${gid}"]`);
+    if (!g) {
+      g = document.createElement('div');
+      g.className = 'act-group'; g.dataset.actgroup = gid;
+      g.innerHTML = `<span class="act-lbl">${esc(t('actGrp_' + gid))}</span>`;
+      // Keep the ACTION_GROUPS order whatever order the features registered in.
+      const rank = x => ACTION_GROUPS.findIndex(y => y.id === x);
+      const next = [...host.querySelectorAll('[data-actgroup]')].find(x => rank(x.dataset.actgroup) > rank(gid));
+      host.insertBefore(g, next || null);
+    }
     const b = document.createElement('button');
-    b.type = 'button'; b.className = 'btn btn-sm';
+    b.type = 'button'; b.className = 'btn btn-sm feat-act';
     b.textContent = typeof a.label === 'function' ? a.label() : a.label;
     b.onclick = () => { const p = MAW.project(); if (!p) { toast(t('pickProj'), 'warn'); return; } try { a.run(p); } catch (e) { toast(e.message, 'err'); } };
-    box.appendChild(b);
+    // Checks sit next to the SPEC Guard controls, before the owner select.
+    if (gid === 'check') g.insertBefore(b, $('guardOwner')); else g.appendChild(b);
   }
 }
 // Views: "dashboard" is the built-in one; features may add more (MAW.addView).
@@ -2728,12 +2772,12 @@ const HUBS = [
   { id: 'project', group: 'manage', pages: ['project', 'review', 'files', 'checkpoints', 'worktrees', 'checks'] },
   { id: 'activity', group: 'manage', pages: ['inbox', 'audit'] },
   { id: 'quality', group: 'manage', pages: ['budget', 'scoreboard', 'policy'] },
-  { id: 'settings', group: 'manage', pages: ['agents', 'health', 'mcp', 'notify'] }
+  { id: 'settings', group: 'manage', pages: ['agents', 'mcp', 'notify'] }
 ];
 const SECTION_PAGES = ['overview', 'dispatch', 'project', 'agents'];
 // Pages merged into a host page: they render below the host's own content, with a small heading.
 // When the host page does not exist (its feature is missing) the companion stays a normal page.
-const COMPANIONS = { audit: ['timeline'], scoreboard: ['stats'], agents: ['sessions'] };
+const COMPANIONS = { audit: ['timeline'], scoreboard: ['stats'], agents: ['health', 'sessions'] };
 const COMPANION_HOST = Object.fromEntries(Object.entries(COMPANIONS).flatMap(([h, cs]) => cs.map(c => [c, h])));
 let companionPing = false;
 // Companions shown above the host's own content (a summary chart before the detailed table).
@@ -2769,7 +2813,15 @@ function pageTitle(id) {
   if (k === 'tab') return tabBtn(id).firstElementChild?.textContent.trim() || id;
   return id;
 }
-function pageCount(id) { return pageKind(id) === 'tab' ? (tabBtn(id).querySelector('.count')?.textContent || '').trim() : ''; }
+function rawCount(id) { return (tabBtn(id)?.querySelector('.count')?.textContent || '').trim(); }
+// A page's counter includes the counters of the pages merged into it.
+function pageCount(id) {
+  const own = pageKind(id) === 'tab' ? rawCount(id) : '';
+  const parts = [own, ...companionsOf(id).filter(c => c !== 'sessions').map(rawCount)].filter(Boolean);
+  if (parts.some(p => p.endsWith('+'))) return '99+';
+  const n = parts.reduce((a, p) => a + (parseInt(p, 10) || 0), 0);
+  return n ? (n > 99 ? '99+' : String(n)) : '';
+}
 // Hubs with the pages that exist right now; pages nobody placed go to an "Khác" hub.
 function hubModel() {
   const placed = new Set(HUBS.flatMap(h => h.pages));
