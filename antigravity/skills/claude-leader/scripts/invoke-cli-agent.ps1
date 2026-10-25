@@ -25,6 +25,9 @@ param(
     [string]$ResumeId = "",
 
     [Parameter(Mandatory=$false)]
+    [string]$Account = "",
+
+    [Parameter(Mandatory=$false)]
     [switch]$IncludeGitDiff,
 
     [Parameter(Mandatory=$false)]
@@ -57,6 +60,18 @@ if ($entry.adapter -ne "cli" -or $null -eq $entry.cli) {
 }
 
 $cliCfg = $entry.cli
+$effAccInput = if ($Account -and $Account.Trim()) {
+    $Account.Trim()
+} elseif ($env:MAW_ACCOUNT -and $env:MAW_ACCOUNT.Trim()) {
+    $env:MAW_ACCOUNT.Trim()
+} else {
+    ""
+}
+$accRes = Resolve-MawAccountEnv -AgentId $normAgent -AccountId $effAccInput -Adapter "cli" -AccountEnvTemplate $cliCfg.account_env -MawHome (Split-Path -Parent $reg.user_path)
+if (-not $accRes.Ok) {
+    Write-Output $accRes.Error
+    exit 1
+}
 $normModel = if ($ModelOverride) { $ModelOverride.Trim() } else { "" }
 $normEffort = if ($EffortOverride) { $EffortOverride.Trim().ToLowerInvariant() } else { "" }
 
@@ -178,6 +193,7 @@ if ($DryRun) {
     Write-Output "DRYRUN_ARGS_JSON: $argsJson"
     Write-Output "PROMPT_VIA: $promptVia"
     Write-Output "AGENT_ID: $normAgent"
+    Write-Output "ACCOUNT: $($accRes.AccountId)"
     Write-Output "ROLE: $normRole"
     exit 0
 }
@@ -310,6 +326,10 @@ try {
     if ($WorkDir -and (Test-Path -LiteralPath $WorkDir)) {
         $psi.WorkingDirectory = $WorkDir
     }
+    foreach ($ek in $accRes.Env.Keys) {
+        $psi.EnvironmentVariables[[string]$ek] = [string]$accRes.Env[$ek]
+    }
+    $psi.EnvironmentVariables["MAW_ACCOUNT"] = [string]$accRes.AccountId
 
     $proc = New-Object System.Diagnostics.Process
     $proc.StartInfo = $psi
@@ -475,6 +495,7 @@ try {
             Timestamp    = (Get-Date).ToString("o")
             Tool         = $normAgent
             Agent        = $normAgent
+            Account      = $accRes.AccountId
             Role         = $auditRole
             Model        = $effModel
             Effort       = $normEffort

@@ -30,6 +30,7 @@ export interface AgentCliConfig {
   effort_args: string[];
   resume_args: string[] | null;
   policy_args?: Record<string, string[]> | null;
+  account_env?: Record<string, string> | null;
   output: 'text' | 'gemini-json';
   max_arg_chars: number;
   pricing: AgentCliPricing;
@@ -105,6 +106,21 @@ function parseNullablePolicyArgs(raw: unknown): Record<string, string[]> | null 
   return Object.keys(out).length > 0 ? out : null;
 }
 
+function parseNullableAccountEnv(raw: unknown): Record<string, string> | null {
+  if (!isPlainObject(raw)) {
+    return null;
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    const key = k.trim();
+    const val = typeof v === 'string' ? v.trim() : '';
+    if (/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(key) && val !== '') {
+      out[key] = val;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 function mergeRawAgentObjects(
   base: AgentEntry,
   override: Record<string, unknown>
@@ -134,6 +150,7 @@ function mergeRawAgentObjects(
           effort_args: [...base.cli.effort_args],
           resume_args: base.cli.resume_args ? [...base.cli.resume_args] : null,
           policy_args: base.cli.policy_args ? { ...base.cli.policy_args } : null,
+          account_env: base.cli.account_env ? { ...base.cli.account_env } : null,
           pricing: { ...base.cli.pricing },
         }
       : null,
@@ -322,6 +339,7 @@ function validateAgentEntry(
       : [];
     const cliResumeArgs = parseNullableCmdArray(raw.cli.resume_args);
     const cliPolicyArgs = parseNullablePolicyArgs(raw.cli.policy_args);
+    const cliAccountEnv = parseNullableAccountEnv(raw.cli.account_env);
 
     const outputRaw = String(raw.cli.output ?? 'text')
       .trim()
@@ -351,6 +369,7 @@ function validateAgentEntry(
       effort_args: effortArgs,
       resume_args: cliResumeArgs,
       policy_args: cliPolicyArgs,
+      account_env: cliAccountEnv,
       output: outputRaw as AgentCliConfig['output'],
       max_arg_chars: maxArgChars,
       pricing: {

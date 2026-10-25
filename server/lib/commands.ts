@@ -3,6 +3,7 @@ import path from 'node:path';
 export interface ValidatedCommandInfo {
   mode: string;
   agent: string;
+  account?: string;
   role: string;
   model: string;
   effort: string;
@@ -89,6 +90,9 @@ export function buildCommandSpec(
     if (info.reply_language && (info.reply_language === 'vi' || info.reply_language === 'en')) {
       tokens.push({ kind: 'str', name: '-ReplyLanguage', value: info.reply_language });
     }
+    if (info.account && info.account !== '' && info.account !== 'default') {
+      tokens.push({ kind: 'str', name: '-Account', value: info.account });
+    }
     if (promptFile !== null) {
       tokens.push({ kind: 'str', name: '-PromptFile', value: promptFile });
     } else {
@@ -107,6 +111,9 @@ export function buildCommandSpec(
     if (effortOverride !== '') {
       tokens.push({ kind: 'str', name: '-EffortOverride', value: effortOverride });
     }
+    if (info.account && info.account !== '' && info.account !== 'default') {
+      tokens.push({ kind: 'str', name: '-Account', value: info.account });
+    }
     if (promptFile !== null) {
       tokens.push({ kind: 'str', name: '-PromptFile', value: promptFile });
     } else {
@@ -121,6 +128,9 @@ export function buildCommandSpec(
     }
     if (effortOverride !== '') {
       tokens.push({ kind: 'str', name: '-EffortOverride', value: effortOverride });
+    }
+    if (info.account && info.account !== '' && info.account !== 'default') {
+      tokens.push({ kind: 'str', name: '-Account', value: info.account });
     }
     if (prompt !== '') {
       if (promptFile !== null) {

@@ -45,10 +45,19 @@ export interface FallbackRecoveryConfig {
   prefer_fallback_on_limit: boolean;
 }
 
+export interface QuotaRoutingConfig {
+  enabled: boolean;
+  mode: 'auto' | 'suggest' | 'off';
+  switch_at: number;
+  prefer: 'same-agent' | 'any';
+  when_all_full: 'wait' | 'run';
+}
+
 export interface FallbackConfig {
   version: number;
   roles: Record<string, FallbackRoleConfig>;
   recovery: FallbackRecoveryConfig;
+  quota_routing: QuotaRoutingConfig;
 }
 
 export interface PolicyGlobalConfig {
@@ -81,6 +90,7 @@ export interface S4AuditEntry {
   Timestamp: string;
   Tool: string;
   Agent?: string;
+  Account?: string;
   Role: string;
   Model: string;
   WorkDir: string;
@@ -424,6 +434,13 @@ export function createDefaultFallbackConfig(): FallbackConfig {
       max_wait_s: 21600,
       prefer_fallback_on_limit: false,
     },
+    quota_routing: {
+      enabled: true,
+      mode: 'auto',
+      switch_at: 85,
+      prefer: 'same-agent',
+      when_all_full: 'wait',
+    },
   };
 }
 
@@ -512,11 +529,53 @@ export function validateFallbackConfig(
         : defaults.recovery.prefer_fallback_on_limit,
   };
 
+  const qrRaw =
+    obj.quota_routing && typeof obj.quota_routing === 'object' && !Array.isArray(obj.quota_routing)
+      ? (obj.quota_routing as Record<string, unknown>)
+      : defaults.quota_routing;
+
+  const qrModeRaw = String(qrRaw.mode ?? defaults.quota_routing.mode).trim().toLowerCase();
+  const qrMode: QuotaRoutingConfig['mode'] =
+    qrModeRaw === 'auto' || qrModeRaw === 'suggest' || qrModeRaw === 'off'
+      ? qrModeRaw
+      : defaults.quota_routing.mode;
+
+  const qrEnabled =
+    qrRaw.enabled !== undefined ? Boolean(qrRaw.enabled) : qrMode !== 'off';
+
+  const qrSwitchRaw = Number(qrRaw.switch_at ?? defaults.quota_routing.switch_at);
+  const qrSwitchAt = Number.isFinite(qrSwitchRaw)
+    ? Math.min(99, Math.max(50, Math.trunc(qrSwitchRaw)))
+    : defaults.quota_routing.switch_at;
+
+  const qrPreferRaw = String(qrRaw.prefer ?? defaults.quota_routing.prefer).trim().toLowerCase();
+  const qrPrefer: QuotaRoutingConfig['prefer'] =
+    qrPreferRaw === 'same-agent' || qrPreferRaw === 'any'
+      ? qrPreferRaw
+      : defaults.quota_routing.prefer;
+
+  const qrAllFullRaw = String(qrRaw.when_all_full ?? defaults.quota_routing.when_all_full)
+    .trim()
+    .toLowerCase();
+  const qrWhenAllFull: QuotaRoutingConfig['when_all_full'] =
+    qrAllFullRaw === 'wait' || qrAllFullRaw === 'run'
+      ? qrAllFullRaw
+      : defaults.quota_routing.when_all_full;
+
+  const validatedQuotaRouting: QuotaRoutingConfig = {
+    enabled: qrEnabled,
+    mode: qrMode,
+    switch_at: qrSwitchAt,
+    prefer: qrPrefer,
+    when_all_full: qrWhenAllFull,
+  };
+
   return {
     config: {
       version: 1,
       roles: validatedRoles,
       recovery: validatedRecovery,
+      quota_routing: validatedQuotaRouting,
     },
     warnings,
   };
@@ -734,6 +793,7 @@ export function readAuditRows(
           Timestamp: String(raw.Timestamp ?? ''),
           Tool: String(raw.Tool ?? ''),
           Agent: raw.Agent ? String(raw.Agent) : raw.Tool ? String(raw.Tool) : undefined,
+          Account: String(raw.Account ?? 'default').trim().toLowerCase() || 'default',
           Role: String(raw.Role ?? ''),
           Model: String(raw.Model ?? ''),
           WorkDir: String(raw.WorkDir ?? ''),
@@ -1580,6 +1640,7 @@ export function replaceAgent(
   if (agentChanged) {
     delete result.model;
     delete result.effort;
+    delete result.account;
     if (result.new_session) {
       if (!toAgentInfo?.capabilities?.new_session) {
         delete result.new_session;
@@ -1618,6 +1679,7 @@ export function rebuildRunBody(
   };
 
   if (meta.agent) body.agent = meta.agent;
+  if (meta.account) body.account = meta.account;
   if (meta.team && typeof meta.team === 'object' && !Array.isArray(meta.team)) {
     body.team = meta.team;
   }

@@ -497,7 +497,7 @@ export async function reconcileStartingCard(
 export async function startCardJob(
   ctx: MawFeatureContext,
   card: Card,
-  options?: { ignoreLimits?: boolean; promptOverride?: string; newSession?: boolean }
+  options?: { ignoreLimits?: boolean; promptOverride?: string; newSession?: boolean; account?: string }
 ): Promise<string> {
   if (startingCards.has(card.id)) {
     throw conflict(`Card ${card.id} is already starting.`);
@@ -594,11 +594,13 @@ export async function startCardJob(
         ? currentCard.agent || preset?.implementer
         : undefined;
 
+    const effectiveAccount = options?.account || currentCard.account || undefined;
     const runBody: Record<string, unknown> = {
       mode: currentCard.mode,
       project_path: currentCard.project_path,
       prompt: finalPrompt,
       agent: currentCard.agent || undefined,
+      ...(effectiveAccount ? { account: effectiveAccount } : {}),
       role: currentCard.role || undefined,
       team: finalTeam,
       reviewers: finalReviewers,

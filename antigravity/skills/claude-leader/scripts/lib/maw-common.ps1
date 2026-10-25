@@ -940,6 +940,181 @@ function Resolve-MawAuditFilePath {
     return $candidate
 }
 
+function Resolve-MawAccountEnv {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$AgentId,
+
+        [Parameter(Mandatory=$false)]
+        [AllowEmptyString()]
+        [string]$AccountId = "",
+
+        [Parameter(Mandatory=$false)]
+        [AllowEmptyString()]
+        [string]$Adapter = "",
+
+        [Parameter(Mandatory=$false)]
+        $AccountEnvTemplate = $null,
+
+        [Parameter(Mandatory=$false)]
+        [string]$MawHome = ""
+    )
+
+    $normAgent = $AgentId.Trim().ToLowerInvariant()
+    $normAcc = if ($AccountId) { $AccountId.Trim().ToLowerInvariant() } else { "" }
+
+    if (-not $MawHome) {
+        if ($env:MAW_HOME -and $env:MAW_HOME.Trim()) {
+            $MawHome = $env:MAW_HOME.Trim()
+        } else {
+            $userProf = if ($env:USERPROFILE) { $env:USERPROFILE } else { "C:\Users\Admin" }
+            $MawHome = Join-Path $userProf ".maw"
+        }
+    }
+
+    $accountsFile = Join-Path $MawHome "accounts.json"
+    $accountsList = @()
+    if (Test-Path -LiteralPath $accountsFile -PathType Leaf) {
+        try {
+            $rawJson = Get-Content -LiteralPath $accountsFile -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            if ($null -ne $rawJson -and $null -ne $rawJson.accounts) {
+                $accountsList = @($rawJson.accounts)
+            }
+        } catch {}
+    }
+
+    if (-not $normAcc -or $normAcc -eq "default") {
+        foreach ($item in $accountsList) {
+            if ($null -eq $item) { continue }
+            $ia = ([string]$item.agent).Trim().ToLowerInvariant()
+            $ii = ([string]$item.id).Trim().ToLowerInvariant()
+            if ($ia -eq $normAgent -and $ii -eq "default") {
+                if ($null -ne $item.enabled -and [bool]$item.enabled -eq $false) {
+                    return @{
+                        Ok        = $false
+                        Error     = "ERROR: Account 'default' for agent '$normAgent' is disabled."
+                        AccountId = "default"
+                        Dir       = ""
+                        Env       = @{}
+                        IsDefault = $true
+                    }
+                }
+            }
+        }
+        return @{
+            Ok        = $true
+            Error     = ""
+            AccountId = "default"
+            Dir       = ""
+            Env       = @{}
+            IsDefault = $true
+        }
+    }
+
+    if ($normAcc -notmatch '^[a-z0-9][a-z0-9-]{0,23}$') {
+        return @{
+            Ok        = $false
+            Error     = "ERROR: Invalid account id '$normAcc' (must match ^[a-z0-9][a-z0-9-]{0,23}$)."
+            AccountId = $normAcc
+            Dir       = ""
+            Env       = @{}
+            IsDefault = $false
+        }
+    }
+
+    $effAdapter = if ($Adapter) { $Adapter.Trim().ToLowerInvariant() } elseif ($normAgent -in @("claude", "codex", "antigravity")) { $normAgent } else { "cli" }
+    $envTemplate = @{}
+    if ($effAdapter -eq "claude") {
+        $envTemplate["CLAUDE_CONFIG_DIR"] = "{account_dir}"
+    } elseif ($effAdapter -eq "codex") {
+        $envTemplate["CODEX_HOME"] = "{account_dir}"
+    } elseif ($effAdapter -eq "cli") {
+        if ($null -ne $AccountEnvTemplate) {
+            if ($AccountEnvTemplate -is [hashtable]) {
+                foreach ($k in $AccountEnvTemplate.Keys) {
+                    $envTemplate[[string]$k] = [string]$AccountEnvTemplate[$k]
+                }
+            } elseif ($AccountEnvTemplate -is [psobject]) {
+                foreach ($p in $AccountEnvTemplate.PSObject.Properties) {
+                    $envTemplate[[string]$p.Name] = [string]$p.Value
+                }
+            }
+        } elseif ($normAgent -eq "gemini") {
+            $envTemplate["GEMINI_CLI_HOME"] = "{account_dir}"
+        }
+    }
+
+    if ($envTemplate.Count -eq 0) {
+        return @{
+            Ok        = $false
+            Error     = "ERROR: Agent '$normAgent' does not support non-default account '$normAcc'."
+            AccountId = $normAcc
+            Dir       = ""
+            Env       = @{}
+            IsDefault = $false
+        }
+    }
+
+    $found = $null
+    foreach ($item in $accountsList) {
+        if ($null -eq $item) { continue }
+        $ia = ([string]$item.agent).Trim().ToLowerInvariant()
+        $ii = ([string]$item.id).Trim().ToLowerInvariant()
+        if ($ia -eq $normAgent -and $ii -eq $normAcc) {
+            $found = $item
+            break
+        }
+    }
+
+    if ($null -eq $found) {
+        return @{
+            Ok        = $false
+            Error     = "ERROR: Unknown account '$normAcc' for agent '$normAgent'."
+            AccountId = $normAcc
+            Dir       = ""
+            Env       = @{}
+            IsDefault = $false
+        }
+    }
+
+    if ($null -ne $found.enabled -and [bool]$found.enabled -eq $false) {
+        return @{
+            Ok        = $false
+            Error     = "ERROR: Account '$normAcc' for agent '$normAgent' is disabled."
+            AccountId = $normAcc
+            Dir       = ""
+            Env       = @{}
+            IsDefault = $false
+        }
+    }
+
+    $dir = if ($null -ne $found.dir) { ([string]$found.dir).Trim() } else { "" }
+    if (-not $dir -or -not (Test-Path -LiteralPath $dir -PathType Container)) {
+        return @{
+            Ok        = $false
+            Error     = "ERROR: Account directory does not exist for '$normAcc' ($normAgent): $dir"
+            AccountId = $normAcc
+            Dir       = $dir
+            Env       = @{}
+            IsDefault = $false
+        }
+    }
+
+    $resolvedEnv = @{}
+    foreach ($k in $envTemplate.Keys) {
+        $resolvedEnv[$k] = ([string]$envTemplate[$k]).Replace("{account_dir}", $dir)
+    }
+
+    return @{
+        Ok        = $true
+        Error     = ""
+        AccountId = $normAcc
+        Dir       = $dir
+        Env       = $resolvedEnv
+        IsDefault = $false
+    }
+}
+
 function Write-MawAuditEntry {
     param(
         [Parameter(Mandatory=$true)]
@@ -953,6 +1128,16 @@ function Write-MawAuditEntry {
     }
 
     try {
+        $defaultAcc = if ($env:MAW_ACCOUNT -and $env:MAW_ACCOUNT.Trim()) { $env:MAW_ACCOUNT.Trim().ToLowerInvariant() } else { "default" }
+        if ($Entry -is [System.Collections.IDictionary]) {
+            if (-not $Entry.Contains("Account") -or -not $Entry["Account"]) {
+                $Entry["Account"] = $defaultAcc
+            }
+        } elseif ($null -ne $Entry -and $Entry -is [psobject]) {
+            if (-not $Entry.PSObject.Properties["Account"] -or -not $Entry.Account) {
+                Add-Member -InputObject $Entry -MemberType NoteProperty -Name "Account" -Value $defaultAcc -Force
+            }
+        }
         $auditDir = Split-Path -Parent $auditFile
         if ($auditDir -and -not (Test-Path -LiteralPath $auditDir)) {
             New-Item -ItemType Directory -Path $auditDir -Force | Out-Null

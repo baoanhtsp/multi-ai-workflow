@@ -6,10 +6,15 @@ import type { MawFeature } from '../../lib/feature.ts';
 import { isFileSafe } from '../../lib/paths.ts';
 import { runCommand } from '../../lib/proc.ts';
 import { ApiValidationError } from '../../lib/validate.ts';
+import { resolveAccountExecutionEnv } from '../accounts/store.ts';
 import { CONVERSATION_ID_REGEX, generateConversationId, generateMessageId, generateQueueId } from '../agents-ws/lib/ids.ts';
 import { allowedModels } from '../agents-ws/lib/models.ts';
 import { withS6State } from '../agents-ws/lib/mutex.ts';
-import { getMaxMessageCharsForAgent, validateReplyLanguage } from '../agents-ws/lib/prompt.ts';
+import {
+  buildLimitHandoffLetter,
+  getMaxMessageCharsForAgent,
+  validateReplyLanguage,
+} from '../agents-ws/lib/prompt.ts';
 import { assertSafeProjectMawWrite } from '../agents-ws/lib/security.ts';
 import { appendAuditLog, readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent } from '../agents-ws/types.ts';
@@ -161,6 +166,7 @@ export const feature: MawFeature = {
             seq: 0,
             session: 1,
             platform: agent.platform,
+            ...(agent.account ? { account: agent.account } : {}),
             model: agent.model,
             effort: agent.effort,
             resume: null,
@@ -331,6 +337,13 @@ export const feature: MawFeature = {
           const registryAgent = ctx.registry.agents.find((a) => a.id === targetPlatform);
           if (!registryAgent) {
             throw new ApiValidationError(`Invalid platform '${targetPlatform}'.`, 400);
+          }
+          const reqAccount =
+            body.account !== undefined && body.account !== null
+              ? String(body.account).trim().toLowerCase()
+              : '';
+          if (reqAccount) {
+            resolveAccountExecutionEnv(ctx.paths, ctx.registry, targetPlatform, reqAccount);
           }
 
           // Item 5: when body has platform, use its model / effort exactly ('' = platform default);
@@ -584,6 +597,7 @@ export const feature: MawFeature = {
               id: generateQueueId(),
               text,
               platform: targetPlatform,
+              ...(reqAccount ? { account: reqAccount } : {}),
               model: targetModel,
               effort: targetEffort,
               reply_language: reqReplyLang || undefined,
@@ -611,6 +625,7 @@ export const feature: MawFeature = {
             id: generateQueueId(),
             text,
             platform: targetPlatform,
+            ...(reqAccount ? { account: reqAccount } : {}),
             model: targetModel,
             effort: targetEffort,
             reply_language: reqReplyLang || undefined,
@@ -809,6 +824,195 @@ export const feature: MawFeature = {
           return {
             ok: true,
             job_id: conv.active_job_id,
+          };
+        });
+      },
+    },
+
+    chat_limit_handoff: {
+      method: 'POST',
+      handler: async (ctx) => {
+        return await withS6State(async () => {
+          ensureTickStarted(ctx);
+          const body = ctx.body ?? {};
+          const convId = String(body.conversation_id ?? '').trim();
+          if (!convId || !CONVERSATION_ID_REGEX.test(convId)) {
+            throw new ApiValidationError('Invalid conversation_id.', 400);
+          }
+
+          const chatDir = ctx.paths.featureDataDir('chat');
+          const convsFile = path.win32.join(chatDir, 'conversations.json');
+          const convsData = await readJsonStore<{ version: number; conversations: Conversation[] }>(convsFile, {
+            version: 1,
+            conversations: [],
+          });
+
+          const conv = convsData.conversations.find((c) => c.id === convId && c.deleted_at === null);
+          if (!conv) {
+            throw new ApiValidationError(`Conversation '${convId}' not found.`, 404);
+          }
+
+          const agentsDir = ctx.paths.featureDataDir('agents-ws');
+          const agentsFile = path.win32.join(agentsDir, 'agents.json');
+          const agentsData = await readJsonStore<{ version: number; agents: Agent[] }>(agentsFile, {
+            version: 1,
+            agents: [],
+          });
+          const agent = agentsData.agents.find((a) => a.id === conv.agent_id);
+          if (!agent) {
+            throw new ApiValidationError(`Agent '${conv.agent_id}' not found.`, 404);
+          }
+
+          const msgs = readConversationMessages(chatDir, conv.id);
+          const pendingSeq = conv.pending_limit_handoff?.message_seq;
+          let targetMsg: Message | undefined;
+          if (pendingSeq) {
+            targetMsg = msgs.find((m) => m.seq === pendingSeq && m.kind === 'limit_handoff');
+          }
+          if (!targetMsg) {
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i]!.kind === 'limit_handoff') {
+                targetMsg = msgs[i];
+                break;
+              }
+            }
+          }
+
+          if (body.decline === true) {
+            if (targetMsg) {
+              targetMsg.state = 'declined';
+              if (targetMsg.handoff) {
+                targetMsg.handoff.state = 'declined';
+              }
+              updateConversationMessages(chatDir, conv.id, msgs);
+            }
+            conv.pending_limit_handoff = null;
+            conv.updated_at = new Date().toISOString();
+            await writeJsonStore(convsFile, convsData);
+            return {
+              ok: true,
+              conversation: conv,
+            };
+          }
+
+          const pending = conv.pending_limit_handoff;
+          const fromAgent = String(pending?.from.agent || conv.platform || agent.platform).trim().toLowerCase();
+          const fromAccount =
+            String(pending?.from.account || conv.account || agent.account || 'default').trim().toLowerCase() ||
+            'default';
+          const toAgent = String(body.to_agent ?? pending?.to.agent ?? conv.platform ?? agent.platform)
+            .trim()
+            .toLowerCase();
+          const toAccount =
+            String(body.to_account ?? pending?.to.account ?? 'default').trim().toLowerCase() || 'default';
+
+          const regEntry = ctx.registry.agents.find((a) => a.id === toAgent);
+          if (!regEntry) {
+            throw new ApiValidationError(`Invalid target agent '${toAgent}'.`, 400);
+          }
+          resolveAccountExecutionEnv(ctx.paths, ctx.registry, toAgent, toAccount);
+
+          const reason = pending?.reason || 'manual_limit_handoff';
+          const handoffLetter = buildLimitHandoffLetter({
+            from: { agent: fromAgent, account: fromAccount },
+            reason,
+            summary: conv.summary,
+            messages: msgs.filter((m) => m.role === 'user' || m.role === 'assistant'),
+          });
+
+          conv.platform = toAgent;
+          conv.account = toAccount;
+          conv.session++;
+          conv.resume = null;
+
+          let recordedSeq = conv.seq;
+          if (targetMsg) {
+            targetMsg.state = 'done';
+            if (targetMsg.handoff) {
+              targetMsg.handoff.state = 'done';
+              targetMsg.handoff.to = { agent: toAgent, account: toAccount };
+            }
+            recordedSeq = targetMsg.seq;
+            updateConversationMessages(chatDir, conv.id, msgs);
+          } else {
+            conv.seq++;
+            recordedSeq = conv.seq;
+            const sysMsg: Message = {
+              seq: conv.seq,
+              id: generateMessageId(),
+              role: 'system',
+              kind: 'limit_handoff',
+              state: 'done',
+              handoff: {
+                from: { agent: fromAgent, account: fromAccount },
+                to: { agent: toAgent, account: toAccount },
+                reason,
+                quota: pending?.quota,
+                resets_at: pending?.resets_at ?? null,
+                state: 'done',
+              },
+              text: `Chuyển hạn mức ${fromAgent} · ${fromAccount} → ${toAgent} · ${toAccount}, kèm thư bàn giao.`,
+              ts: new Date().toISOString(),
+              platform: toAgent,
+              account: toAccount,
+              model: conv.model,
+              effort: conv.effort,
+              actual_model: '',
+              job_id: '',
+              status: 'done',
+              cost_usd: null,
+              tokens_in: null,
+              tokens_out: null,
+              duration_sec: null,
+              attachments: [],
+              handoff_id: '',
+              steered: false,
+            };
+            appendConversationMessage(chatDir, conv.id, sysMsg);
+          }
+
+          if (!Array.isArray(conv.limit_handoffs)) {
+            conv.limit_handoffs = [];
+          }
+          conv.limit_handoffs.push({
+            at: new Date().toISOString(),
+            from: { agent: fromAgent, account: fromAccount },
+            to: { agent: toAgent, account: toAccount },
+            reason,
+            quota: pending?.quota,
+            message_seq: recordedSeq,
+          });
+
+          const failedTurnText = pending?.failed_turn_text;
+          const failedReplyLang = pending?.reply_language || conv.reply_language;
+          conv.pending_limit_handoff = null;
+
+          if (failedTurnText) {
+            const qItem: QueueItem = {
+              id: generateQueueId(),
+              text: failedTurnText,
+              platform: toAgent,
+              account: toAccount,
+              handoff_letter: handoffLetter,
+              reply_language: failedReplyLang,
+              ts: new Date().toISOString(),
+              is_retry: true,
+            };
+            if (!conv.active_job_id) {
+              await startTurnJob(ctx, conv, qItem, agent, chatDir);
+            } else {
+              conv.queue.push(qItem);
+            }
+          } else {
+            conv.pending_next_handoff_letter = handoffLetter;
+          }
+
+          conv.updated_at = new Date().toISOString();
+          await writeJsonStore(convsFile, convsData);
+
+          return {
+            ok: true,
+            conversation: conv,
           };
         });
       },

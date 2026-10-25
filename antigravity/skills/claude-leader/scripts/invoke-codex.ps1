@@ -22,6 +22,8 @@ param(
 
     [string]$ResumeId = "",
 
+    [string]$Account = "",
+
     [switch]$UseWorktree
 )
 
@@ -31,6 +33,19 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 
 . (Join-Path $PSScriptRoot "lib\maw-common.ps1")
+
+$effAccInput = if ($Account -and $Account.Trim()) {
+    $Account.Trim()
+} elseif ($env:MAW_ACCOUNT -and $env:MAW_ACCOUNT.Trim()) {
+    $env:MAW_ACCOUNT.Trim()
+} else {
+    ""
+}
+$accRes = Resolve-MawAccountEnv -AgentId "codex" -AccountId $effAccInput -Adapter "codex"
+if (-not $accRes.Ok) {
+    Write-Output $accRes.Error
+    exit 1
+}
 
 # Auto-sync Antigravity CSRF token & LS address to bridge file for 2-way communication
 if ($env:ANTIGRAVITY_CSRF_TOKEN -and $env:ANTIGRAVITY_LS_ADDRESS) {
@@ -148,7 +163,14 @@ try {
     $realCachedInTokens = 0
     $realOutTokens      = 0
 
-    $Prompt | & $codexExe @argsList - 2>&1 | ForEach-Object {
+    $prevCodexHome  = $env:CODEX_HOME
+    $prevMawAccount = $env:MAW_ACCOUNT
+    if ($accRes.Env.ContainsKey("CODEX_HOME")) {
+        $env:CODEX_HOME = [string]$accRes.Env["CODEX_HOME"]
+    }
+    $env:MAW_ACCOUNT = $accRes.AccountId
+    try {
+        $Prompt | & $codexExe @argsList - 2>&1 | ForEach-Object {
         $rawLine = $_.ToString()
         if (-not $rawLine.Trim().StartsWith("{")) {
             if ($rawLine -notmatch 'codex_core::') {
@@ -197,6 +219,10 @@ try {
             Write-Output $rawLine
         }
     }
+    } finally {
+        if ($null -eq $prevCodexHome)  { Remove-Item Env:\CODEX_HOME  -ErrorAction SilentlyContinue } else { $env:CODEX_HOME  = $prevCodexHome }
+        if ($null -eq $prevMawAccount) { Remove-Item Env:\MAW_ACCOUNT -ErrorAction SilentlyContinue } else { $env:MAW_ACCOUNT = $prevMawAccount }
+    }
 
     try {
         $fullOut = ($capturedText -join "`n")
@@ -216,6 +242,7 @@ try {
         $auditEntry = [ordered]@{
             Timestamp         = (Get-Date).ToString("o")
             Tool              = "codex"
+            Account           = $accRes.AccountId
             Role              = $effectiveRole
             Model             = $effectiveModel
             Effort            = $effectiveEffort

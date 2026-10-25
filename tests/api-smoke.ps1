@@ -732,7 +732,37 @@ try {
         if ($null -eq $origSkipHealth) { Remove-Item Env:\MAW_SKIP_HEALTH -ErrorAction SilentlyContinue } else { $env:MAW_SKIP_HEALTH = $origSkipHealth }
     }
 
-    Write-Host "[api-smoke] All v4.0 + v5.0 Node.js API security, Registry, C1/C2 runner survival, Council, S1, S3 & H7 smoke assertions PASSED!" -ForegroundColor Cyan
+    # 21. v6.0 S7 Accounts & Quota smoke block
+    $rAccList = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=account_list"
+    if ($rAccList.StatusCode -ne 200) { throw "Test 21a failed: account_list expected 200, got $($rAccList.StatusCode) ($($rAccList.Body))" }
+    $jAccList = $rAccList.Body | ConvertFrom-Json
+    if (-not $jAccList.ok -or $null -eq $jAccList.accounts) { throw "Test 21a failed: account_list missing accounts array" }
+
+    $accSaveBody = (@{
+        account = @{
+            agent    = "claude"
+            id       = "smoke-work"
+            label    = "Smoke Work"
+            enabled  = $true
+            priority = 2
+            limits   = @{ tokens_5h = 150000 }
+        }
+    } | ConvertTo-Json -Compress -Depth 5)
+    $rAccSave = Invoke-SmokeRequest -Method "POST" -Url "${baseUrl}?action=account_save" -Headers @{ "X-MAW-Request" = "1" } -Body $accSaveBody
+    if ($rAccSave.StatusCode -ne 200) { throw "Test 21b failed: account_save expected 200, got $($rAccSave.StatusCode) ($($rAccSave.Body))" }
+
+    $rQuotaGet = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=quota_get&agent=claude"
+    if ($rQuotaGet.StatusCode -ne 200) { throw "Test 21c failed: quota_get expected 200, got $($rQuotaGet.StatusCode) ($($rQuotaGet.Body))" }
+    $jQuotaGet = $rQuotaGet.Body | ConvertFrom-Json
+    if (-not $jQuotaGet.ok -or $null -eq $jQuotaGet.snapshots) { throw "Test 21c failed: quota_get missing snapshots" }
+
+    $rRoutePrev = Invoke-SmokeRequest -Method "GET" -Url "${baseUrl}?action=quota_route_preview&agent=claude&role=backend"
+    if ($rRoutePrev.StatusCode -ne 200) { throw "Test 21d failed: quota_route_preview expected 200, got $($rRoutePrev.StatusCode) ($($rRoutePrev.Body))" }
+    $jRoutePrev = $rRoutePrev.Body | ConvertFrom-Json
+    if (-not $jRoutePrev.ok -or $null -eq $jRoutePrev.decision) { throw "Test 21d failed: quota_route_preview missing decision" }
+    Write-Host "  [PASS] 21. v6.0 S7 smoke: account_list, account_save, quota_get, quota_route_preview -> 200" -ForegroundColor Green
+
+    Write-Host "[api-smoke] All v4.0 + v5.0 + v6.0 Node.js API security, Registry, C1/C2 runner survival, Council, S1, S3, H7 & S7 smoke assertions PASSED!" -ForegroundColor Cyan
     exit 0
 } catch {
     Write-Error "[api-smoke] FAILED: $($_.Exception.Message)"

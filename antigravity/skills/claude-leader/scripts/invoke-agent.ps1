@@ -32,6 +32,9 @@ param(
     [string]$ReplyLanguage = "",
 
     [Parameter(Mandatory=$false)]
+    [string]$Account = "",
+
+    [Parameter(Mandatory=$false)]
     [switch]$NewSession,
 
     [Parameter(Mandatory=$false)]
@@ -167,9 +170,10 @@ if ($normReplyLang -eq "vi") {
     $fullPrompt = "$fullPrompt`n`n# Language`nAlways reply in English. Keep code, commands, file paths and identifiers as they are."
 }
 
-# 4b. Invoke before-agent hooks (SPEC §9.0: block exits 5 with reason)
+# 4b. Invoke before-agent hooks (SPEC §9.0: block exits 5 with reason; S7 §3.2: Switch / Account)
 $rawBeforeHookItems = @(Invoke-MawHooks -Event "before-agent" -Context @{
     agent       = $normAgent
+    account     = $Account
     role        = $normRole
     workdir     = $WorkDir
     model       = $ModelOverride
@@ -195,6 +199,32 @@ if ($beforeHookRes -and $beforeHookRes.Block) {
         Write-Output "HOOK_BLOCKED_SUGGEST: $($beforeHookRes.Suggest)"
     }
     exit 5
+}
+if ($beforeHookRes -and $beforeHookRes.Switch) {
+    $switchedAgent = ([string]$beforeHookRes.Switch).Trim().ToLowerInvariant()
+    $switchedEntry = Get-AgentEntry -AgentId $switchedAgent -Registry $reg
+    if ($null -ne $switchedEntry) {
+        $normAgent  = $switchedAgent
+        $agentEntry = $switchedEntry
+    }
+}
+if ($beforeHookRes -and $beforeHookRes.Account) {
+    $Account = ([string]$beforeHookRes.Account).Trim().ToLowerInvariant()
+}
+
+# 4c. Resolve Account (S7 §1.4)
+$effAccInput = if ($Account -and $Account.Trim()) {
+    $Account.Trim()
+} elseif ($env:MAW_ACCOUNT -and $env:MAW_ACCOUNT.Trim()) {
+    $env:MAW_ACCOUNT.Trim()
+} else {
+    ""
+}
+$accEnvTemplate = if ($null -ne $agentEntry.cli) { $agentEntry.cli.account_env } else { $null }
+$accRes = Resolve-MawAccountEnv -AgentId $normAgent -AccountId $effAccInput -Adapter $agentEntry.adapter -AccountEnvTemplate $accEnvTemplate
+if (-not $accRes.Ok) {
+    Write-Output $accRes.Error
+    exit 1
 }
 
 # 5. Map (Agent.adapter, Role) to Target Script & Arguments per SPEC §5.1 & §7.4
@@ -231,6 +261,10 @@ switch ($agentEntry.adapter) {
             $childArgs.Add("-ResumeId")
             $childArgs.Add($ResumeId)
         }
+        if ($effAccInput -or $accRes.AccountId -ne "default") {
+            $childArgs.Add("-Account")
+            $childArgs.Add($accRes.AccountId)
+        }
     }
     "codex" {
         $targetScript = Join-Path $PSScriptRoot "invoke-codex.ps1"
@@ -250,6 +284,10 @@ switch ($agentEntry.adapter) {
         if ($ResumeId) {
             $childArgs.Add("-ResumeId")
             $childArgs.Add($ResumeId)
+        }
+        if ($effAccInput -or $accRes.AccountId -ne "default") {
+            $childArgs.Add("-Account")
+            $childArgs.Add($accRes.AccountId)
         }
     }
     "antigravity" {
@@ -298,6 +336,10 @@ switch ($agentEntry.adapter) {
             $childArgs.Add("-ResumeId")
             $childArgs.Add($ResumeId)
         }
+        if ($effAccInput -or $accRes.AccountId -ne "default") {
+            $childArgs.Add("-Account")
+            $childArgs.Add($accRes.AccountId)
+        }
         $childArgs.Add("-TimeoutSeconds")
         $childArgs.Add([string]$TimeoutSeconds)
     }
@@ -309,6 +351,7 @@ if ($DryRun) {
     Write-Output "=== INVOKE-AGENT DRY RUN ==="
     Write-Output "DRYRUN_COMMAND: powershell.exe -NoProfile -ExecutionPolicy Bypass -File $scriptArg $previewArgs -PromptFile <temp_prompt_file>"
     Write-Output "Agent         : $normAgent"
+    Write-Output "Account       : $($accRes.AccountId)"
     Write-Output "Adapter       : $($agentEntry.adapter)"
     Write-Output "Role          : $normRole"
     Write-Output "TargetScript  : $targetScript"
@@ -320,18 +363,20 @@ if ($DryRun) {
 }
 
 $tmpPromptFile = Join-Path $env:TEMP ("maw_agent_prompt_" + [guid]::NewGuid().ToString("N") + ".txt")
-$prevDepth = $env:MAW_DEPTH
-$prevRole  = $env:MAW_ROLE
-$prevAgent = $env:MAW_AGENT
+$prevDepth   = $env:MAW_DEPTH
+$prevRole    = $env:MAW_ROLE
+$prevAgent   = $env:MAW_AGENT
+$prevAccount = $env:MAW_ACCOUNT
 
 try {
     [System.IO.File]::WriteAllText($tmpPromptFile, $fullPrompt, (New-Object System.Text.UTF8Encoding($true)))
     $childArgs.Add("-PromptFile")
     $childArgs.Add($tmpPromptFile)
 
-    $env:MAW_DEPTH = [string]($currentDepth + 1)
-    $env:MAW_ROLE  = $normRole
-    $env:MAW_AGENT = $normAgent
+    $env:MAW_DEPTH   = [string]($currentDepth + 1)
+    $env:MAW_ROLE    = $normRole
+    $env:MAW_AGENT   = $normAgent
+    $env:MAW_ACCOUNT = $accRes.AccountId
 
     $execArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $targetScript) + $childArgs.ToArray()
     $outputLines = [System.Collections.Generic.List[string]]::new()
@@ -391,9 +436,10 @@ try {
 
     exit $exitCode
 } finally {
-    if ($null -eq $prevDepth) { Remove-Item Env:\MAW_DEPTH -ErrorAction SilentlyContinue } else { $env:MAW_DEPTH = $prevDepth }
-    if ($null -eq $prevRole)  { Remove-Item Env:\MAW_ROLE  -ErrorAction SilentlyContinue } else { $env:MAW_ROLE  = $prevRole }
-    if ($null -eq $prevAgent) { Remove-Item Env:\MAW_AGENT -ErrorAction SilentlyContinue } else { $env:MAW_AGENT = $prevAgent }
+    if ($null -eq $prevDepth)   { Remove-Item Env:\MAW_DEPTH   -ErrorAction SilentlyContinue } else { $env:MAW_DEPTH   = $prevDepth }
+    if ($null -eq $prevRole)    { Remove-Item Env:\MAW_ROLE    -ErrorAction SilentlyContinue } else { $env:MAW_ROLE    = $prevRole }
+    if ($null -eq $prevAgent)   { Remove-Item Env:\MAW_AGENT   -ErrorAction SilentlyContinue } else { $env:MAW_AGENT   = $prevAgent }
+    if ($null -eq $prevAccount) { Remove-Item Env:\MAW_ACCOUNT -ErrorAction SilentlyContinue } else { $env:MAW_ACCOUNT = $prevAccount }
     if (Test-Path -LiteralPath $tmpPromptFile) {
         Remove-Item -LiteralPath $tmpPromptFile -Force -ErrorAction SilentlyContinue
     }

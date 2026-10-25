@@ -75,6 +75,7 @@ export interface Card {
   project_path: string;
   mode: TaskMode;
   agent: string;
+  account?: string;
   role: TaskRole;
   team?: Record<string, string>;
   reviewers?: string[];
@@ -366,6 +367,7 @@ export interface ValidatedCardInput {
   project_path: string;
   mode: TaskMode;
   agent: string;
+  account?: string;
   role: TaskRole;
   team?: Record<string, string>;
   reviewers?: string[];
@@ -585,6 +587,7 @@ export async function validateCardInput(
     project_path: projectPath,
     mode,
     agent: agent || '',
+    account: input.account ? String(input.account).trim().toLowerCase() : undefined,
     role: role || '',
     team,
     reviewers,
@@ -753,6 +756,11 @@ export async function updateCard(
           );
         }
         card.mode = m;
+      }
+
+      if (updates.account !== undefined) {
+        const acc = String(updates.account ?? '').trim().toLowerCase();
+        card.account = acc || undefined;
       }
 
       if (updates.agent !== undefined) {

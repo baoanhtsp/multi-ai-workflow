@@ -29,6 +29,7 @@ import { parseJobLog } from '../agents-ws/lib/logparse.ts';
 import { parseRoleMarkdown, type RoleSections } from '../agents-ws/lib/markdown-roles.ts';
 import { s6StateStorage, withS6State } from '../agents-ws/lib/mutex.ts';
 import {
+  buildLimitHandoffLetter,
   buildPrompt,
   getMaxMessageCharsForAgent,
   resolveEffectiveReplyLanguage,
@@ -38,6 +39,13 @@ import { readJsonStore, writeJsonStore } from '../agents-ws/lib/store.ts';
 import type { Agent } from '../agents-ws/types.ts';
 import type { Handoff, HandoffStatus } from '../handoffs/types.ts';
 import { addMemoryEntry, getMemoryContext } from '../memory/index.ts';
+import { classifyFailure } from '../policy/lib/s4-core.ts';
+import {
+  decideQuotaRoute,
+  loadQuotaSnapshots,
+  recordAccountRateLimited,
+  refreshAllQuotaSnapshots,
+} from '../quota/store.ts';
 import type { Team } from '../teams/types.ts';
 import type { Conversation, Message, QueueItem } from './types.ts';
 
@@ -599,8 +607,219 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
 
       const agent = agentsData.agents.find((a) => a.id === conv.agent_id);
 
+      // S7 §4: Limit handoff check after turn completion
+      let limitHandoffHandledFailure = false;
+      try {
+        const fromAgent = String(meta.agent || conv.platform || agent?.platform || '').trim().toLowerCase();
+        const fromAccount = String(meta.account || conv.account || agent?.account || 'default').trim().toLowerCase() || 'default';
+        if (fromAgent) {
+          const classified =
+            statusUpper === 'FAILED' ? classifyFailure(logText, meta.exit_code ?? 1) : null;
+          const isRateLimitedFailure = Boolean(
+            classified &&
+              (classified.kind === 'usage_limit' ||
+                (classified.kind === 'transient' &&
+                  (classified.code === '429' || classified.code === 'rate_limit')))
+          );
+
+          if (isRateLimitedFailure) {
+            recordAccountRateLimited(
+              ctx.paths,
+              ctx.registry,
+              fromAgent,
+              fromAccount,
+              classified?.kind === 'usage_limit' ? (classified.reset_at ?? null) : null,
+              'rate_limited',
+              meta.job_id
+            );
+          } else {
+            refreshAllQuotaSnapshots(ctx.paths, ctx.registry, {
+              agent: fromAgent,
+              account: fromAccount,
+            });
+          }
+
+          const snap = loadQuotaSnapshots(ctx.paths).find(
+            (s) => s.agent === fromAgent && s.account === fromAccount
+          );
+          const triggerHolds =
+            isRateLimitedFailure || snap?.level === 'high' || snap?.level === 'full';
+
+          if (triggerHolds) {
+            const { decision, routingConfig } = decideQuotaRoute(ctx.paths, ctx.registry, {
+              agent: fromAgent,
+              role: agent?.role || 'backend',
+              account: fromAccount,
+              refreshIfStale: false,
+              forceSwitch: true,
+            });
+
+            if (routingConfig.enabled && routingConfig.mode !== 'off') {
+              let lastUserText = '';
+              for (let i = msgs.length - 1; i >= 0; i--) {
+                if (msgs[i]!.role === 'user') {
+                  lastUserText = msgs[i]!.text;
+                  break;
+                }
+              }
+
+              const topWin =
+                snap?.windows && snap.windows.length > 0
+                  ? [...snap.windows].sort((a, b) => b.used_percent - a.used_percent)[0]
+                  : null;
+              const handoffReason = isRateLimitedFailure
+                ? 'rate_limited'
+                : topWin
+                  ? `${topWin.id} ${topWin.used_percent}%`
+                  : snap?.level || 'high';
+              const resetsAt = snap?.cooldown_until ?? topWin?.resets_at ?? decision.resets_at ?? null;
+
+              if (
+                routingConfig.mode === 'auto' &&
+                decision.reason === 'switched' &&
+                (decision.chosen.agent !== fromAgent || decision.chosen.account !== fromAccount)
+              ) {
+                const toAgent = decision.chosen.agent;
+                const toAccount = decision.chosen.account;
+                const handoffLetter = buildLimitHandoffLetter({
+                  from: { agent: fromAgent, account: fromAccount },
+                  reason: handoffReason,
+                  summary: conv.summary,
+                  messages: msgs.filter((m) => m.role === 'user' || m.role === 'assistant'),
+                });
+
+                conv.platform = toAgent;
+                conv.account = toAccount;
+                conv.session++;
+                conv.resume = null;
+
+                conv.seq++;
+                const handoffSysMsg: Message = {
+                  seq: conv.seq,
+                  id: generateMessageId(),
+                  role: 'system',
+                  kind: 'limit_handoff',
+                  state: 'done',
+                  handoff: {
+                    from: { agent: fromAgent, account: fromAccount },
+                    to: { agent: toAgent, account: toAccount },
+                    reason: handoffReason,
+                    quota: decision.quota,
+                    resets_at: resetsAt,
+                    state: 'done',
+                  },
+                  text: `Hết hạn mức ${fromAgent} · ${fromAccount} (${handoffReason}) → chuyển sang ${toAgent} · ${toAccount}, kèm thư bàn giao.`,
+                  ts: new Date().toISOString(),
+                  platform: toAgent,
+                  account: toAccount,
+                  model: conv.model,
+                  effort: conv.effort,
+                  actual_model: '',
+                  job_id: '',
+                  status: 'done',
+                  cost_usd: null,
+                  tokens_in: null,
+                  tokens_out: null,
+                  duration_sec: null,
+                  attachments: [],
+                  handoff_id: '',
+                  steered: false,
+                };
+                appendConversationMessage(chatDir, conv.id, handoffSysMsg);
+
+                if (!Array.isArray(conv.limit_handoffs)) {
+                  conv.limit_handoffs = [];
+                }
+                conv.limit_handoffs.push({
+                  at: new Date().toISOString(),
+                  from: { agent: fromAgent, account: fromAccount },
+                  to: { agent: toAgent, account: toAccount },
+                  reason: handoffReason,
+                  quota: decision.quota,
+                  message_seq: conv.seq,
+                });
+
+                if (statusUpper === 'FAILED' && lastUserText) {
+                  limitHandoffHandledFailure = true;
+                  conv.queue.push({
+                    id: 'q_' + generateMessageId().slice(2, 8),
+                    text: lastUserText,
+                    platform: toAgent,
+                    account: toAccount,
+                    handoff_letter: handoffLetter,
+                    reply_language: conv.reply_language,
+                    ts: new Date().toISOString(),
+                    is_retry: true,
+                  });
+                } else {
+                  conv.pending_next_handoff_letter = handoffLetter;
+                }
+              } else if (
+                routingConfig.mode === 'suggest' &&
+                decision.suggestion &&
+                (decision.suggestion.agent !== fromAgent ||
+                  decision.suggestion.account !== fromAccount)
+              ) {
+                const toAgent = decision.suggestion.agent;
+                const toAccount = decision.suggestion.account;
+
+                conv.seq++;
+                const handoffSysMsg: Message = {
+                  seq: conv.seq,
+                  id: generateMessageId(),
+                  role: 'system',
+                  kind: 'limit_handoff',
+                  state: 'pending',
+                  handoff: {
+                    from: { agent: fromAgent, account: fromAccount },
+                    to: { agent: toAgent, account: toAccount },
+                    reason: handoffReason,
+                    quota: decision.quota,
+                    resets_at: resetsAt,
+                    state: 'pending',
+                  },
+                  text: `Sắp hết hạn mức ${fromAgent} · ${fromAccount} (${handoffReason}) → gợi ý chuyển sang ${toAgent} · ${toAccount}.`,
+                  ts: new Date().toISOString(),
+                  platform: conv.platform,
+                  account: fromAccount,
+                  model: conv.model,
+                  effort: conv.effort,
+                  actual_model: '',
+                  job_id: '',
+                  status: 'done',
+                  cost_usd: null,
+                  tokens_in: null,
+                  tokens_out: null,
+                  duration_sec: null,
+                  attachments: [],
+                  handoff_id: '',
+                  steered: false,
+                };
+                appendConversationMessage(chatDir, conv.id, handoffSysMsg);
+
+                conv.pending_limit_handoff = {
+                  from: { agent: fromAgent, account: fromAccount },
+                  to: { agent: toAgent, account: toAccount },
+                  reason: handoffReason,
+                  quota: decision.quota,
+                  resets_at: resetsAt,
+                  failed_turn_text: statusUpper === 'FAILED' ? lastUserText : undefined,
+                  reply_language: conv.reply_language,
+                  message_seq: conv.seq,
+                };
+                if (statusUpper === 'FAILED') {
+                  limitHandoffHandledFailure = true;
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        // Non-fatal limit handoff error
+      }
+
       // Item 7: Retry policy implementation
-      if (statusUpper === 'FAILED' && agent && agent.retry_policy?.max_attempts) {
+      if (!limitHandoffHandledFailure && statusUpper === 'FAILED' && agent && agent.retry_policy?.max_attempts) {
         const attempts = conv.retry_attempts ?? 0;
         if (attempts < agent.retry_policy.max_attempts) {
           conv.retry_attempts = attempts + 1;
@@ -1346,6 +1565,7 @@ async function runTickCycle(ctx: MawFeatureContext): Promise<void> {
         const jobRes = await ctx.startJob({
           mode: 'task',
           agent: memberAgent.platform,
+          account: h.account || memberAgent.account || undefined,
           role: execRole,
           model: memberAgent.model || undefined,
           effort: memberAgent.effort || undefined,
@@ -1705,6 +1925,11 @@ export async function startTurnJob(
     item.reply_language || conv.reply_language
   );
 
+  const effectiveHandoffLetter = item.handoff_letter || conv.pending_next_handoff_letter || undefined;
+  if (conv.pending_next_handoff_letter) {
+    delete conv.pending_next_handoff_letter;
+  }
+
   const promptText = buildPrompt({
     agent: {
       name: agent.name,
@@ -1723,6 +1948,7 @@ export async function startTurnJob(
     teamMembers,
     attachmentLines: (item.attachments ?? []).map((a) => `Attached image: ${a.path || a.name}`),
     replyLanguage: effectiveReplyLang,
+    handoffLetter: effectiveHandoffLetter,
   });
 
   // Item 1 (Codex Pass 6): If final buildPrompt result exceeds 17000, abort before starting job
@@ -1746,12 +1972,15 @@ export async function startTurnJob(
 
   // Item 4: new_session helper
   const newSession = isResuming ? false : newSessionFor(ctx, targetPlatform);
+  const targetAccount =
+    String(item.account ?? conv.account ?? agent.account ?? '').trim().toLowerCase() || undefined;
 
   let jobRes: Record<string, unknown>;
   try {
     jobRes = await ctx.startJob({
       mode: 'chat',
       agent: targetPlatform,
+      account: targetAccount,
       role: agent.role || 'backend',
       model: targetModel || undefined,
       effort: targetEffort || undefined,
@@ -1775,6 +2004,7 @@ export async function startTurnJob(
       text: item.text,
       ts: new Date().toISOString(),
       platform: targetPlatform,
+      account: targetAccount || 'default',
       model: targetModel,
       effort: targetEffort,
       actual_model: '',
@@ -1794,6 +2024,8 @@ export async function startTurnJob(
   }
 
   const jobId = String(jobRes.job_id ?? '');
+  const resolvedPlatform = String(jobRes.agent || targetPlatform).toLowerCase();
+  const resolvedAccount = String(jobRes.account || targetAccount || 'default').toLowerCase();
 
   // Item 2: User message becomes 'done' once job has started
   conv.seq++;
@@ -1803,7 +2035,8 @@ export async function startTurnJob(
     role: 'user',
     text: item.text,
     ts: new Date().toISOString(),
-    platform: targetPlatform,
+    platform: resolvedPlatform,
+    account: resolvedAccount,
     model: targetModel,
     effort: targetEffort,
     actual_model: '',
@@ -1823,7 +2056,8 @@ export async function startTurnJob(
   conv.active_job_id = jobId;
   conv.active_kind = 'turn';
   conv.active_started_at = new Date().toISOString();
-  conv.platform = targetPlatform;
+  conv.platform = resolvedPlatform;
+  conv.account = resolvedAccount;
   conv.model = targetModel;
   conv.effort = targetEffort;
   conv.reply_language = effectiveReplyLang;

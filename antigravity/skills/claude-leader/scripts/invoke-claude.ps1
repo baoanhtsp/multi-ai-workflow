@@ -18,7 +18,9 @@ param(
 
     [string]$EffortOverride = "",
 
-    [string]$ResumeId = ""
+    [string]$ResumeId = "",
+
+    [string]$Account = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,6 +29,19 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 
 . (Join-Path $PSScriptRoot "lib\maw-common.ps1")
+
+$effAccInput = if ($Account -and $Account.Trim()) {
+    $Account.Trim()
+} elseif ($env:MAW_ACCOUNT -and $env:MAW_ACCOUNT.Trim()) {
+    $env:MAW_ACCOUNT.Trim()
+} else {
+    ""
+}
+$accRes = Resolve-MawAccountEnv -AgentId "claude" -AccountId $effAccInput -Adapter "claude"
+if (-not $accRes.Ok) {
+    Write-Output $accRes.Error
+    exit 1
+}
 
 # Auto-sync Antigravity CSRF token & LS address to bridge file for 2-way communication
 if ($env:ANTIGRAVITY_CSRF_TOKEN -and $env:ANTIGRAVITY_LS_ADDRESS) {
@@ -221,7 +236,14 @@ try {
     $realCostUsd   = 0.0
     $emittedSessionId = $false
 
-    $Prompt | & $claudeExe @allArgs 2>&1 | ForEach-Object {
+    $prevClaudeConfigDir = $env:CLAUDE_CONFIG_DIR
+    $prevMawAccount      = $env:MAW_ACCOUNT
+    if ($accRes.Env.ContainsKey("CLAUDE_CONFIG_DIR")) {
+        $env:CLAUDE_CONFIG_DIR = [string]$accRes.Env["CLAUDE_CONFIG_DIR"]
+    }
+    $env:MAW_ACCOUNT = $accRes.AccountId
+    try {
+        $Prompt | & $claudeExe @allArgs 2>&1 | ForEach-Object {
         $rawLine = $_.ToString()
         if (-not $rawLine.Trim().StartsWith("{")) {
             Write-Output $rawLine
@@ -274,6 +296,10 @@ try {
             Write-Output $rawLine
         }
     }
+    } finally {
+        if ($null -eq $prevClaudeConfigDir) { Remove-Item Env:\CLAUDE_CONFIG_DIR -ErrorAction SilentlyContinue } else { $env:CLAUDE_CONFIG_DIR = $prevClaudeConfigDir }
+        if ($null -eq $prevMawAccount)      { Remove-Item Env:\MAW_ACCOUNT       -ErrorAction SilentlyContinue } else { $env:MAW_ACCOUNT       = $prevMawAccount }
+    }
 
     try {
         $fullOut = ($capturedText -join "`n")
@@ -295,6 +321,7 @@ try {
         $auditEntry = [ordered]@{
             Timestamp    = (Get-Date).ToString("o")
             Tool         = "claude"
+            Account      = $accRes.AccountId
             Role         = $effectiveRole
             Model        = $resolvedModel
             Effort       = $effort

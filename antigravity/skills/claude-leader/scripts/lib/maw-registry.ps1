@@ -206,6 +206,32 @@ function ConvertTo-ValidatedAgentEntry {
             }
         }
 
+        $rawAccountEnv = & $getCliProp $rawCli "account_env"
+        $cliAccountEnv = $null
+        if ($null -ne $rawAccountEnv) {
+            $aeMap = @{}
+            if ($rawAccountEnv -is [hashtable]) {
+                foreach ($ak in $rawAccountEnv.Keys) {
+                    $kTrim = ([string]$ak).Trim()
+                    $vTrim = ([string]$rawAccountEnv[$ak]).Trim()
+                    if ($kTrim -match '^[A-Za-z_][A-Za-z0-9_]{0,63}$' -and $vTrim) {
+                        $aeMap[$kTrim] = $vTrim
+                    }
+                }
+            } elseif ($rawAccountEnv -is [psobject]) {
+                foreach ($ap in $rawAccountEnv.PSObject.Properties) {
+                    $kTrim = ([string]$ap.Name).Trim()
+                    $vTrim = ([string]$ap.Value).Trim()
+                    if ($kTrim -match '^[A-Za-z_][A-Za-z0-9_]{0,63}$' -and $vTrim) {
+                        $aeMap[$kTrim] = $vTrim
+                    }
+                }
+            }
+            if ($aeMap.Count -gt 0) {
+                $cliAccountEnv = $aeMap
+            }
+        }
+
         $cliOutput = ([string](& $getCliProp $rawCli "output")).Trim().ToLowerInvariant()
         if (-not $cliOutput) { $cliOutput = "text" }
         if ($cliOutput -notin @("text", "gemini-json")) {
@@ -240,6 +266,7 @@ function ConvertTo-ValidatedAgentEntry {
             model_args    = [string[]]$modelArgs
             effort_args   = [string[]]$effortArgs
             resume_args   = $cliResumeArgs
+            account_env   = $cliAccountEnv
             output        = $cliOutput
             max_arg_chars = $maxArgChars
             pricing       = [PSCustomObject]@{

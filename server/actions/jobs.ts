@@ -2,11 +2,23 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { gitRun } from '../features/checkpoints/snapshot.ts';
+import { resolveAccountExecutionEnv } from '../features/accounts/store.ts';
+import { syncAttentionToInbox } from '../features/policy/lib/inbox-bridge.ts';
 import {
+  appendS4Audit,
+  classifyFailure,
   extractProjectEnvSecrets,
   loadPolicyConfig,
+  readJsonSafe,
   redactSecrets,
+  writeJsonAtomic,
 } from '../features/policy/lib/s4-core.ts';
+import {
+  decideQuotaRoute,
+  recordAccountRateLimited,
+  refreshAllQuotaSnapshots,
+  type QuotaRouteDecision,
+} from '../features/quota/store.ts';
 import { prepareIsolatedJob } from '../features/worktrees/isolate.ts';
 import {
   loadWorktreesStore,
@@ -15,7 +27,7 @@ import {
   type WorktreeRecord,
 } from '../features/worktrees/store.ts';
 import { buildCommandSpec, psq } from '../lib/commands.ts';
-import type { MawFeatureContext } from '../lib/feature.ts';
+import { createFeatureContext, type MawFeatureContext } from '../lib/feature.ts';
 import {
   isDirectorySafe,
   isFileSafe,
@@ -53,6 +65,8 @@ export interface JobMeta {
   projects_root?: string;
   mode: string;
   agent?: string;
+  account?: string;
+  routing?: QuotaRouteDecision;
   role: string;
   model?: string;
   effort?: string;
@@ -213,10 +227,53 @@ function parseTerminalMarker(
   return null;
 }
 
+async function onJobTransitionedFromRunning(
+  meta: JobMeta,
+  logFile: string,
+  paths?: ServerPaths
+): Promise<void> {
+  if (!paths) return;
+  const mode = String(meta.mode ?? '').toLowerCase();
+  const isSingleAgent =
+    mode === 'task' ||
+    mode === 'chat' ||
+    mode === 'claude' ||
+    mode === 'codex' ||
+    mode === 'antigravity';
+  if (!isSingleAgent) return;
+  const agent = String(meta.agent || meta.mode || '').toLowerCase();
+  if (!agent) return;
+  const account = String(meta.account || 'default').toLowerCase() || 'default';
+  try {
+    const registry = loadAgentRegistry(paths);
+    if (meta.status === 'FAILED') {
+      const logTail = readLogTail(logFile, 65536);
+      const classified = classifyFailure(logTail, meta.exit_code ?? 1);
+      if (
+        classified.kind === 'usage_limit' ||
+        (classified.kind === 'transient' &&
+          (classified.code === '429' || classified.code === 'rate_limit'))
+      ) {
+        recordAccountRateLimited(
+          paths,
+          registry,
+          agent,
+          account,
+          classified.kind === 'usage_limit' ? classified.reset_at : null
+        );
+        return;
+      }
+    }
+    await refreshAllQuotaSnapshots(paths, registry, { agent, account });
+  } catch {
+    // Non-fatal quota refresh error
+  }
+}
+
 export async function refreshJobMetaStatus(
   meta: JobMeta,
   jobsDir: string,
-  options?: { checkPid?: boolean }
+  options?: { checkPid?: boolean; paths?: ServerPaths }
 ): Promise<JobMeta> {
   const jobId = String(meta.job_id ?? '');
   const logFile = path.win32.join(jobsDir, `${jobId}.log`);
@@ -248,6 +305,7 @@ export async function refreshJobMetaStatus(
     } catch {
       // Ignore write error
     }
+    await onJobTransitionedFromRunning(meta, logFile, options?.paths);
     return meta;
   }
 
@@ -289,6 +347,7 @@ export async function refreshJobMetaStatus(
     } catch {
       // Ignore write error
     }
+    await onJobTransitionedFromRunning(meta, logFile, options?.paths);
     return meta;
   }
 
@@ -315,6 +374,7 @@ export async function refreshJobMetaStatus(
     } catch {
       // Ignore write error
     }
+    await onJobTransitionedFromRunning(meta, logFile, options?.paths);
     return meta;
   }
 
@@ -389,6 +449,7 @@ export async function getRecentJobs(
       job_id: meta.job_id ?? '',
       mode: meta.mode ?? '',
       agent: meta.agent ?? meta.mode ?? '',
+      account: meta.account || 'default',
       role: meta.role ?? '',
       project_path: meta.project_path ?? '',
       project_name: path.basename(String(meta.project_path ?? '')),
@@ -397,6 +458,9 @@ export async function getRecentJobs(
       started_at: meta.started_at ?? '',
       pid: meta.pid ?? null,
     };
+    if (meta.routing !== undefined) {
+      row.routing = meta.routing;
+    }
     if (meta.team && typeof meta.team === 'object' && !Array.isArray(meta.team)) {
       row.team = meta.team;
     }
@@ -682,6 +746,59 @@ export async function handleRunJob(
   paths: ServerPaths
 ): Promise<Record<string, unknown>> {
   const info = buildValidatedCommand(body, paths);
+  const registry = loadAgentRegistry(paths);
+
+  const isSingleAgentMode =
+    info.mode === 'task' ||
+    info.mode === 'chat' ||
+    info.mode === 'claude' ||
+    info.mode === 'codex' ||
+    info.mode === 'antigravity';
+
+  let initialTargetAgent =
+    info.mode === 'claude' || info.mode === 'codex' || info.mode === 'antigravity'
+      ? info.mode
+      : info.agent;
+
+  // Validate explicit non-default account immediately before routing or spawning
+  if (info.account && info.account !== 'default') {
+    resolveAccountExecutionEnv(paths, registry, initialTargetAgent || info.agent, info.account);
+  }
+
+  let quotaDecision: QuotaRouteDecision | undefined;
+  if (isSingleAgentMode && initialTargetAgent) {
+    quotaDecision = decideQuotaRoute(paths, registry, {
+      agent: initialTargetAgent,
+      role: info.role || 'backend',
+      account: info.account || 'default',
+    }).decision;
+    if (quotaDecision.reason === 'switched') {
+      const prevAgent = initialTargetAgent;
+      const prevAccount = info.account || 'default';
+      initialTargetAgent = quotaDecision.chosen.agent;
+      info.agent = initialTargetAgent;
+      info.account = quotaDecision.chosen.account;
+      if (
+        (info.mode === 'claude' || info.mode === 'codex' || info.mode === 'antigravity') &&
+        info.mode !== initialTargetAgent
+      ) {
+        info.mode = 'task';
+      }
+      if (prevAgent !== initialTargetAgent) {
+        info.model = '';
+        info.effort = '';
+      }
+      const rebuilt = buildCommandSpec(info, paths.scriptsDir);
+      info.command = rebuilt.preview;
+      appendS4Audit(paths.featureDataDir('quota'), 'quota_route_switch', {
+        from: { agent: prevAgent, account: prevAccount },
+        to: quotaDecision.chosen,
+      });
+    } else if (quotaDecision.chosen?.account) {
+      info.account = quotaDecision.chosen.account;
+    }
+  }
+
   const {
     mode,
     agent,
@@ -693,8 +810,8 @@ export async function handleRunJob(
     project_path: validatedProjectPath,
     prompt,
   } = info;
+  const effectiveAccount = info.account || 'default';
 
-  const registry = loadAgentRegistry(paths);
   const effectiveReviewers =
     mode === 'council' || mode === 'auto-gate'
       ? info.reviewers && info.reviewers.length > 0
@@ -754,9 +871,102 @@ export async function handleRunJob(
     }
   }
 
+  let accountEnv: Record<string, string> = {};
+  if (isSingleAgentMode && initialTargetAgent) {
+    const resolvedAcc = resolveAccountExecutionEnv(
+      paths,
+      registry,
+      initialTargetAgent,
+      effectiveAccount
+    );
+    accountEnv = {
+      ...resolvedAcc.env,
+      MAW_ACCOUNT: resolvedAcc.account.id,
+    };
+  }
+
   const jobsDir = paths.jobsDir;
   if (!isDirectorySafe(jobsDir)) {
     fs.mkdirSync(jobsDir, { recursive: true });
+  }
+
+  // §3.2: when_all_full === 'wait' (and mode === 'auto') -> queue a waiting recovery item and do not launch a doomed call
+  if (quotaDecision && quotaDecision.reason === 'waiting') {
+    const now = new Date();
+    const nowSecWait = Math.floor(now.getTime() / 1000);
+    const waitJobId = `job_${formatJobTimestamp(now)}_${crypto.randomBytes(3).toString('hex')}`;
+    const promptFile = path.win32.join(jobsDir, `${waitJobId}.prompt.txt`);
+    const logFile = path.win32.join(jobsDir, `${waitJobId}.log`);
+    const metaFile = path.win32.join(jobsDir, `${waitJobId}.json`);
+    fs.writeFileSync(promptFile, '\uFEFF' + (prompt ?? ''), 'utf8');
+    fs.writeFileSync(
+      logFile,
+      `\uFEFF=== [MISSION CONTROL JOB ${waitJobId}] ===\n` +
+        `Mode: ${mode.toUpperCase()} | Agent: ${initialTargetAgent} | Account: ${effectiveAccount} | Role: ${role}\n` +
+        `Status: WAITING_QUOTA until ${quotaDecision.resets_at ?? 'reset'}\n`,
+      'utf8'
+    );
+    const waitMeta: JobMeta = {
+      job_id: waitJobId,
+      pid: 0,
+      server_id: `${process.pid}@${process.env.MAW_PORT || '4317'}`,
+      projects_root: paths.projectsRoot,
+      mode,
+      agent: initialTargetAgent,
+      account: effectiveAccount,
+      routing: quotaDecision,
+      role,
+      model: modelOverride,
+      effort: effortOverride,
+      new_session: newSession,
+      project_path: validatedProjectPath,
+      command: info.command,
+      status: 'WAITING_QUOTA',
+      exit_code: null,
+      started_at: now.toISOString(),
+      started_ts: nowSecWait,
+    };
+    fs.writeFileSync(metaFile, JSON.stringify(waitMeta), 'utf8');
+
+    const fallbackDir = paths.featureDataDir('fallback');
+    const recFile = path.win32.join(fallbackDir, 'recovery.json');
+    const recData = readJsonSafe<{ processed_jobs: string[]; items: Array<Record<string, unknown>> }>(
+      recFile,
+      { processed_jobs: [], items: [] }
+    ).data;
+    recData.items.unshift({
+      id: `rec_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+      root_job_id: waitJobId,
+      source_job_id: waitJobId,
+      kind: 'usage_limit',
+      agent: initialTargetAgent,
+      role: role || 'backend',
+      fallback_agent: null,
+      attempt: 1,
+      status: 'waiting',
+      next_at: quotaDecision.resets_at || new Date(Date.now() + 300_000).toISOString(),
+      reason: 'All quota candidates full; waiting for earliest quota reset',
+      created_at: now.toISOString(),
+      new_job_id: null,
+      error: null,
+    });
+    writeJsonAtomic(recFile, recData);
+    syncAttentionToInbox(createFeatureContext(paths)).catch(() => {});
+
+    return {
+      ok: true,
+      job_id: waitJobId,
+      pid: 0,
+      mode,
+      agent: initialTargetAgent,
+      account: effectiveAccount,
+      role,
+      status: 'WAITING_QUOTA',
+      waiting: true,
+      resets_at: quotaDecision.resets_at ?? null,
+      routing: quotaDecision,
+      command: info.command,
+    };
   }
 
   // Cleanup old completed job files (> 7200s old)
@@ -827,6 +1037,8 @@ export async function handleRunJob(
   const metaDraft: Partial<JobMeta> & { project_path: string } = {
     mode,
     agent,
+    account: effectiveAccount,
+    ...(quotaDecision ? { routing: quotaDecision } : {}),
     role,
     model: modelOverride,
     effort: effortOverride,
@@ -895,7 +1107,7 @@ export async function handleRunJob(
       commandLine: ({ promptFile }) => buildCommandSpec(info, paths.scriptsDir, promptFile).preview,
       prompt,
       paths,
-      env: info.env,
+      env: { ...(info.env || {}), ...accountEnv },
       cliArgs: info.cli_args,
       worktreePort: isolatedWorktree?.port,
     });
@@ -938,10 +1150,14 @@ export async function handleRunJob(
     pid: launched.pid,
     mode,
     agent,
+    account: effectiveAccount,
     role,
     status: 'RUNNING',
     command: launched.command,
   };
+  if (quotaDecision) {
+    runResp.routing = quotaDecision;
+  }
   if (teamArray) {
     runResp.team = teamArray;
   }
@@ -1024,7 +1240,7 @@ export async function handleJobStatus(
   } catch {
     throw new ApiValidationError(`Job not found: ${jobId}`, 404);
   }
-  meta = await refreshJobMetaStatus(meta, paths.jobsDir);
+  meta = await refreshJobMetaStatus(meta, paths.jobsDir, { paths });
 
   const { chunk, nextOffset, fullSize } = readSafeLogSlice(logFile, offset, 131072);
   const redactedChunk = redactJobLogChunk(chunk, paths, meta.project_path);
@@ -1039,6 +1255,7 @@ export async function handleJobStatus(
     pid: meta.pid ?? 0,
     mode: meta.mode ?? '',
     agent: meta.agent ?? meta.mode ?? '',
+    account: meta.account || 'default',
     role: meta.role ?? '',
     project_path: meta.project_path ?? '',
     elapsed_sec: elapsed,
@@ -1046,6 +1263,9 @@ export async function handleJobStatus(
     next_offset: nextOffset,
     full_log_size: fullSize,
   };
+  if (meta.routing !== undefined) {
+    statusResp.routing = meta.routing;
+  }
   if (meta.team && typeof meta.team === 'object' && !Array.isArray(meta.team)) {
     statusResp.team = meta.team;
   }

@@ -225,6 +225,7 @@ export const feature: MawFeature = {
 
         const jobId = await startCardJob(ctx, task, {
           ignoreLimits: Boolean(req.body.ignore_limits),
+          account: req.body.account ? String(req.body.account).trim().toLowerCase() : undefined,
         });
         triggerImmediateTick(ctx);
         return {
