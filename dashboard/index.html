@@ -83,13 +83,15 @@
   .topbar { position: sticky; top: 0; z-index: 20; background: var(--surface); border-bottom: 1px solid var(--border); }
   /* Header: brand | project | (space) | tools. Narrow screens move the project picker to its own row. */
   .topbar .wrap {
-    display: grid; grid-template-columns: auto minmax(0, 340px) minmax(0, 1fr) auto; grid-template-areas: "brand proj . tools";
+    display: grid; grid-template-columns: auto minmax(0, 320px) auto minmax(0, 1fr); grid-template-areas: "brand proj views tools";
     align-items: center; gap: 10px 18px; min-height: 56px; padding-top: 10px; padding-bottom: 10px;
   }
   .brand { grid-area: brand; min-width: 0; }
   .brand h1 { font-size: 15px; white-space: nowrap; }
   .proj-pick { grid-area: proj; }
-  .tools { grid-area: tools; display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+  .tools { grid-area: tools; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+  #viewNav { grid-area: views; justify-self: start; }
+  #viewNav button { white-space: nowrap; }
   .tools .sep { width: 1px; height: 20px; background: var(--border); margin: 0 2px; flex: none; }
   .tools .pill { max-width: 280px; }
   .btn-group { display: inline-flex; flex: none; }
@@ -102,10 +104,11 @@
   .prefs { display: flex; gap: 6px; flex: none; }
   @media (max-width: 1180px) {
     .proj-pop { width: 100%; max-width: none; }
-    .topbar .wrap { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "brand tools" "proj proj"; }
+    .topbar .wrap { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "brand tools" "proj views"; }
   }
   @media (max-width: 640px) {
-    .topbar .wrap { grid-template-columns: minmax(0, 1fr); grid-template-areas: "brand" "tools" "proj"; }
+    .topbar .wrap { grid-template-columns: minmax(0, 1fr); grid-template-areas: "brand" "tools" "views" "proj"; }
+    #viewNav { justify-self: stretch; display: flex; } #viewNav button { flex: 1; }
     .tools { justify-content: flex-start; flex-wrap: wrap; }
     .tools .sep { display: none; }
   }
@@ -312,7 +315,14 @@
   [data-skin="neon"] .slot.off { opacity: .4; }
   [data-skin="neon"] .slot { overflow: visible; }
 
-  /* tabs */
+  /* tabs (grouped: one row of groups, then the tabs of the selected group) */
+  .tab-groups { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px 12px 0; }
+  .tab-groups:empty { display: none; }
+  .tab-groups button { display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px; font-size: 12.5px; font-weight: 600; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; cursor: pointer; }
+  .tab-groups button:hover { color: var(--text); }
+  .tab-groups button[aria-pressed="true"] { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
+  .tab-groups button .count { background: rgba(0, 0, 0, .12); color: inherit; }
+  .tabs [data-tab].grp-hidden { display: none; }
   .tabs { display: flex; gap: 2px; padding: 0 12px; border-bottom: 1px solid var(--border); overflow-x: auto; }
   .tabs button { border: 0; background: none; padding: 11px 10px 9px; font-size: 13px; font-weight: 500; color: var(--muted); border-bottom: 2px solid transparent; cursor: pointer; white-space: nowrap; }
   .tabs button:hover { color: var(--text); }
@@ -568,8 +578,8 @@
         </div>
       </div>
     </div>
+    <div id="viewNav" class="seg hidden" role="tablist" aria-label="Views"></div>
     <div class="tools">
-      <div id="viewNav" class="seg hidden" role="tablist" aria-label="Views"></div>
       <span id="featHeader" class="row-wrap"></span>
       <span id="modeBadge" class="pill warn hidden" data-i18n="demoBadge"></span>
       <button id="fxMotionBtn" type="button" class="pill warn hidden" style="cursor:pointer" data-i18n="fxMotion" data-i18n-title="fxMotionTip"></button>
@@ -742,6 +752,7 @@
 
   <!-- TABS: history, sessions, stats, notifications -->
   <section class="card" id="tabsCard">
+    <div class="tab-groups" id="tabGroups" role="tablist" aria-label="Tab groups"></div>
     <div class="tabs" role="tablist">
       <button type="button" role="tab" data-tab="audit"><span data-i18n="auditTitle"></span> <span id="auditCount" class="count"></span></button>
       <button type="button" role="tab" data-tab="sessions"><span data-i18n="sessTitle"></span> <span id="sessCount" class="count"></span></button>
@@ -883,6 +894,7 @@ const I18N = {
     agentsTitle: 'Agent',
     agentsReady: 'AI sẵn sàng {n}/{total}',
     viewDashboard: 'Bảng điều khiển',
+    tabGroup_activity: 'Hoạt động', tabGroup_code: 'Mã nguồn', tabGroup_cost: 'Chi phí & chất lượng', tabGroup_system: 'Hệ thống', tabGroup_other: 'Khác',
     bridgeOn: 'Bridge trực tuyến', bridgeOff: 'Bridge ngoại tuyến',
     agentStatusBtn: 'Trạng thái', agentWaitBtn: 'Chờ kết quả',
     cliAgent: 'Agent dòng lệnh (CLI) khai báo trong registry',
@@ -1123,6 +1135,7 @@ const I18N = {
     agentsTitle: 'Agents',
     agentsReady: 'AI ready {n}/{total}',
     viewDashboard: 'Dashboard',
+    tabGroup_activity: 'Activity', tabGroup_code: 'Code', tabGroup_cost: 'Cost & quality', tabGroup_system: 'System', tabGroup_other: 'Other',
     bridgeOn: 'Bridge online', bridgeOff: 'Bridge offline',
     agentStatusBtn: 'Status', agentWaitBtn: 'Wait for result',
     cliAgent: 'Command-line (CLI) agent from the registry',
@@ -1618,6 +1631,8 @@ function render() {
   ensureGit();
   loadFeatureUis(d);
   emit('data', d);
+  renderJobActions();
+  renderTabGroups();
   if (!state.job && !state.adopted) {
     state.adopted = true;
     const rj = (d.jobs || []).find(j => j.status === 'RUNNING');
@@ -1823,6 +1838,7 @@ $('projList').addEventListener('mousemove', e => {
 document.addEventListener('mousedown', e => { if (proj.open && !e.target.closest('#projPick')) closeProjPop(false); });
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+    if (window.MAW?.palette) return; // the command palette includes project switching
     e.preventDefault();
     proj.open ? closeProjPop(true) : openProjPop();
   }
@@ -1945,7 +1961,8 @@ function renderAgentsCard(d) {
     </div>`;
   }).join('');
 
-  // Header: one compact readiness pill instead of a single vendor's bridge.
+  // Header: one compact readiness pill. The health feature (S3) shows a richer one (login state included).
+  $('agentsBadge').classList.toggle('hidden', (d.features || []).includes('health'));
   $('agentsDot').className = 'dot ' + (ready ? 'ok' : 'err');
   $('agentsBadgeText').textContent = t('agentsReady', { n: ready, total: ids.length });
   $('agentsBadge').title = ids.map(id => `${agentLabel(id)}: ${AGENTS[id].installed ? (AGENTS[id].version || t('agentInstalled')) : t('agentMissing')}`).join('\n')
@@ -2365,16 +2382,53 @@ $('guideBtn').onclick = () => {
   $('guideBtn').setAttribute('aria-expanded', String(!hidden));
 };
 
-// ---------- Tabs (remembered per browser) ----------
-function selectTab(name) {
-  // Only the top-level tabs / panels: feature panels may contain their own [data-tab] / [data-panel] widgets.
-  document.querySelectorAll('#tabsCard > .tabs > [data-tab]').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
-  document.querySelectorAll('#tabsCard > [data-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
-  store.set('maw_tab', name);
+// ---------- Tabs (remembered per browser), grouped so 16+ feature tabs stay readable ----------
+const TAB_GROUPS = [
+  { id: 'activity', tabs: ['audit', 'inbox', 'timeline', 'sessions'] },
+  { id: 'code', tabs: ['review', 'files', 'checkpoints', 'worktrees', 'checks'] },
+  { id: 'cost', tabs: ['budget', 'scoreboard', 'policy', 'stats'] },
+  { id: 'system', tabs: ['health', 'mcp', 'notify'] }
+];
+const tabGroupOf = id => (TAB_GROUPS.find(g => g.tabs.includes(id)) || { id: 'other' }).id;
+const topTabs = () => [...document.querySelectorAll('#tabsCard > .tabs > [data-tab]')];
+let currentTabGroup = null;
+function renderTabGroups() {
+  const tabs = topTabs().filter(b => !b.classList.contains('hidden'));
+  const present = [...TAB_GROUPS.map(g => g.id), 'other'].filter(g => tabs.some(b => tabGroupOf(b.dataset.tab) === g));
+  const box = $('tabGroups');
+  // A single group needs no group row.
+  if (present.length < 2) { box.innerHTML = ''; tabs.forEach(b => b.classList.remove('grp-hidden')); return; }
+  if (!present.includes(currentTabGroup)) currentTabGroup = present[0];
+  box.innerHTML = present.map(g => {
+    // Sum the counters of the group's tabs (e.g. inbox items) so attention stays visible from any group.
+    const n = tabs.filter(b => tabGroupOf(b.dataset.tab) === g).reduce((a, b) => a + (parseInt(b.querySelector('.count')?.textContent || '0', 10) || 0), 0);
+    return `<button type="button" data-group="${g}" aria-pressed="${g === currentTabGroup}">${esc(t('tabGroup_' + g))}<span class="count">${n ? (n > 99 ? '99+' : n) : ''}</span></button>`;
+  }).join('');
+  tabs.forEach(b => b.classList.toggle('grp-hidden', tabGroupOf(b.dataset.tab) !== currentTabGroup));
 }
+function selectTab(name, persist = true) {
+  // Only the top-level tabs / panels: feature panels may contain their own [data-tab] / [data-panel] widgets.
+  topTabs().forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+  document.querySelectorAll('#tabsCard > [data-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.panel !== name));
+  currentTabGroup = tabGroupOf(name);
+  renderTabGroups();
+  if (persist) store.set('maw_tab', name);
+}
+$('tabGroups').addEventListener('click', e => {
+  const g = e.target.closest('[data-group]');
+  if (!g) return;
+  currentTabGroup = g.dataset.group;
+  const first = topTabs().find(b => !b.classList.contains('hidden') && tabGroupOf(b.dataset.tab) === currentTabGroup);
+  if (first) selectTab(first.dataset.tab); else renderTabGroups();
+});
 // Delegated, so tabs added later by feature plugins work too.
 document.querySelector('#tabsCard > .tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) selectTab(b.dataset.tab); });
-selectTab(['audit', 'sessions', 'stats', 'notify'].includes(store.get('maw_tab')) ? store.get('maw_tab') : 'audit');
+// A stored feature tab is restored by MAW.addTab once its script loads, so keep it in storage meanwhile.
+{
+  const stored = store.get('maw_tab');
+  const builtin = ['audit', 'sessions', 'stats', 'notify'].includes(stored);
+  selectTab(builtin ? stored : 'audit', builtin);
+}
 
 // ---------- Feature plugins (SPEC §9.0) ----------
 // Each server feature may ship `dashboard/feat-<name>.js`; it talks to the page only through window.MAW.
@@ -2412,8 +2466,8 @@ window.MAW = {
     };
     MAW.on('data', paint); MAW.on('lang', paint);
     if (state.data) paint();
-    if (store.get('maw_tab') === id) selectTab(id);
-    return { button: btn, panel, setCount: n => { btn.lastElementChild.textContent = n || ''; } };
+    if (store.get('maw_tab') === id) selectTab(id); else renderTabGroups();
+    return { button: btn, panel, setCount: n => { btn.lastElementChild.textContent = n || ''; renderTabGroups(); } };
   },
   // Buttons on the live job header, e.g. "Rollback", "Retry with…", "Steer".
   addJobAction(a) { MAW_JOB_ACTIONS.push(a); renderJobHead(); },
@@ -2434,6 +2488,20 @@ window.MAW = {
     return el;
   },
   showView: id => showView(id),
+  // Attach the live job box to an existing job (a run_job response or a job id): log, SSE, cancel, actions.
+  openJob: x => openJob(x),
+  watchJob: x => openJob(x),
+  followJob: x => openJob(x),
+  refreshJobHead: () => renderJobHead(),
+  selectProject(path) {
+    const sel = $('projectSel');
+    if (![...sel.options].some(o => o.value === path)) return false;
+    if (sel.value !== path) { sel.value = path; sel.dispatchEvent(new Event('change')); }
+    return true;
+  },
+  emit: (ev, data) => emit(ev, data),
+  // Feature UIs expose functions to each other here: MAW.ext.<feature>.<fn> (e.g. MAW.ext.review.open).
+  ext: window.MAW?.ext || {},
   // Starts a job exactly like the Run button (same checks, same live log).
   runJob: body => runJob(body),
 };
@@ -2600,9 +2668,9 @@ function startJobStream(j) {
   };
 }
 
-function startJob(r) {
+function startJob(r, opts = {}) {
   stopJobPoll();
-  state.job = { id: r.job_id, pid: r.pid || 0, status: 'RUNNING', exitCode: undefined, offset: 0, elapsed: 0, timer: null, es: null, busy: false, fails: 0 };
+  state.job = { id: r.job_id, pid: r.pid || 0, status: 'RUNNING', exitCode: undefined, offset: 0, elapsed: 0, timer: null, es: null, busy: false, fails: 0, quiet: !!opts.quiet };
   $('liveJobBox').classList.remove('hidden');
   $('liveJobLog').textContent = '';
   $('cancelJobBtn').disabled = false;
@@ -2648,9 +2716,23 @@ function finishJob(j) {
   stopJobPoll();
   emit('job-end', { id: j.id, status: j.status, exit_code: j.exitCode });
   setRunBusy(false);
-  toast(t('jobEnded', { status: j.status }), j.status === 'DONE' ? 'ok' : j.status === 'CANCELLED' ? 'warn' : 'err');
-  if (FX.on) { j.status === 'DONE' && !j.exitCode ? FX.burst($('runWebBtn')) : j.status === 'FAILED' && FX.shake($('liveJobBox')); }
+  // With the inbox feature a failed job already becomes an attention item (with its own toast).
+  const inbox = (state.data?.features || []).includes('inbox');
+  if (!j.quiet && !(inbox && j.status === 'FAILED')) toast(t('jobEnded', { status: j.status }), j.status === 'DONE' ? 'ok' : j.status === 'CANCELLED' ? 'warn' : 'err');
+  if (FX.on && !j.quiet) { j.status === 'DONE' && !j.exitCode ? FX.burst($('runWebBtn')) : j.status === 'FAILED' && FX.shake($('liveJobBox')); }
   load();
+}
+
+// Opens an existing job in the live box. A job that already ended replays its log quietly (no toast).
+async function openJob(x) {
+  const id = typeof x === 'string' ? x : x?.job_id;
+  if (!id || !/^job_[A-Za-z0-9_]+$/.test(id)) return false;
+  if (state.job?.id === id && state.job.status === 'RUNNING') { $('liveJobBox').scrollIntoView({ behavior: 'smooth', block: 'nearest' }); return true; }
+  let running = true;
+  try { const s = await api('job_status&job_id=' + encodeURIComponent(id) + '&offset=0'); running = s.status === 'RUNNING'; } catch { /* still try to stream */ }
+  startJob({ job_id: id, pid: x?.pid || 0 }, { quiet: !running });
+  $('liveJobBox').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  return true;
 }
 
 async function runJob(body) {
