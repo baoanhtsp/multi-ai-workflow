@@ -1,0 +1,63 @@
+/* S5 / V9 — files panel (also embedded by the S6 workspace). Theme tokens only. */
+.feature-panel > .fl-root, .feature-panel.fl-root { padding: 14px 16px; }
+.fl-root { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 8px; min-height: 420px; }
+.fl-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fl-bar .fl-q { flex: 1 1 180px; width: auto; }
+.fl-tabs { justify-self: start; }
+.fl-body { display: grid; grid-template-columns: minmax(200px, 300px) minmax(0, 1fr); gap: 10px; min-height: 0; height: min(62vh, 640px); }
+.fl-tree, .fl-view { min-height: 0; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.fl-tree { padding: 4px; outline: none; }
+.fl-row { display: flex; align-items: center; gap: 5px; padding: 3px 6px 3px calc(6px + var(--d, 0) * 14px); border-radius: 5px; font-size: 12.5px; cursor: pointer; user-select: none; outline: none; min-width: 0; }
+.fl-row:hover { background: var(--hover); }
+.fl-row:focus-visible { box-shadow: var(--focus); }
+.fl-row.is-sel { background: var(--accent-soft); color: var(--text); }
+.fl-row.is-del .fl-name { text-decoration: line-through; color: var(--faint); }
+.fl-row.fl-load, .fl-row.sub { cursor: default; color: var(--faint); }
+.fl-chev { width: 10px; flex: none; color: var(--faint); font-size: 10px; }
+.fl-ico { flex: none; font-size: 12px; filter: grayscale(.25); }
+.fl-name { flex: 1; min-width: 0; }
+.fl-hit .fl-name .faint { margin-left: 4px; font-size: 11px; }
+.fl-dot-g { flex: none; display: inline-grid; place-items: center; min-width: 15px; height: 15px; padding: 0 3px; border-radius: 4px; font: 700 9.5px/1 ui-monospace, Consolas, monospace; }
+.fl-dot-g.g-m { background: var(--warn-soft); color: var(--warn); }
+.fl-dot-g.g-a { background: var(--ok-soft); color: var(--ok); }
+.fl-dot-g.g-d { background: var(--err-soft); color: var(--err); }
+.fl-dot-g.g-u { background: rgba(130, 80, 223, .16); color: #8250df; }
+.fl-dot-g.g-r { background: var(--info-soft); color: var(--info); }
+[data-theme="dark"] .fl-dot-g.g-u, [data-skin="neon"] .fl-dot-g.g-u { color: #c297ff; }
+.fl-dot-in { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); }
+[data-skin="neon"] .fl-dot-in { box-shadow: 0 0 8px var(--warn); }
+
+.fl-view { display: flex; flex-direction: column; }
+.fl-vh { position: sticky; top: 0; z-index: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 7px 10px; background: var(--surface-2); border-bottom: 1px solid var(--border); }
+.fl-vpath { font-size: 12px; font-weight: 600; min-width: 0; flex: 0 1 auto; }
+.fl-vacts { display: inline-flex; gap: 6px; margin-left: auto; }
+.fl-back { display: none; }
+.fl-code { display: flex; font: 12px/1.55 ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, monospace; tab-size: 4; min-width: max-content; }
+[data-skin="neon"] .fl-code { font-family: "JetBrains Mono", ui-monospace, Consolas, monospace; }
+.fl-code pre { margin: 0; padding: 8px 0; background: none; font: inherit; }
+.fl-gutter { flex: none; padding: 8px 10px !important; text-align: right; color: var(--faint); user-select: none; border-right: 1px solid var(--border); background: var(--surface-2); }
+.fl-src { padding: 8px 14px !important; white-space: pre; color: var(--code-text); }
+
+.fl-hist { display: grid; }
+.fl-commit { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 10px; padding: 8px 10px; border: 0; border-bottom: 1px solid var(--border); background: none; color: var(--text); text-align: left; cursor: pointer; font-size: 12.5px; }
+.fl-commit:hover { background: var(--hover); }
+.fl-sha { color: var(--accent); font-size: 12px; }
+.fl-meta { grid-column: 2 / 4; font-size: 11.5px; }
+.fl-end { flex-wrap: wrap; }
+.fl-modal-back textarea { min-height: 110px; font-size: 12.5px; }
+
+/* Same modal shell as the review feature, in case it is not loaded. */
+.fl-modal-back { position: fixed; inset: 0; z-index: 55; display: grid; place-items: center; padding: 16px; background: rgba(0, 0, 0, .45); }
+.fl-modal-back > .rv-modal { width: min(460px, 100%); max-height: calc(100vh - 32px); overflow: auto; }
+
+@media (max-width: 760px) {
+  .fl-body { grid-template-columns: minmax(0, 1fr); height: min(70vh, 640px); }
+  .fl-root .fl-view { display: none; }
+  .fl-root.show-view .fl-tree { display: none; }
+  .fl-root.show-view .fl-view { display: flex; }
+  .fl-back { display: inline-flex; }
+}
+
+/* Tree markers without emoji: folders get a small filled square, files nothing. */
+.fl-ico { width: 8px; flex: none; color: var(--faint); font-size: 11px; text-align: center; }
+.fl-ico.is-dir::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 2px; background: var(--border-strong); }

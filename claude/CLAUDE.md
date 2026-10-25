@@ -2,15 +2,22 @@
 
 When the user asks you to act as **Leader / Tech Lead** or coordinate with **Antigravity (Gemini)** and **Codex**:
 
-## 1. Role Division
-- **You (Claude Code)**:
-  - **Tech Lead & Architect**: Design system architecture, lock down `SPEC.md` (Database Schema + API Contract + File Ownership), and delegate Backend/Core tasks to Antigravity.
-  - **100% Frontend Developer**: You personally write and maintain **100% of Frontend files** (`*.html`, `*.css`, frontend `*.js`/`*.ts`/`*.jsx`/`*.tsx`/`*.vue`/`*.blade.php`/`*.ejs`).
-  - **Code Reviewer & Grader**: Review Antigravity's Backend `git diff` and test results, score them (`X/10`), and request fixes until `APPROVED`.
-- **Antigravity (Main Backend/Core Developer & Multi-Subagent Coordinator)**:
-  - Implements Backend, Database, APIs, Business Logic, CLI scripts, and Automated Tests (using parallel Subagents on separate branches).
-- **OpenAI Codex CLI (`codex`)**:
-  - Optional second-opinion security/logic reviewer (`codex review`) or algorithm/test coder.
+## 1. Role Division & Dynamic Role Assignment (`invoke-agent.ps1` v2.2)
+- **Default Team (`backend=antigravity, frontend=claude, reviewer=codex`)**:
+  - **You (Claude Code)**: Tech Lead & Architect (`SPEC.md`), 100% Frontend Developer (`*.html`, `*.css`, frontend `*.js`/`*.ts`), and Code Reviewer (`X/10`).
+  - **Antigravity**: Main Backend/Core Developer & Multi-Subagent Coordinator (`Gemini 4 Argon`).
+  - **OpenAI Codex CLI (`codex`)**: Security/logic reviewer (`codex review`) or algorithm/test coder.
+- **Any Agent Can Take Any Role (`invoke-agent.ps1` + v4.0 Agent Registry)**:
+  - Roles (`architect`, `leader`, `backend`, `frontend`, `reviewer`, `tester`) are no longer hard-fixed per tool. Shipped registry agents in `agents.json` include **`claude`**, **`codex`**, **`antigravity`**, **`gemini`** (Gemini CLI), **`cursor`** (Cursor Agent CLI), and **`aider`** (Aider CLI), and users can add or override any AI in `$MAW_HOME/agents.json` (`~/.maw/agents.json`) without code changes.
+  - You or the user can invoke **any enabled registry agent in any role** with its role brief and `SPEC.md` ownership enforcement via:
+    ```powershell
+    powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-agent.ps1" `
+      -Agent claude|antigravity|codex|gemini|cursor|aider `
+      -Role architect|leader|backend|frontend|reviewer|tester `
+      -WorkDir "<project_path>" `
+      [-Team "backend=antigravity,frontend=claude,reviewer=codex"] `
+      -PromptFile "<temp_utf8_prompt.txt>"
+    ```
 
 ---
 

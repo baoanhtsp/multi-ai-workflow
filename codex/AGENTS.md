@@ -2,17 +2,23 @@
 
 When the user asks you to coordinate with **Claude Code** and **Antigravity (Gemini 4 Argon)**, or invokes `$multi-ai-leader`:
 
-## 1. Role Division (Multi-AI Mode)
+## 1. Role Division & Unified `invoke-agent.ps1` Dispatcher (v2.2)
 
-- **You (OpenAI Codex — Tech Lead, Algorithm Specialist & Security Reviewer)**:
-  - Design or update `SPEC.md` in the project root (using `C:\Users\Admin\.gemini\config\skills\claude-leader\templates\SPEC.template.md` as reference).
-  - Enforce strict file ownership boundaries (`Zero-Conflict File Ownership Matrix`), implement complex algorithms if needed, and review the final `git diff` for security vulnerabilities, race conditions, and logic bugs.
-  - **Strict Rule**: Do NOT write Frontend UI files directly when operating in Multi-AI Mode — delegate 100% of Frontend work to Claude Code.
-- **Claude Code (`invoke-claude.ps1` — 100% Frontend UI Specialist & Co-Reviewer)**:
-  - Writes and maintains **100% of Frontend files** (`*.html`, `*.css`, `*.js`/`*.ts`/`*.jsx`/`*.tsx`/`*.vue`/`*.blade.php`/`*.ejs`).
-  - Uses **Sonnet** (`-Role frontend`) for complete UI components/pages and **Haiku** (`-Role ui-tweak`) for quick CSS/layout adjustments.
-- **Antigravity (`invoke-antigravity.ps1` — Main Backend/Core Developer & Multi-Subagent Coordinator)**:
-  - Implements **Backend, Database, APIs, CLI scripts, and Automated Tests** using parallel Subagents on isolated Git branches (`Gemini 4 Argon`).
+- **Default Team (`backend=antigravity, frontend=claude, reviewer=codex`)**:
+  - **You (OpenAI Codex)**: Tech Lead, Algorithm Specialist & Security Reviewer (`SPEC.md` + `git diff` review).
+  - **Claude Code (`invoke-claude.ps1`)**: 100% Frontend UI Specialist (`*.html`, `*.css`, `*.js`/`*.ts`) & Co-Reviewer.
+  - **Antigravity (`invoke-antigravity.ps1`)**: Main Backend/Core Developer & Multi-Subagent Coordinator (`Gemini 4 Argon`).
+- **Any Agent Can Take Any Role (`invoke-agent.ps1` + v4.0 Agent Registry)**:
+  - Roles (`architect`, `leader`, `backend`, `frontend`, `reviewer`, `tester`) are no longer fixed per tool. Shipped registry agents in `agents.json` include **`claude`**, **`codex`**, **`antigravity`**, **`gemini`** (Gemini CLI), **`cursor`** (Cursor Agent CLI), and **`aider`** (Aider CLI), and any CLI AI can be added via `$MAW_HOME/agents.json` (`~/.maw/agents.json`).
+  - Use the unified entry point to run any enabled registry agent in any role with its role brief and `SPEC.md` ownership rules:
+    ```powershell
+    powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\Admin\.gemini\config\skills\claude-leader\scripts\invoke-agent.ps1" `
+      -Agent claude|antigravity|codex|gemini|cursor|aider `
+      -Role architect|leader|backend|frontend|reviewer|tester `
+      -WorkDir "<project_path>" `
+      [-Team "backend=antigravity,frontend=claude,reviewer=codex"] `
+      -PromptFile "<temp_utf8_prompt.txt>"
+    ```
 
 ---
 

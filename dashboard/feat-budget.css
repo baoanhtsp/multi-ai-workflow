@@ -1,0 +1,58 @@
+/* S4 shared layout (repeated in every feat-*.css of S4 so each file works alone) */
+.s4-body { padding: 16px; display: grid; gap: 16px; min-width: 0; }
+.s4-grid { display: grid; gap: 12px; min-width: 0; }
+.s4-g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.s4-sec { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; background: var(--surface); min-width: 0; }
+.s4-sec h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+.s4-sec-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.s4-sec-h h3 { margin: 0; }
+.s4-mt { margin-top: 12px; }
+.s4-gap { gap: 8px 16px; }
+.s4-gap-s { gap: 6px; }
+.s4-mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
+.s4-nowrap { white-space: nowrap; }
+.s4-w8 { width: 8rem; flex: none; }
+.s4-num { width: 7rem; max-width: 100%; }
+.s4-sel { width: auto; padding: 3px 6px; font-size: 12px; max-width: 100%; }
+.s4-lbl { display: grid; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
+.s4-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px 16px; }
+.s4-form-table td { padding: 6px 8px; }
+.s4-form-table .input { padding: 4px 6px; font-size: 12px; }
+.s4-chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px 4px 2px 8px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface-2); font-size: 12px; white-space: nowrap; }
+.s4-x { border: 0; background: none; color: var(--muted); cursor: pointer; padding: 0 3px; font-size: 11px; line-height: 1.4; border-radius: 4px; }
+.s4-x:hover:not(:disabled) { color: var(--text); background: var(--hover); }
+.s4-x:disabled { opacity: .35; cursor: default; }
+.s4-x:focus-visible { outline: none; box-shadow: var(--focus); }
+.s4-stat { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--surface-2); min-width: 0; }
+.s4-stat .k { font-size: 12px; color: var(--muted); }
+.s4-stat .v { font-size: 20px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.s4-stat .v small { font-size: 12px; font-weight: 500; color: var(--muted); }
+.s4-stat .s { font-size: 11px; color: var(--faint); margin-top: 4px; }
+.s4-cap { position: relative; height: 6px; margin-top: 6px; border-radius: 3px; background: var(--border); overflow: visible; }
+.s4-cap > i { display: block; height: 100%; border-radius: 3px; max-width: 100%; }
+.s4-cap > b { position: absolute; top: -2px; width: 2px; height: 10px; background: var(--warn); border-radius: 1px; }
+
+/* Budget specifics */
+.s4b-kpis { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.s4b-head { gap: 6px; white-space: nowrap; flex: none; cursor: pointer; background: var(--surface); font-variant-numeric: tabular-nums; }
+.s4b-head:hover { color: var(--text); border-color: var(--border-strong); }
+.s4b-head:focus-visible { outline: none; box-shadow: var(--focus); }
+.s4b-head[data-level="warn"] { border-color: var(--warn); color: var(--warn); }
+.s4b-head[data-level="block"] { border-color: var(--err); color: var(--err); }
+.s4b-head-bar { display: inline-block; width: 42px; height: 5px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.s4b-head-bar > i { display: block; height: 100%; border-radius: 3px; }
+.s4b-chart { padding: 16px 0 18px; }
+.s4b-plot { position: relative; display: flex; align-items: flex-end; gap: 4px; height: 130px; }
+.s4b-col { flex: 1; min-width: 0; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; position: relative; }
+.s4b-col > i { display: block; border-radius: 3px 3px 0 0; min-height: 0; }
+.s4b-col > span { position: absolute; bottom: -18px; left: 0; right: 0; text-align: center; font-size: 10px; color: var(--faint); overflow: hidden; white-space: nowrap; }
+.s4b-capline { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--err); pointer-events: none; }
+.s4b-capline > span { position: absolute; right: 0; top: -15px; font-size: 10px; color: var(--err); background: var(--surface); padding: 0 3px; }
+
+@media (max-width: 760px) {
+  .s4-body { padding: 12px; gap: 12px; }
+  .s4-g2 { grid-template-columns: minmax(0, 1fr); }
+  .s4-w8 { width: 6rem; }
+  .s4b-col > span { display: none; }
+  .s4b-chart { padding-bottom: 4px; }
+}

@@ -2,4 +2,7 @@
 Thumbs.db
 *.tmp
 *.bak
+*.bak-*
+testResults.xml
 SESSION_MEMORY.md
+node_modules/

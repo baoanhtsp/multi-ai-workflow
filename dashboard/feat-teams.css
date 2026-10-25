@@ -1,0 +1,33 @@
+/* S6 team builder (feat-teams.js); dialog chrome comes from feat-workspace.css. */
+.tm-dlg { width: min(1080px, calc(100vw - 32px)); }
+.tm { display: flex; flex-direction: column; gap: 12px; }
+.tm .sub { font-size: 12px; }
+.tm .t-ok { color: var(--ok); }
+.tm-head { display: grid; grid-template-columns: 1fr 1.4fr 1fr; gap: 10px; }
+.tm-head .row { gap: 6px; }
+.tm fieldset { margin: 0; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: 8px; }
+.tm legend { padding: 0 6px; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.tm-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; align-items: start; }
+.tm-redit .tm-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tm-span2 { grid-column: span 2; }
+.tm-redit .tm-span2 { grid-column: 1 / -1; }
+.tm textarea { resize: vertical; }
+.tm-roles { display: grid; grid-template-columns: 230px minmax(0, 1fr); gap: 12px; min-height: 360px; }
+.tm-rlist { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.tm-ritem { display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.tm-ritem.is-sel { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+.tm-ritem input { width: auto; }
+.tm-ritem button { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; border: 0; background: none; color: var(--text); cursor: pointer; text-align: left; padding: 2px; font-size: 13px; }
+.tm-ritem button span { font-size: 11px; }
+.tm-ritem button:focus-visible { outline: none; box-shadow: var(--focus); border-radius: 4px; }
+.tm-rfoot { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px; margin-top: auto; }
+.tm-redit { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.tm-ov summary { cursor: pointer; font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+.tm-ract { gap: 6px; align-items: center; }
+.tm-ract select { max-width: 220px; width: auto; }
+[data-skin="neon"] .tm-ritem.is-sel { background: linear-gradient(90deg, rgba(34, 211, 238, .14), transparent); box-shadow: inset 2px 0 0 var(--neon-1); }
+@media (max-width: 899px) {
+  .tm-head, .tm-grid, .tm-redit .tm-grid { grid-template-columns: minmax(0, 1fr); }
+  .tm-span2 { grid-column: auto; }
+  .tm-roles { grid-template-columns: minmax(0, 1fr); }
+}

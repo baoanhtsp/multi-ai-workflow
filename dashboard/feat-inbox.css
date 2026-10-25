@@ -1,0 +1,48 @@
+/* S3 — attention inbox (bell, drawer, list) + Telegram settings. Theme tokens only. */
+.s3-bell { font-variant-numeric: tabular-nums; }
+/* Count badge on the bell icon; coloured by the worst open item. */
+.s3-bell-n { position: absolute; top: -3px; right: -5px; min-width: 18px; height: 18px; padding: 0 5px; font-size: 10.5px; font-weight: 700; line-height: 18px; text-align: center; color: #fff; background: var(--muted); border-radius: 999px; box-shadow: 0 0 0 2px var(--surface); }
+.s3-bell.is-zero .s3-bell-n { display: none; }
+.s3-bell.warn .s3-bell-n { background: var(--warn); }
+.s3-bell.err .s3-bell-n { background: var(--err); }
+
+.s3-drawer { position: fixed; top: 64px; right: 16px; z-index: 58; width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 88px); display: flex; flex-direction: column; background: var(--surface); color: var(--text); border: 1px solid var(--border-strong); border-radius: 10px; box-shadow: 0 18px 48px rgba(0, 0, 0, .28); }
+.s3-drawer-h { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.s3-drawer-h h2 { font-size: 14px; flex: 1; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.s3-drawer-b { overflow: auto; min-height: 0; }
+[data-skin="neon"] .s3-drawer { background: rgba(12, 15, 36, .96); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); box-shadow: 0 0 0 1px rgba(139, 92, 246, .25), 0 18px 48px rgba(0, 0, 0, .55); }
+
+.s3-list { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.s3-item { display: flex; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--border); border-left: 3px solid transparent; min-width: 0; }
+.s3-item:last-child { border-bottom: 0; }
+.s3-item.s3-sev-error { border-left-color: var(--err); }
+.s3-item.s3-sev-warn { border-left-color: var(--warn); }
+.s3-item.s3-sev-info { border-left-color: var(--info); }
+.s3-item.is-closed { opacity: .62; border-left-color: transparent; }
+.s3-item-ic { flex: none; width: 24px; height: 24px; display: grid; place-items: center; border-radius: 6px; background: var(--surface-2); font-size: 12px; color: var(--muted); }
+.s3-sev-error .s3-item-ic { background: var(--err-soft); color: var(--err); }
+.s3-sev-warn .s3-item-ic { background: var(--warn-soft); color: var(--warn); }
+.s3-item-main { flex: 1; min-width: 0; display: grid; gap: 4px; }
+.s3-item-t { font-size: 13px; }
+.s3-item-m { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 12px; }
+.s3-item-d { white-space: pre-wrap; word-break: break-word; }
+.s3-clip { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.s3-item-a { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+.s3-reply { display: grid; gap: 6px; margin-top: 6px; }
+.s3-reply textarea { width: 100%; resize: vertical; }
+.t-faint { color: var(--faint); }
+.s3-sel { width: auto; min-width: 10rem; padding-top: 3px; padding-bottom: 3px; font-size: 12px; }
+
+.s3-tgform { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.s3-time { display: inline-flex; align-items: center; gap: 6px; }
+.s3-time .input { width: auto; padding: 3px 8px; font-size: 12px; }
+.s3-cmds summary { cursor: pointer; }
+.s3-cmds .code { min-height: 0; margin-top: 6px; }
+
+@media (max-width: 760px) {
+  .s3-drawer { top: auto; bottom: 0; right: 0; left: 0; width: 100%; max-height: 80vh; border-radius: 12px 12px 0 0; }
+  .s3-sel { min-width: 0; }
+}
+
+/* Telegram block on the Notifications page sits under the notification form. */
+.s3-tg-settings { margin: 0 16px 16px; padding-top: 16px; border-top: 1px solid var(--border); max-width: 720px; }

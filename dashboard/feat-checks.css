@@ -1,0 +1,34 @@
+/* S4 shared layout (repeated in every feat-*.css of S4 so each file works alone) */
+.s4-body { padding: 16px; display: grid; gap: 16px; min-width: 0; }
+.s4-sec { border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; background: var(--surface); min-width: 0; }
+.s4-sec h3 { font-size: 13px; font-weight: 600; margin: 0 0 8px; }
+.s4-sec-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+.s4-sec-h h3 { margin: 0; }
+.s4-mt { margin-top: 12px; }
+.s4-gap { gap: 8px 16px; }
+.s4-gap-s { gap: 6px; }
+.s4-mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 11px; }
+.s4-num { width: 7rem; max-width: 100%; }
+.s4-lbl { display: grid; gap: 4px; font-size: 12px; color: var(--muted); min-width: 0; }
+.s4-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px 16px; }
+.s4-form-table td { padding: 6px 8px; }
+.s4-form-table .input { padding: 4px 6px; font-size: 12px; }
+
+/* Checks specifics */
+.s4c-list { display: grid; gap: 0; }
+.s4c-item { display: flex; gap: 10px; align-items: flex-start; padding: 9px 2px; border-bottom: 1px solid var(--border); min-width: 0; }
+.s4c-item:last-child { border-bottom: 0; }
+.s4c-item > .dot { margin-top: 5px; }
+.s4c-item[data-state="fail"], .s4c-item[data-state="untrusted"], .s4c-item[data-state="timeout"], .s4c-item[data-state="stale"], .s4c-item[data-state="pending"] { background: linear-gradient(90deg, var(--err-soft), transparent 60%); }
+.s4c-main { flex: 1; min-width: 0; }
+.s4c-detail { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.s4c-more { font-size: 12px; }
+.s4c-log { margin-top: 8px; max-height: 260px; overflow: auto; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.s4c-warn { border-color: var(--warn); background: var(--warn-soft); color: var(--text); }
+.s4c-id { width: 8rem; }
+.s4c-cmd { min-width: 16rem; }
+
+@media (max-width: 760px) {
+  .s4-body { padding: 12px; gap: 12px; }
+  .s4c-cmd { min-width: 12rem; }
+}

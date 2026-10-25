@@ -58,9 +58,9 @@ flowchart TD
 
 ---
 
-## 🖥️ 2. Bảng Điều Khiển Web Song Ngữ (`dashboard/` — Tiếng Việt & Tiếng Anh)
+## 🖥️ 2. Bảng Điều Khiển Web Song Ngữ (`dashboard/` + `server/` — Tiếng Việt & Tiếng Anh)
 
-Mở `http://multi-ai-workflow.test/dashboard/` (hoặc `http://localhost/multi-ai-workflow/dashboard/`) trên Laragon để sử dụng **Multi-AI Mission Control Dashboard** hỗ trợ chuyển đổi **2 ngôn ngữ (`🇻🇳 VI | 🇬🇧 EN`)** ngay trên thanh Header:
+Chạy `.\start-dashboard.ps1` (hoặc `npm start` -> `http://127.0.0.1:4317/`) để khởi động **Multi-AI Mission Control Dashboard v3.0** (Node.js 24 LTS + native TypeScript, hỗ trợ luồng log thời gian thực qua Server-Sent Events `SSE`, không cần cài PHP/Laragon) và chuyển đổi **2 ngôn ngữ (`🇻🇳 VI | 🇬🇧 EN`)** ngay trên thanh Header:
 
 ### Hướng dẫn sử dụng mục **Command Dispatcher & `SPEC.md` Generator**:
 1. **Chọn Dự Án & Nút `Init SPEC.md`**:
@@ -94,25 +94,58 @@ Mở `http://multi-ai-workflow.test/dashboard/` (hoặc `http://localhost/multi-
 | **`invoke-codex.ps1`**<br>`-Role review-diff`<br>`-Role critic` / `coder` | **OpenAI Codex CLI**<br>`GPT-6.1-Sol / GPT-6-Astra`<br>`--ephemeral` | • Giám khảo độc lập thứ 2: Chấm chéo `git diff` bắt lỗi thuật toán, rò rỉ dữ liệu, edge-cases.<br>• Hỗ trợ viết thuật toán khó hoặc Unit Test trên nhánh `git worktree` riêng, hoặc làm **Tech Lead** qua `$multi-ai-leader`. | **Theo yêu cầu** |
 | **`invoke-council-review.ps1`**<br>`-WorkDir <path>` | **Claude Sonnet + OpenAI Codex**<br>**Parallel Dual-Review**<br>+ **JSONL Audit Log** | • **Hội đồng Giám khảo Song song**: Kích hoạt đồng thời cả **Claude Sonnet (`reviewer`)** và **OpenAI Codex (`review-diff`)** bằng PowerShell Background Jobs, giảm **50% thời gian chờ**.<br>• Tự động ghi nhật ký kiểm toán vào `~/.gemini/antigravity/multi-ai-audit.jsonl`. | **Chấm chéo tốc độ cao** |
 | **`invoke-antigravity.ps1`**<br>`-Action send-latest`<br>`-WorkDir` | **Antigravity**<br>`Gemini 4 Argon (High)`<br>**Self-Healing Bridge** | • **Zero-Config Live Self-Healing Bridge**: Tự động dò tiến trình `language_server*.exe` để lấy Port & CSRF Token mới nhất ngay cả khi khởi động lại IDE.<br>• Hỗ trợ `-WorkDir` (bắn lệnh đúng cửa sổ dự án đang mở) và tự động chờ code xong (`600s`) & trả về báo cáo đầy đủ từ `transcript_full.jsonl`. | **Điều khiển 3 chiều** |
+| **`invoke-agent.ps1`**<br>`-Agent <id>`<br>`-Role architect\|leader\|backend\|frontend\|reviewer\|tester` | **Unified Role Dispatcher (v4.0)**<br>+ **Agent Registry (`agents.json`)**<br>+ **`invoke-cli-agent.ps1`** | • **Bất kỳ AI nào trong Registry cũng có thể nhận bất kỳ Role nào**: Tích hợp sẵn 6 AI (`claude`, `codex`, `antigravity`, `gemini`, `cursor`, `aider`) và cho phép thêm AI mới qua `~/.maw/agents.json` (`$MAW_HOME/agents.json`) mà không cần sửa code.<br>• Lệnh gọi chuẩn: `invoke-agent.ps1 -Agent <id> -Role <role> -WorkDir <path> [-Team "backend=antigravity,frontend=claude,reviewer=codex"] -PromptFile <file>`. | **Đa năng v4.0** |
+
+### 🧩 Agent Registry v4.0 (`agents.json` & `~/.maw/agents.json`) — Thêm bất kỳ AI CLI nào bằng cấu hình JSON
+Hệ thống v4.0 đi kèm 6 AI trong `antigravity/skills/claude-leader/agents.json`:
+- **`claude`** (`Claude Code`), **`codex`** (`OpenAI Codex`), **`antigravity`** (`Antigravity IDE` — built-in wrappers).
+- **`gemini`** (`Gemini CLI` — `gemini -p ... -o json`, truyền prompt qua `stdin`), **`cursor`** (`Cursor Agent CLI` — `cursor-agent -p --output-format text {prompt}`), **`aider`** (`Aider` — `aider --message-file {prompt_file} ...`) chạy qua generic adapter **`invoke-cli-agent.ps1`**.
+- **Cách thêm AI mới hoặc tùy chỉnh**: Tạo file `~/.maw/agents.json` (hoặc đặt biến môi trường `MAW_HOME`) với mảng `"agents": [{ "id": "my-ai", "label": "My AI", "color": "#22c55e", "enabled": true, "adapter": "cli", "detect": { "command": "my-ai", "version_args": ["--version"] }, "models": ["default"], "efforts": [], "capabilities": { "write": true, "review": true, "new_session": false, "sessions": false, "ide_send": false }, "cli": { "command": "my-ai", "prompt_via": "stdin", "args": [], "role_args": {}, "model_args": ["-m", "{model}"], "effort_args": [], "output": "text" } }]`. Hệ thống sẽ tự động gộp theo `id` vào `invoke-agent.ps1`, `invoke-council-review.ps1 -Reviewers`, `invoke-auto-gate.ps1 -Implementer/-Reviewers`, `invoke-spec-guard.ps1` và API `GET /api?action=status`.
+
+---
+
+## ⚡ 3b. Bộ Tính Năng Mission Control v5.0 (6 Streams: S1–S6)
+
+- **S1 — Git Isolation, Checkpoints & Best-of-N Worktrees**:
+  - Tự động tạo snapshot `refs/maw/checkpoints/<job>/<NNNN>` trước mỗi job/vòng lặp, khôi phục 1-click kèm checkpoint an toàn (`safety`).
+  - Hỗ trợ chạy cô lập trên nhánh/worktree riêng (`isolate: true`), so sánh kết quả **Best-of-N** song song nhiều AI, gộp nhánh (`worktree_merge`) và dọn dẹp nhánh/worktree cũ (`cleanup_preview` / `cleanup_apply`).
+- **S2 — Kanban Task Board, Playbooks, Schedules & GitHub PR/Issue Sync**:
+  - Bảng Kanban quản lý tác vụ có phụ thuộc (`depends_on`), tự động kiểm tra chất lượng + Council Review khi kéo sang `review`, mẫu quy trình **Playbooks** đa bước, hẹn giờ **Schedules**, và đồng bộ GitHub Issues / tạo PR trực tiếp qua `gh` CLI.
+- **S3 — Attention Inbox, Live Health Check, Unified Timeline, Telegram 2-Way & MCP Server**:
+  - Hộp thư **Attention Inbox** gom mọi sự kiện cần duyệt (approval, gate fail, budget block), kiểm tra sức khỏe đăng nhập/quota của 6 AI (`health_check`), dòng thời gian hợp nhất (`timeline`), bot **Telegram 2 chiều** (`/status`, `/inbox`, `/approve`, `/deny`, `/run`, `/cancel`), và máy chủ **MCP (`server/mcp/index.ts`)** kết nối trực tiếp vào Claude/Codex/Cursor/Gemini.
+- **S4 — Cost & Budget Guardrails, Role Policy, Scoreboard & Auto-Fallback**:
+  - Giới hạn ngân sách theo ngày/agent/dự án/job/team (`budget_get`/`budget_set`), kiểm soát lệnh cấm & lệnh cần phê duyệt (`policy_get`/`policy_approve`), cổng kiểm thử tự động trước khi review (`checks_run`), bảng xếp hạng hiệu năng AI (`scoreboard`), và tự động chuyển đổi sang AI dự phòng khi chạm trần chi phí/rate-limit.
+- **S5 — Live Session Steer, Interactive Diff Review & File Explorer**:
+  - Điều hướng phiên làm việc trực tiếp (`steer_send`, `steer_interrupt`, `steer_follow_up`, `session_resume`), duyệt `git diff` từng hunk/dòng và gửi yêu cầu sửa lỗi (`review_submit`), kèm trình duyệt cây thư mục dự án (`file_tree`/`file_read`).
+- **S6 — Persistent Agent Profiles, Multi-Turn Chat Rooms, Handoffs, Shared Memory & Org Chart**:
+  - Hồ sơ AI có bộ nhớ riêng (`.maw/agents/<id>/`), phòng **Chat đa lượt** (`@mention` nhiều AI cùng thảo luận và bàn giao `maw:handoff` sang Task Board), bộ nhớ dự án có ghim (`.maw/memory/`), và sơ đồ tổ chức đội hình **Teams / Org Chart**.
+
+### 📌 Lưu ý vận hành v5.0:
+1. **Một tiến trình Server trên mỗi `MAW_HOME`**: Mỗi thư mục `MAW_HOME` (mặc định `~/.maw`) sử dụng khóa độc quyền `server.lock` để đảm bảo các bộ lập lịch nền (`tasks`, `schedules`, `telegram`, `chat`) không chạy trùng lặp.
+2. **Theo dõi thư mục `.maw/` trong Git của từng dự án**:
+   - **Nên commit vào Git**: `.maw/checks.json`, `.maw/playbooks/`, `.maw/agents/`, `.maw/teams.json`, `.maw/memory/` để chia sẻ cấu hình đội ngũ AI với cả nhóm.
+   - **Không nên commit (thêm vào `.gitignore` nếu cần)**: `.maw/tasks.json`, `.maw/chat/`, `.maw/handoffs.json` nếu bạn chỉ muốn lưu lịch sử chạy cục bộ trên máy cá nhân.
 
 ---
 
 ## 🛠️ 4. Hướng dẫn Cài đặt & Kiểm tra Sức khỏe Hệ thống (1 Click trên Windows)
 
 ### Yêu cầu cài sẵn trên máy:
-1. **Google Antigravity** (IDE hoặc Desktop App).
-2. **Claude Code CLI** (`claude.exe`) — Đã đăng nhập một lần bằng lệnh `claude auth login`.
-3. **OpenAI Codex CLI / Desktop** (`npm i -g @openai/codex`) — Đã đăng nhập bằng lệnh `codex login`.
-4. **Git** (`git --version`).
+1. **Node.js 24 LTS** (tối thiểu `>= 22.18` để chạy TypeScript trực tiếp không cần bước build).
+2. **Google Antigravity** (IDE hoặc Desktop App).
+3. **Claude Code CLI** (`claude.exe`) — Đã đăng nhập một lần bằng lệnh `claude auth login`.
+4. **OpenAI Codex CLI / Desktop** (`npm i -g @openai/codex`) — Đã đăng nhập bằng lệnh `codex login`.
+5. **Git** (`git --version`).
 
-### Các bước cài đặt:
-Clone repository này về máy, chạy `install.ps1` để cài đặt và chạy `doctor.ps1` để kiểm tra sức khỏe hệ thống:
+### Các bước cài đặt & khởi chạy Dashboard:
+Clone repository này về máy, chạy `install.ps1` để cài đặt, `doctor.ps1` để kiểm tra sức khỏe hệ thống, và `start-dashboard.ps1` để mở bảng điều khiển tại `http://127.0.0.1:4317/`:
 
 ```powershell
 git clone https://github.com/baoanhtsp/multi-ai-workflow.git
 cd multi-ai-workflow
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 powershell -ExecutionPolicy Bypass -File .\doctor.ps1
+powershell -ExecutionPolicy Bypass -File .\start-dashboard.ps1
 ```
 
 ---
@@ -131,9 +164,16 @@ multi-ai-workflow/
 ├── README.en.md                                           # Tài liệu hướng dẫn Tiếng Anh (English Documentation)
 ├── install.ps1                                            # Script cài đặt tự động 1-click
 ├── doctor.ps1                                             # Công cụ chẩn đoán hệ thống & thống kê Audit Log
+├── start-dashboard.ps1                                    # Khởi động / dừng Mission Control Server (http://127.0.0.1:4317/)
+├── package.json                                           # Cấu hình Node.js 24 LTS + native TypeScript (0 runtime deps)
+├── tsconfig.json                                          # Cấu hình TypeScript strict erasableSyntaxOnly
+├── server/
+│   ├── main.ts                                            # Điểm vào HTTP Server (127.0.0.1:4317) & quản lý vòng đời Job
+│   ├── http.ts                                            # Định tuyến API, bảo mật Host/Origin/CSP & phục vụ file tĩnh
+│   ├── actions/                                           # Các xử lý API (status, git, specGuard, dispatch, jobs, jobStream SSE, notify)
+│   └── lib/                                               # Thư viện lõi (paths, commands, validate, proc, audit, versions)
 ├── dashboard/
-│   ├── index.html                                         # Giao diện Web Mission Control Song ngữ VI/EN (100% bởi Claude Sonnet)
-│   └── api.php                                            # Backend Telemetry & Command Dispatch API
+│   └── index.html                                         # Giao diện Web Mission Control Song ngữ VI/EN (100% bởi Claude)
 ├── templates/
 │   └── SPEC.template.md                                   # Mẫu hợp đồng SPEC.md chuẩn Spec-Driven Development
 ├── antigravity/

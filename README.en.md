@@ -9,7 +9,7 @@
 ![Gemini 4 Argon](https://img.shields.io/badge/Antigravity-Gemini_4_Argon_%7C_3.8_Flash-4285F4)
 ![OpenAI Codex](https://img.shields.io/badge/OpenAI_Codex-GPT--6.1--Sol_%7C_GPT--6--Astra_%7C_GPT--6--Sol-10A37F)
 
-A production-grade **3-Way Omni-Directional Multi-AI Coding Orchestration** framework built around **Spec-Driven Development (SDD)**, **Git Branch Isolation**, and a **Bounded 2-Round Review Loop**. It combines **Google Antigravity**, **Claude Code CLI**, and **OpenAI Codex CLI** while saving **70%–85% of Claude tokens**, and includes a bilingual (**English / Vietnamese**) **Web Mission Control Dashboard** (`dashboard/index.html` + `dashboard/api.php`).
+A production-grade **3-Way Omni-Directional Multi-AI Coding Orchestration** framework built around **Spec-Driven Development (SDD)**, **Git Branch Isolation**, and a **Bounded 2-Round Review Loop**. It combines **Google Antigravity**, **Claude Code CLI**, and **OpenAI Codex CLI** while saving **70%–85% of Claude tokens**, and includes a bilingual (**English / Vietnamese**) **Web Mission Control Dashboard** (`dashboard/index.html` + Node.js 24 native TypeScript `server/`).
 
 ---
 
@@ -58,9 +58,9 @@ flowchart TD
 
 ---
 
-## 🖥️ 2. Bilingual Web Mission Control Dashboard (`dashboard/`)
+## 🖥️ 2. Bilingual Web Mission Control Dashboard (`dashboard/` + `server/`)
 
-Open `http://multi-ai-workflow.test/dashboard/` (or `http://localhost/multi-ai-workflow/dashboard/`) on Laragon/Apache/PHP to access the **Multi-AI Mission Control Dashboard** featuring a **1-click `🇻🇳 VI | 🇬🇧 EN` Language Switcher** in the top header:
+Run `.\start-dashboard.ps1` (or `npm start` -> `http://127.0.0.1:4317/`) to launch the **Multi-AI Mission Control Dashboard v3.0** (Node.js 24 LTS + native TypeScript with real-time Server-Sent Events `SSE` job streaming and zero runtime dependencies—no PHP/Laragon required) featuring a **1-click `🇻🇳 VI | 🇬🇧 EN` Language Switcher** in the top header:
 
 ### How to Use the **Command Dispatcher & `SPEC.md` Generator**:
 1. **Select Project & `Init SPEC.md`**:
@@ -92,6 +92,36 @@ Open `http://multi-ai-workflow.test/dashboard/` (or `http://localhost/multi-ai-w
 | **`invoke-codex.ps1`**<br>`-Role review-diff`<br>`-Role critic` / `coder` | **OpenAI Codex CLI**<br>`GPT-6.1-Sol / GPT-6-Astra`<br>`--ephemeral` | • Independent 2nd reviewer: audits `git diff` for security flaws, data leaks, and edge cases.<br>• Writes complex algorithms/unit tests in an isolated `git worktree`, or leads via `$multi-ai-leader`. | **On-Demand** |
 | **`invoke-council-review.ps1`**<br>`-WorkDir <path>` | **Claude Sonnet + Codex**<br>**Parallel Dual-Review**<br>+ **JSONL Audit Log** | • Runs **Claude Sonnet (`reviewer`)** and **OpenAI Codex (`review-diff`)** simultaneously via PowerShell Background Jobs (50% faster).<br>• Logs duration, scores, verdicts, and token estimates to `~/.gemini/antigravity/multi-ai-audit.jsonl`. | **High-Speed Council** |
 | **`invoke-antigravity.ps1`**<br>`-Action send-latest`<br>`-WorkDir` | **Antigravity**<br>`Gemini 4 Argon (High)`<br>**Self-Healing Bridge** | • **Zero-Config Live Self-Healing Bridge**: Automatically discovers `language_server*.exe` Port & CSRF Token even after IDE restarts.<br>• Routes tasks to the exact project window (`-WorkDir`) and waits automatically (`600s` timeout, or `-NoWait` for async) to return full untruncated responses from `transcript_full.jsonl`. | **3-Way Bridge** |
+| **`invoke-agent.ps1`**<br>`-Agent <id>`<br>`-Role architect\|leader\|backend\|frontend\|reviewer\|tester` | **Unified Role Dispatcher (v4.0)**<br>+ **Agent Registry (`agents.json`)**<br>+ **`invoke-cli-agent.ps1`** | • **Every AI is configuration**: Ships with 6 registered agents (`claude`, `codex`, `antigravity`, `gemini`, `cursor`, `aider`).<br>• Supports any custom CLI AI via `$MAW_HOME/agents.json` (`~/.maw/agents.json`) without code changes. | **Registry v4.0** |
+
+### 🧩 Agent Registry v4.0 (`agents.json` & `~/.maw/agents.json`) — Add Any CLI AI Without Code Changes
+v4.0 ships `antigravity/skills/claude-leader/agents.json` with 6 built-in & CLI agents:
+- **`claude`** (`Claude Code`), **`codex`** (`OpenAI Codex`), and **`antigravity`** (`Antigravity IDE`).
+- **`gemini`** (`Gemini CLI` — `gemini -p ... -o json` via `stdin`), **`cursor`** (`Cursor Agent CLI` — `cursor-agent -p --output-format text {prompt}`), and **`aider`** (`Aider` — `aider --message-file {prompt_file} ...`), executed via the generic CLI adapter **`invoke-cli-agent.ps1`**.
+- **How to add or override an AI**: Create `~/.maw/agents.json` (or set `MAW_HOME`) with `"agents": [{ "id": "my-ai", "label": "My AI", "color": "#22c55e", "enabled": true, "adapter": "cli", "detect": { "command": "my-ai", "version_args": ["--version"] }, "models": ["default"], "efforts": [], "capabilities": { "write": true, "review": true, "new_session": false, "sessions": false, "ide_send": false }, "cli": { "command": "my-ai", "prompt_via": "stdin", "args": [], "role_args": {}, "model_args": ["-m", "{model}"], "effort_args": [], "output": "text" } }]`. Entries merge by `id` across `invoke-agent.ps1`, `invoke-council-review.ps1 -Reviewers`, `invoke-auto-gate.ps1 -Implementer/-Reviewers`, `invoke-spec-guard.ps1`, and `GET /api?action=status`.
+
+---
+
+## ⚡ 3b. Mission Control v5.0 Feature Suite (Streams S1–S6)
+
+- **S1 — Git Isolation, Checkpoints & Best-of-N Worktrees**:
+  - Automatic Git ref checkpoints (`refs/maw/checkpoints/<job>/<NNNN>`) before jobs and rounds, 1-click restore with safety snapshots, isolated worktree execution (`isolate: true`), parallel **Best-of-N** multi-agent comparison (`bestof_start`), branch merge (`worktree_merge`), and stale branch/worktree cleanup (`cleanup_preview` / `cleanup_apply`).
+- **S2 — Kanban Task Board, Playbooks, Schedules & GitHub Sync**:
+  - Dependency-aware Kanban board (`depends_on`), automated quality gate + Council Review on `review` transition, multi-step **Playbook** templates, recurring **Schedules**, and GitHub Issues import / PR creation via `gh` CLI.
+- **S3 — Attention Inbox, Live Health Check, Unified Timeline, 2-Way Telegram & MCP Server**:
+  - Unified **Attention Inbox** for approvals, gate failures, and budget blocks; live CLI login/quota health probes (`health_check`); chronological event `timeline`; 2-way **Telegram Bot** (`/status`, `/inbox`, `/approve`, `/deny`, `/run`, `/cancel`); and a stdio **MCP Server (`server/mcp/index.ts`)** for Claude, Codex, Cursor, and Gemini.
+- **S4 — Cost & Budget Guardrails, Role Policy, Scoreboard & Auto-Fallback**:
+  - Multi-scope spend caps (`day`, `agent_day`, `project`, `job`, `team_run`), role command policies with one-time approval claims (`policy_approve`), pre-review automated test gates (`checks_run`), empirical agent **Scoreboard**, and automatic fallback routing on cooldown or cap exhaustion.
+- **S5 — Live Session Steer, Interactive Diff Review & File Explorer**:
+  - Live job steering (`steer_send`, `steer_interrupt`, `steer_follow_up`, `session_resume`), hunk/line-level interactive diff review with structured fix requests (`review_submit`), and a read-only workspace **File Explorer** (`file_tree` / `file_read`).
+- **S6 — Persistent Agent Profiles, Multi-Turn Chat Rooms, Handoffs, Shared Memory & Org Chart**:
+  - Persistent workspace agent profiles (`.maw/agents/<id>/`), multi-agent **Chat Rooms** with `@mention` routing and structured `maw:handoff` task proposals, pinned project **Memory** notes (`.maw/memory/`), and **Teams / Org Chart** hierarchy management.
+
+### 📌 v5.0 Operational Notes:
+1. **One Server Instance per `MAW_HOME`**: Each `MAW_HOME` directory (default `~/.maw`) acquires an exclusive `server.lock` so background loops (`tasks`, `schedules`, `telegram`, `chat`) never double-fire.
+2. **What to Track in Git under `.maw/`**:
+   - **Recommended to commit**: `.maw/checks.json`, `.maw/playbooks/`, `.maw/agents/`, `.maw/teams.json`, and `.maw/memory/` to share team workflows, quality gates, and project knowledge.
+   - **Optional / local state (can be gitignored)**: `.maw/tasks.json`, `.maw/chat/`, and `.maw/handoffs.json` if you prefer keeping runtime task/chat history local.
 
 ---
 
@@ -102,7 +132,9 @@ git clone https://github.com/baoanhtsp/multi-ai-workflow.git
 cd multi-ai-workflow
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 powershell -ExecutionPolicy Bypass -File .\doctor.ps1
+powershell -ExecutionPolicy Bypass -File .\start-dashboard.ps1
 ```
 
-- **`install.ps1`**: Installs Global Rules, `/claude-leader` skills & scripts into `~/.gemini/config/`, `CLAUDE.md` & `/antigravity` into `~/.claude/`, and `AGENTS.md` & `$multi-ai-leader` into `~/.codex/`.
-- **`doctor.ps1`**: Verifies Git, Claude CLI, Codex CLI, the Live Self-Healing Bridge (`agentapi-bridge.json` + live `language_server*.exe` process), global files, and Audit Log statistics.
+- **`install.ps1`**: Installs Global Rules, `/claude-leader` skills & scripts (including `start-dashboard.ps1`) into `~/.gemini/config/`, `CLAUDE.md` & `/antigravity` into `~/.claude/`, and `AGENTS.md` & `$multi-ai-leader` into `~/.codex/`.
+- **`doctor.ps1`**: Verifies Node.js >= 22.18, Git, Claude CLI, Codex CLI, the Live Self-Healing Bridge (`agentapi-bridge.json` + live `language_server*.exe` process), global files, and Audit Log statistics.
+- **`start-dashboard.ps1`**: Starts the Node.js 24 + native TypeScript Mission Control server on `http://127.0.0.1:4317/` (use `-Stop` to stop it).

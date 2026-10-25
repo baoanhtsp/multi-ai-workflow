@@ -20,6 +20,8 @@ param(
     [ValidateSet("", "low", "medium", "high", "xhigh")]
     [string]$EffortOverride = "",
 
+    [string]$ResumeId = "",
+
     [switch]$UseWorktree
 )
 
@@ -28,11 +30,13 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
 
+. (Join-Path $PSScriptRoot "lib\maw-common.ps1")
+
 # Auto-sync Antigravity CSRF token & LS address to bridge file for 2-way communication
 if ($env:ANTIGRAVITY_CSRF_TOKEN -and $env:ANTIGRAVITY_LS_ADDRESS) {
     $bridgeFile = Join-Path $env:USERPROFILE ".gemini\antigravity\agentapi-bridge.json"
     $bridgeDir = Split-Path -Parent $bridgeFile
-    if (-not (Test-Path $bridgeDir)) {
+    if (-not (Test-Path -LiteralPath $bridgeDir)) {
         New-Item -ItemType Directory -Path $bridgeDir -Force | Out-Null
     }
     @{
@@ -47,11 +51,11 @@ if ($env:ANTIGRAVITY_CSRF_TOKEN -and $env:ANTIGRAVITY_LS_ADDRESS) {
 }
 
 if ($PromptFile) {
-    if (-not (Test-Path $PromptFile)) {
+    if (-not (Test-Path -LiteralPath $PromptFile)) {
         Write-Error "PromptFile not found: $PromptFile"
         exit 1
     }
-    $fileContent = Get-Content -Path $PromptFile -Raw -Encoding UTF8
+    $fileContent = Get-Content -LiteralPath $PromptFile -Raw -Encoding UTF8
     if ($Prompt) {
         $Prompt = "$Prompt`n`n$fileContent"
     } else {
@@ -62,7 +66,7 @@ if ($PromptFile) {
 $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
 if (-not $codexCmd) {
     $npmCodex = Join-Path $env:APPDATA "npm\codex.ps1"
-    if (Test-Path $npmCodex) {
+    if (Test-Path -LiteralPath $npmCodex) {
         $codexExe = $npmCodex
     } else {
         Write-Error "Could not locate codex CLI in PATH or $env:APPDATA\npm\codex.ps1"
@@ -74,29 +78,19 @@ if (-not $codexCmd) {
 
 Push-Location $WorkDir
 try {
-    # For review-diff or -IncludeGitDiff, automatically attach git status & diff (works even when custom $Prompt is provided!)
     if ($IncludeGitDiff -or $Role -eq "review-diff") {
-        $hasGit = (Test-Path (Join-Path $WorkDir ".git"))
+        $hasGit = (Test-Path -LiteralPath (Join-Path $WorkDir ".git"))
         if ($hasGit) {
-            $gitStatus = (git status -s 2>$null) -join "`n"
-            if ($CommitSha) {
-                $gitDiff = (git show $CommitSha 2>$null) -join "`n"
-            } elseif ($BaseBranch) {
-                $gitDiff = (git diff "$BaseBranch...HEAD" 2>$null) -join "`n"
-            } else {
-                $gitDiff = (git diff HEAD 2>$null) -join "`n"
-                if (-not $gitDiff) {
-                    $gitDiff = (git diff 2>$null) -join "`n"
-                }
-            }
+            $gitStatus = (Invoke-NativeProcess -FilePath "git" -ArgumentList @("-C", $WorkDir, "-c", "core.quotepath=false", "status", "-s")).StdOut.TrimEnd("`r", "`n")
+            $gitDiff   = Get-ReviewDiff -WorkDir $WorkDir -CommitSha $CommitSha -BaseBranch $BaseBranch
             $diffSection = "## Git Status`n``````text`n$gitStatus`n```````n`n## Git Diff`n``````diff`n$gitDiff`n``````"
             if ($Prompt) {
                 $Prompt = "$Prompt`n`n$diffSection"
             } else {
-                $Prompt = "Review the following changes for security flaws, race conditions, logic bugs, and adherence to SPEC.md. Provide a score X/10 and verdict (APPROVED or CHANGES_REQUESTED).`n`n$diffSection"
+                $Prompt = "Review the following changes for security flaws, race conditions, logic bugs, and adherence to SPEC.md.`n`n$diffSection"
             }
         } elseif (-not $Prompt) {
-            $Prompt = "Inspect the project files in $WorkDir against SPEC.md for security flaws, logic bugs, and edge cases. Provide a score X/10 and verdict (APPROVED or CHANGES_REQUESTED)."
+            $Prompt = "Inspect the project files in $WorkDir against SPEC.md for security flaws, logic bugs, and edge cases."
         }
     }
 
@@ -104,21 +98,36 @@ try {
         $Prompt = "Inspect the project in $WorkDir and complete the requested $Role task."
     }
 
-    # Build codex exec --json arguments (unified across review-diff, critic, and coder so custom prompts,
-    # non-git directories, model/effort overrides, and real-time JSONL streaming work 100% reliably!)
-    $argsList = @(
-        "exec",
-        "--ephemeral",
-        "--json",
-        "--skip-git-repo-check",
-        "-C", $WorkDir
-    )
+    if ($Role -in @("review-diff", "critic")) {
+        $Prompt = Add-ReviewerContract -Prompt $Prompt
+    }
+
+    if ($ResumeId) {
+        $argsList = @(
+            "exec",
+            "resume",
+            $ResumeId,
+            "--json",
+            "--skip-git-repo-check",
+            "-C", $WorkDir
+        )
+    } else {
+        $argsList = @("exec")
+        if ($Role -in @("review-diff", "critic") -or $env:MAW_PERSIST_SESSION -ne "1") {
+            $argsList += "--ephemeral"
+        }
+        $argsList += @(
+            "--json",
+            "--skip-git-repo-check",
+            "-C", $WorkDir
+        )
+    }
 
     if ($Role -in @("review-diff", "critic")) {
         $argsList += @("-s", "read-only")
     } else {
         $argsList += "--dangerously-bypass-approvals-and-sandbox"
-        if ($UseWorktree -and (Test-Path (Join-Path $WorkDir ".git"))) {
+        if ($UseWorktree -and (Test-Path -LiteralPath (Join-Path $WorkDir ".git"))) {
             $argsList += "--worktree"
         }
     }
@@ -127,7 +136,6 @@ try {
         $argsList += @("-m", $ModelOverride)
     }
     if ($EffortOverride) {
-        # No embedded quotes needed: TOML parser falls back to literal string if unquoted
         $argsList += @("-c", "model_reasoning_effort=$EffortOverride")
     }
 
@@ -135,14 +143,14 @@ try {
     $effectiveEffort = if ($EffortOverride) { $EffortOverride } else { "high" }
     Write-Output "[$(Get-Date -Format 'HH:mm:ss')] Invoking OpenAI Codex (Role: $Role | Model: $effectiveModel | Effort: $effectiveEffort | WorkDir: $WorkDir)..."
 
-    $capturedText  = [System.Collections.Generic.List[string]]::new()
-    $realInTokens  = 0
-    $realOutTokens = 0
+    $capturedText       = [System.Collections.Generic.List[string]]::new()
+    $realInTokens       = 0
+    $realCachedInTokens = 0
+    $realOutTokens      = 0
 
     $Prompt | & $codexExe @argsList - 2>&1 | ForEach-Object {
         $rawLine = $_.ToString()
         if (-not $rawLine.Trim().StartsWith("{")) {
-            # Filter out benign startup log lines if any
             if ($rawLine -notmatch 'codex_core::') {
                 Write-Output $rawLine
             }
@@ -173,9 +181,16 @@ try {
                     if ($ev.usage) {
                         $realInTokens  = [int]$ev.usage.input_tokens
                         $realOutTokens = [int]$ev.usage.output_tokens
+                        $realCachedInTokens = if ($null -ne $ev.usage.cached_input_tokens) {
+                            [int]$ev.usage.cached_input_tokens
+                        } elseif ($ev.usage.input_tokens_details -and $null -ne $ev.usage.input_tokens_details.cached_tokens) {
+                            [int]$ev.usage.input_tokens_details.cached_tokens
+                        } else {
+                            0
+                        }
                     }
-                    $estCost = [Math]::Round(($realInTokens * 2.5 + $realOutTokens * 10.0) / 1000000.0, 5)
-                    Write-Output "`n[Completed | Tokens: $realInTokens in / $realOutTokens out | Cost: `$$estCost]"
+                    $estCost = Get-MawTokenCostUsd -Model $effectiveModel -Tool "codex" -InputTokens $realInTokens -CachedInputTokens $realCachedInTokens -OutputTokens $realOutTokens
+                    Write-Output "`n[Completed | Tokens: $realInTokens in ($realCachedInTokens cached) / $realOutTokens out | Cost: `$$estCost]"
                 }
             }
         } catch {
@@ -184,42 +199,40 @@ try {
     }
 
     try {
-        $auditFile = Join-Path $env:USERPROFILE ".gemini\antigravity\multi-ai-audit.jsonl"
-        $auditDir = Split-Path -Parent $auditFile
-        if (-not (Test-Path $auditDir)) {
-            New-Item -ItemType Directory -Path $auditDir -Force | Out-Null
-        }
         $fullOut = ($capturedText -join "`n")
-        $verdict = if ($fullOut -match '\bCHANGES_REQUESTED\b') {
-            "CHANGES_REQUESTED"
-        } elseif ($fullOut -match '\bAPPROVED\b') {
-            "APPROVED"
+        $vr = Get-ReviewVerdict -Text $fullOut
+        $effectiveRole = if ($env:MAW_ROLE) { $env:MAW_ROLE } else { $Role }
+        $verdict = if ($Role -in @("review-diff", "critic") -or $effectiveRole -eq "reviewer") {
+            $vr.Verdict
+        } elseif ($vr.Verdict -ne "UNKNOWN") {
+            $vr.Verdict
         } else {
             "COMPLETED"
         }
-        $score = if ($fullOut -match '\b(\d+(?:\.\d+)?\s*/\s*10)\b') {
-            $Matches[1]
-        } else {
-            ""
-        }
+        $score = $vr.Score
         if ($realInTokens -le 0)  { $realInTokens  = [Math]::Max(1, [int][Math]::Ceiling($Prompt.Length / 3.8)) }
         if ($realOutTokens -le 0) { $realOutTokens = [Math]::Max(1, [int][Math]::Ceiling($fullOut.Length / 3.8)) }
-        $costUsd = [Math]::Round(($realInTokens * 2.5 + $realOutTokens * 10.0) / 1000000.0, 5)
-        [ordered]@{
-            Timestamp    = (Get-Date).ToString("o")
-            Tool         = "codex"
-            Role         = $Role
-            Model        = $effectiveModel
-            Effort       = $effectiveEffort
-            WorkDir      = $WorkDir
-            PromptChars  = $Prompt.Length
-            OutputChars  = $fullOut.Length
-            InputTokens  = $realInTokens
-            OutputTokens = $realOutTokens
-            CostUsd      = $costUsd
-            Score        = $score
-            Verdict      = $verdict
-        } | ConvertTo-Json -Compress | Add-Content -Path $auditFile -Encoding UTF8 -ErrorAction SilentlyContinue
+        $costUsd = Get-MawTokenCostUsd -Model $effectiveModel -Tool "codex" -InputTokens $realInTokens -CachedInputTokens $realCachedInTokens -OutputTokens $realOutTokens
+        $auditEntry = [ordered]@{
+            Timestamp         = (Get-Date).ToString("o")
+            Tool              = "codex"
+            Role              = $effectiveRole
+            Model             = $effectiveModel
+            Effort            = $effectiveEffort
+            WorkDir           = $WorkDir
+            PromptChars       = $Prompt.Length
+            OutputChars       = $fullOut.Length
+            InputTokens       = $realInTokens
+            CachedInputTokens = $realCachedInTokens
+            OutputTokens      = $realOutTokens
+            CostUsd           = $costUsd
+            Score             = $score
+            Verdict           = $verdict
+        }
+        if ($env:MAW_AGENT) {
+            $auditEntry["Agent"] = $env:MAW_AGENT
+        }
+        Write-MawAuditEntry -Entry $auditEntry | Out-Null
     } catch {}
 } finally {
     Pop-Location
