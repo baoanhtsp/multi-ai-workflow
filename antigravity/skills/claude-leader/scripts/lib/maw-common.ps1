@@ -71,6 +71,48 @@ function Resolve-GitMainWorktreePath {
         return ""
     }
 
+    # Fast path: inspect .git directly if present in WorkDir
+    try {
+        $dotGit = Join-Path $WorkDir ".git"
+        if (Test-Path -LiteralPath $dotGit -PathType Container) {
+            return (Resolve-Path -LiteralPath $WorkDir).Path
+        }
+        if (Test-Path -LiteralPath $dotGit -PathType Leaf) {
+            $firstLine = (Get-Content -LiteralPath $dotGit -TotalCount 1 -Encoding UTF8 -ErrorAction SilentlyContinue)
+            if ($firstLine -and $firstLine.Trim() -match '^gitdir:\s*(.+)$') {
+                $rawGitDir = $Matches[1].Trim() -replace '/', '\'
+                $gitDirFull = if ([System.IO.Path]::IsPathRooted($rawGitDir)) {
+                    $rawGitDir
+                } else {
+                    Join-Path $WorkDir $rawGitDir
+                }
+                $commonFile = Join-Path $gitDirFull "commondir"
+                if (Test-Path -LiteralPath $commonFile -PathType Leaf) {
+                    $relCommon = (Get-Content -LiteralPath $commonFile -TotalCount 1 -Encoding UTF8 -ErrorAction SilentlyContinue).Trim() -replace '/', '\'
+                    $commonFull = if ([System.IO.Path]::IsPathRooted($relCommon)) {
+                        $relCommon
+                    } else {
+                        Join-Path $gitDirFull $relCommon
+                    }
+                    if (Test-Path -LiteralPath $commonFull) {
+                        $commonFull = (Resolve-Path -LiteralPath $commonFull).Path
+                        $parentRepo = Split-Path -Parent $commonFull
+                        if ($parentRepo) {
+                            return $parentRepo
+                        }
+                    }
+                }
+                if ($gitDirFull -match '^(.*)[\\/]\.git[\\/]worktrees[\\/][^\\/]+$') {
+                    $candidateRepo = $Matches[1]
+                    if (Test-Path -LiteralPath $candidateRepo) {
+                        return (Resolve-Path -LiteralPath $candidateRepo).Path
+                    }
+                    return $candidateRepo
+                }
+            }
+        }
+    } catch {}
+
     try {
         $res = Invoke-NativeProcess -FilePath "git" -ArgumentList @("-C", $WorkDir, "rev-parse", "--git-common-dir") -TimeoutMs 4000
         if ($res.ExitCode -ne 0 -or -not $res.StdOut -or -not $res.StdOut.Trim()) {
@@ -94,6 +136,591 @@ function Resolve-GitMainWorktreePath {
     return ""
 }
 
+function Resolve-ChildWorktreesMainRepo {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$WorkDir
+    )
+
+    $emptyResult = [PSCustomObject]@{
+        Status   = "none"
+        MainRepo = ""
+        Repos    = @()
+    }
+
+    if (-not $WorkDir -or -not (Test-Path -LiteralPath $WorkDir -PathType Container)) {
+        return $emptyResult
+    }
+
+    $repoMap = [ordered]@{}
+    try {
+        $subDirs = Get-ChildItem -LiteralPath $WorkDir -Directory -ErrorAction SilentlyContinue
+        foreach ($sub in $subDirs) {
+            $subGit = Join-Path $sub.FullName ".git"
+            if (-not (Test-Path -LiteralPath $subGit)) {
+                continue
+            }
+            $mainPath = Resolve-GitMainWorktreePath -WorkDir $sub.FullName
+            $normMain = Normalize-MawWorkspacePath -RawPath $mainPath
+            if ($normMain -and -not $repoMap.Contains($normMain)) {
+                $repoMap[$normMain] = $mainPath
+            }
+        }
+    } catch {}
+
+    $keys = @($repoMap.Keys)
+    if ($keys.Count -eq 0) {
+        return $emptyResult
+    }
+    if ($keys.Count -eq 1) {
+        $singlePath = [string]$repoMap[$keys[0]]
+        return [PSCustomObject]@{
+            Status   = "single"
+            MainRepo = $singlePath
+            Repos    = @($singlePath)
+        }
+    }
+
+    $allRepos = foreach ($k in $keys) { [string]$repoMap[$k] }
+    return [PSCustomObject]@{
+        Status   = "multiple"
+        MainRepo = ""
+        Repos    = @($allRepos)
+    }
+}
+
+$script:MawAgyDbCache = @{
+    Signature = ""
+    Timestamp = [DateTime]::MinValue
+    Items     = @()
+}
+
+function Get-AntigravitySummariesMetadata {
+    param(
+        [Parameter(Mandatory=$false)]
+        [string]$DbPath = "",
+
+        [switch]$NoCache
+    )
+
+    if ($env:ANTIGRAVITY_MOCK_METADATA_FILE -and (Test-Path -LiteralPath $env:ANTIGRAVITY_MOCK_METADATA_FILE -PathType Leaf)) {
+        try {
+            $rawMock = Get-Content -LiteralPath $env:ANTIGRAVITY_MOCK_METADATA_FILE -Raw -Encoding UTF8
+            $parsedMock = $rawMock | ConvertFrom-Json -ErrorAction Stop
+            if ($null -ne $parsedMock.rows) {
+                return @($parsedMock.rows)
+            }
+            if ($parsedMock -is [System.Array]) {
+                return $parsedMock
+            }
+            return @($parsedMock)
+        } catch {
+            return @()
+        }
+    }
+
+    if (-not $DbPath) {
+        if ($env:ANTIGRAVITY_SUMMARIES_DB -and $env:ANTIGRAVITY_SUMMARIES_DB.Trim()) {
+            $DbPath = $env:ANTIGRAVITY_SUMMARIES_DB.Trim()
+        } else {
+            $DbPath = Join-Path $env:USERPROFILE ".gemini\antigravity\conversation_summaries.db"
+        }
+    }
+
+    if (-not $DbPath -or -not (Test-Path -LiteralPath $DbPath -PathType Leaf)) {
+        return @()
+    }
+
+    $sigParts = [System.Collections.Generic.List[string]]::new()
+    try {
+        $dbItem = Get-Item -LiteralPath $DbPath -Force -ErrorAction Stop
+        $sigParts.Add("$($dbItem.FullName)|$($dbItem.Length)|$($dbItem.LastWriteTimeUtc.Ticks)")
+        $walPath = "${DbPath}-wal"
+        if (Test-Path -LiteralPath $walPath -PathType Leaf) {
+            $walItem = Get-Item -LiteralPath $walPath -Force -ErrorAction SilentlyContinue
+            if ($walItem) {
+                $sigParts.Add("$($walItem.Length)|$($walItem.LastWriteTimeUtc.Ticks)")
+            }
+        }
+    } catch {}
+    $signature = $sigParts -join ";"
+
+    $nowUtc = [DateTime]::UtcNow
+    if (-not $NoCache -and $signature -and $script:MawAgyDbCache.Signature -eq $signature -and (($nowUtc - $script:MawAgyDbCache.Timestamp).TotalSeconds -lt 15)) {
+        return $script:MawAgyDbCache.Items
+    }
+
+    $cacheFile = Join-Path $env:TEMP "maw-agy-summaries-cache.json"
+    if (-not $NoCache -and $signature -and (Test-Path -LiteralPath $cacheFile -PathType Leaf)) {
+        try {
+            $cacheObj = Get-Content -LiteralPath $cacheFile -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            if ($cacheObj.signature -eq $signature -and $cacheObj.ts -and (($nowUtc - [DateTime]::Parse($cacheObj.ts).ToUniversalTime()).TotalSeconds -lt 15)) {
+                $cachedItems = @($cacheObj.items)
+                $script:MawAgyDbCache = @{
+                    Signature = $signature
+                    Timestamp = $nowUtc
+                    Items     = $cachedItems
+                }
+                return $cachedItems
+            }
+        } catch {}
+    }
+
+    $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+    if (-not $nodeCmd) {
+        return @()
+    }
+
+    $jsReader = @'
+const { DatabaseSync } = require("node:sqlite");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const dbPath = process.argv[2] || process.argv[1];
+function queryDb(p) {
+  const db = new DatabaseSync(p, { readOnly: true });
+  try {
+    return db.prepare(`
+      SELECT conversation_id, project_id, workspace_uris, last_modified_time, parent_conversation_id, killed, title
+      FROM conversation_summaries
+      WHERE killed = 0
+      ORDER BY last_modified_time DESC
+    `).all();
+  } finally {
+    try { db.close(); } catch {}
+  }
+}
+let rows = [];
+try {
+  rows = queryDb(dbPath);
+} catch {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "maw-agydb-"));
+  try {
+    const dst = path.join(tmpDir, "conversation_summaries.db");
+    fs.copyFileSync(dbPath, dst);
+    for (const suf of ["-wal", "-shm"]) {
+      if (fs.existsSync(dbPath + suf)) {
+        fs.copyFileSync(dbPath + suf, dst + suf);
+      }
+    }
+    rows = queryDb(dst);
+  } finally {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+}
+const items = rows.map(r => {
+  let uris = [];
+  if (r.workspace_uris) {
+    try {
+      const parsed = JSON.parse(r.workspace_uris);
+      uris = Array.isArray(parsed) ? parsed.map(String) : [String(r.workspace_uris)];
+    } catch {
+      uris = [String(r.workspace_uris)];
+    }
+  }
+  return {
+    conversationId: String(r.conversation_id || ""),
+    projectId: String(r.project_id || ""),
+    workspaceUris: uris,
+    parentConversationId: String(r.parent_conversation_id || ""),
+    lastModifiedTime: String(r.last_modified_time || ""),
+    title: String(r.title || "")
+  };
+});
+process.stdout.write(JSON.stringify({ items }));
+'@
+
+    try {
+        $proc = Invoke-NativeProcess -FilePath $nodeCmd.Source -ArgumentList @("--no-warnings", "-", $DbPath) -StdinText $jsReader -TimeoutMs 8000
+        if ($proc.ExitCode -eq 0 -and $proc.StdOut -and $proc.StdOut.Trim()) {
+            $parsedOut = $proc.StdOut.Trim() | ConvertFrom-Json -ErrorAction Stop
+            $resultArr = @($parsedOut.items)
+            $script:MawAgyDbCache = @{
+                Signature = $signature
+                Timestamp = $nowUtc
+                Items     = $resultArr
+            }
+            try {
+                @{
+                    signature = $signature
+                    ts        = $nowUtc.ToString("o")
+                    items     = $resultArr
+                } | ConvertTo-Json -Depth 6 -Compress | Set-Content -LiteralPath $cacheFile -Encoding UTF8 -ErrorAction SilentlyContinue
+            } catch {}
+            return $resultArr
+        }
+    } catch {}
+
+    return @()
+}
+
+function Resolve-AntigravityWorkspaceFromMetas {
+    param(
+        [Parameter(Mandatory=$false)]
+        [AllowEmptyString()]
+        [string]$WorkDir = "",
+
+        [Parameter(Mandatory=$false)]
+        [AllowEmptyCollection()]
+        [object[]]$MetadataList = @(),
+
+        [Parameter(Mandatory=$false)]
+        [AllowEmptyString()]
+        [string]$MainWorktreePath = "",
+
+        [Parameter(Mandatory=$false)]
+        [AllowEmptyString()]
+        [string]$ExplicitProjectId = ""
+    )
+
+    $normWorkDir = Normalize-MawWorkspacePath -RawPath $WorkDir
+    if (-not $MainWorktreePath -and $WorkDir -and (Test-Path -LiteralPath $WorkDir)) {
+        $MainWorktreePath = Resolve-GitMainWorktreePath -WorkDir $WorkDir
+    }
+    $normMainRepo = Normalize-MawWorkspacePath -RawPath $MainWorktreePath
+
+    $parsedEntries = [System.Collections.Generic.List[psobject]]::new()
+    if ($null -ne $MetadataList) {
+        foreach ($rawItem in $MetadataList) {
+            if ($null -eq $rawItem) { continue }
+            $item = $rawItem
+            if ($item -is [string]) {
+                if (-not $item.Trim()) { continue }
+                try {
+                    $item = $item | ConvertFrom-Json -ErrorAction Stop
+                } catch {
+                    continue
+                }
+            }
+
+            $meta = $item
+            if ($null -ne $item.response -and $null -ne $item.response.conversationMetadata -and $null -ne $item.response.conversationMetadata.metadata) {
+                $meta = $item.response.conversationMetadata.metadata
+            } elseif ($null -ne $item.conversationMetadata -and $null -ne $item.conversationMetadata.metadata) {
+                $meta = $item.conversationMetadata.metadata
+            }
+
+            if ($null -eq $meta) { continue }
+
+            $projId = ""
+            if ($null -ne $meta.projectId -and ([string]$meta.projectId).Trim()) {
+                $projId = ([string]$meta.projectId).Trim()
+            } elseif ($null -ne $meta.project_id -and ([string]$meta.project_id).Trim()) {
+                $projId = ([string]$meta.project_id).Trim()
+            }
+
+            $convId = ""
+            if ($null -ne $item.conversationId -and ([string]$item.conversationId).Trim()) {
+                $convId = ([string]$item.conversationId).Trim()
+            } elseif ($null -ne $item.conversation_id -and ([string]$item.conversation_id).Trim()) {
+                $convId = ([string]$item.conversation_id).Trim()
+            } elseif ($null -ne $meta.conversationId -and ([string]$meta.conversationId).Trim()) {
+                $convId = ([string]$meta.conversationId).Trim()
+            } elseif ($null -ne $meta.conversation_id -and ([string]$meta.conversation_id).Trim()) {
+                $convId = ([string]$meta.conversation_id).Trim()
+            } elseif ($null -ne $meta.rootConversationId -and ([string]$meta.rootConversationId).Trim() -and -not $meta.parentConversationId) {
+                $convId = ([string]$meta.rootConversationId).Trim()
+            }
+
+            $parentCid = ""
+            if ($null -ne $meta.parentConversationId -and ([string]$meta.parentConversationId).Trim()) {
+                $parentCid = ([string]$meta.parentConversationId).Trim()
+            } elseif ($null -ne $meta.parent_conversation_id -and ([string]$meta.parent_conversation_id).Trim()) {
+                $parentCid = ([string]$meta.parent_conversation_id).Trim()
+            }
+
+            $wsPaths = [System.Collections.Generic.List[string]]::new()
+            if ($null -ne $meta.workspaces) {
+                foreach ($ws in @($meta.workspaces)) {
+                    if ($null -eq $ws) { continue }
+                    foreach ($rawUri in @($ws.workspaceFolderAbsoluteUri, $ws.gitRootAbsoluteUri)) {
+                        $np = Normalize-MawWorkspacePath -RawPath ([string]$rawUri)
+                        if ($np -and -not $wsPaths.Contains($np)) {
+                            $wsPaths.Add($np)
+                        }
+                    }
+                }
+            }
+            if ($null -ne $meta.workspaceUris) {
+                foreach ($u in @($meta.workspaceUris)) {
+                    $np = Normalize-MawWorkspacePath -RawPath ([string]$u)
+                    if ($np -and -not $wsPaths.Contains($np)) {
+                        $wsPaths.Add($np)
+                    }
+                }
+            }
+            if ($null -ne $meta.workspace_uris) {
+                $rawUris = $meta.workspace_uris
+                if ($rawUris -is [string] -and $rawUris.Trim().StartsWith("[")) {
+                    try {
+                        $parsedUris = $rawUris | ConvertFrom-Json -ErrorAction Stop
+                        $rawUris = if ($parsedUris -is [System.Array]) { $parsedUris } else { @($parsedUris) }
+                    } catch {
+                        $rawUris = @($rawUris)
+                    }
+                }
+                foreach ($u in @($rawUris)) {
+                    $np = Normalize-MawWorkspacePath -RawPath ([string]$u)
+                    if ($np -and -not $wsPaths.Contains($np)) {
+                        $wsPaths.Add($np)
+                    }
+                }
+            }
+
+            $cleanPaths = @($wsPaths | Where-Object { $_ -and $_ -notmatch '/\.gemini/antigravity/worktrees/' })
+            $isSubagent = ([bool]$parentCid) -or ($wsPaths.Count -gt 0 -and $cleanPaths.Count -eq 0)
+
+            if (-not $projId -and $cleanPaths.Count -eq 0) {
+                continue
+            }
+
+            $parsedEntries.Add([PSCustomObject]@{
+                ConversationId = $convId
+                ProjectId      = $projId
+                Paths          = $cleanPaths
+                AllPaths       = $wsPaths.ToArray()
+                IsSubagent     = $isSubagent
+            })
+        }
+    }
+
+    # Build available workspaces list for diagnostics and matching
+    $availMap = [ordered]@{}
+    foreach ($entry in $parsedEntries) {
+        if ($entry.IsSubagent) { continue }
+        foreach ($wp in $entry.Paths) {
+            if (-not $availMap.Contains($wp)) {
+                $availMap[$wp] = [PSCustomObject]@{
+                    WorkspaceName = Split-Path -Leaf $wp
+                    WorkspacePath = $wp
+                    ProjectId     = $entry.ProjectId
+                }
+            } elseif (-not $availMap[$wp].ProjectId -and $entry.ProjectId) {
+                $availMap[$wp].ProjectId = $entry.ProjectId
+            }
+        }
+    }
+    $availableWorkspaces = @($availMap.Values)
+    $wsListText = if ($availableWorkspaces.Count -gt 0) {
+        ($availableWorkspaces | ForEach-Object {
+            if ($_.ProjectId) {
+                "$($_.WorkspaceName) ($($_.WorkspacePath) [$($_.ProjectId)])"
+            } else {
+                "$($_.WorkspaceName) ($($_.WorkspacePath))"
+            }
+        }) -join ", "
+    } else {
+        [regex]::Unescape("(kh\u00f4ng c\u00f3)")
+    }
+
+    $formatNoWorkspaceMsg = {
+        param([string]$wDir, [string]$rLabel, [string]$oTarget, [string]$wList)
+        return ([regex]::Unescape("Kh\u00f4ng c\u00f3 workspace Antigravity n\u00e0o cho ") + $wDir + [regex]::Unescape(" (repo ch\u00ednh: ") + $rLabel + [regex]::Unescape("). H\u00e3y m\u1edf th\u01b0 m\u1ee5c ") + $oTarget + [regex]::Unescape(" trong Antigravity r\u1ed3i ch\u1ea1y l\u1ea1i, ho\u1eb7c truy\u1ec1n -ProjectId. C\u00e1c workspace \u0111ang c\u00f3: ") + $wList)
+    }
+
+    $buildSuccess = {
+        param([psobject]$matchedEntry, [string]$matchedPath, [string]$matchedBy, [string]$effRepo)
+        $resProjId = $matchedEntry.ProjectId
+        if (-not $resProjId -and $matchedPath) {
+            foreach ($e in $parsedEntries) {
+                if ($e.ProjectId -and ($e.Paths -contains $matchedPath)) {
+                    $resProjId = $e.ProjectId
+                    break
+                }
+            }
+        }
+        $resPath = if ($matchedPath) {
+            $matchedPath
+        } elseif ($matchedEntry.Paths.Count -gt 0) {
+            $matchedEntry.Paths[0]
+        } elseif ($normWorkDir) {
+            $normWorkDir
+        } else {
+            ""
+        }
+        $resName = if ($resPath) { Split-Path -Leaf $resPath } else { "default" }
+
+        $cids = [System.Collections.Generic.List[string]]::new()
+        foreach ($e in $parsedEntries) {
+            if ($e.IsSubagent -or -not $e.ConversationId) { continue }
+            $pathMatches = ($resPath -and ($e.Paths -contains $resPath))
+            $projMatches = ($resProjId -and $e.ProjectId -eq $resProjId -and ($e.Paths.Count -eq 0 -or $pathMatches))
+            if ($pathMatches -or $projMatches) {
+                if (-not $cids.Contains($e.ConversationId)) {
+                    $cids.Add($e.ConversationId)
+                }
+            }
+        }
+
+        return [PSCustomObject]@{
+            Ok                  = $true
+            ProjectId           = [string]$resProjId
+            WorkspacePath       = [string]$resPath
+            WorkspaceName       = [string]$resName
+            MatchedBy           = [string]$matchedBy
+            EffectiveMainRepo   = [string]$effRepo
+            AmbiguousRepos      = @()
+            AvailableWorkspaces = $availableWorkspaces
+            ConversationIds     = $cids.ToArray()
+            ErrorMessage        = ""
+        }
+    }
+
+    # (a) Explicit ProjectId / ANTIGRAVITY_PROJECT_ID
+    $trimmedExplicit = if ($ExplicitProjectId) { $ExplicitProjectId.Trim() } else { "" }
+    if ($trimmedExplicit) {
+        $foundEntry = $null
+        foreach ($entry in $parsedEntries) {
+            if (-not $entry.IsSubagent -and $entry.ProjectId -eq $trimmedExplicit) {
+                $foundEntry = $entry
+                break
+            }
+        }
+        if ($null -eq $foundEntry) {
+            $foundEntry = [PSCustomObject]@{
+                ConversationId = ""
+                ProjectId      = $trimmedExplicit
+                Paths          = if ($normWorkDir) { @($normWorkDir) } else { @() }
+                IsSubagent     = $false
+            }
+        }
+        $pPath = if ($foundEntry.Paths.Count -gt 0) { $foundEntry.Paths[0] } else { $normWorkDir }
+        return (& $buildSuccess $foundEntry $pPath "explicit" $normMainRepo)
+    }
+
+    if ($parsedEntries.Count -eq 0) {
+        $effRepo = if ($normMainRepo) { $normMainRepo } else { "" }
+        $repoLabel = if ($effRepo) { $effRepo } else { [regex]::Unescape("kh\u00f4ng x\u00e1c \u0111\u1ecbnh") }
+        $openTarget = if ($effRepo) { $effRepo } elseif ($WorkDir) { $WorkDir } else { "." }
+        return [PSCustomObject]@{
+            Ok                  = $false
+            ProjectId           = ""
+            WorkspacePath       = ""
+            WorkspaceName       = ""
+            MatchedBy           = "none"
+            EffectiveMainRepo   = $effRepo
+            AmbiguousRepos      = @()
+            AvailableWorkspaces = @()
+            ConversationIds     = @()
+            ErrorMessage        = (& $formatNoWorkspaceMsg $WorkDir $repoLabel $openTarget $wsListText)
+        }
+    }
+
+    # Rule 1: Only when WorkDir is NOT provided may we use the most recent project
+    if (-not $normWorkDir -and -not $normMainRepo) {
+        $firstTop = $null
+        foreach ($entry in $parsedEntries) {
+            if (-not $entry.IsSubagent) {
+                $firstTop = $entry
+                break
+            }
+        }
+        if ($null -eq $firstTop) {
+            $firstTop = $parsedEntries[0]
+        }
+        $firstPath = if ($firstTop.Paths.Count -gt 0) { $firstTop.Paths[0] } else { "" }
+        return (& $buildSuccess $firstTop $firstPath "latest-no-workdir" "")
+    }
+
+    # (b) Exact match on WorkDir
+    if ($normWorkDir) {
+        foreach ($entry in $parsedEntries) {
+            if ($entry.IsSubagent) { continue }
+            foreach ($wp in $entry.Paths) {
+                if ($wp -eq $normWorkDir) {
+                    return (& $buildSuccess $entry $wp "exact" $normMainRepo)
+                }
+            }
+        }
+    }
+
+    # (c) Exact match on WorkDir's git-common-dir (MainWorktreePath)
+    if ($normMainRepo) {
+        foreach ($entry in $parsedEntries) {
+            if ($entry.IsSubagent) { continue }
+            foreach ($wp in $entry.Paths) {
+                if ($wp -eq $normMainRepo) {
+                    return (& $buildSuccess $entry $wp "main-repo" $normMainRepo)
+                }
+            }
+        }
+    }
+
+    # (d) WorkDir is not a git repo itself, but contains child git worktrees / repos
+    $effectiveMainRepo = $normMainRepo
+    if (-not $normMainRepo -and $WorkDir -and (Test-Path -LiteralPath $WorkDir -PathType Container)) {
+        $childCheck = Resolve-ChildWorktreesMainRepo -WorkDir $WorkDir
+        if ($childCheck.Status -eq "multiple") {
+            $reposJoined = ($childCheck.Repos | ForEach-Object { Normalize-MawWorkspacePath -RawPath $_ }) -join ", "
+            $multiLabel = [regex]::Unescape("nhi\u1ec1u repo kh\u00e1c nhau: ") + $reposJoined
+            $multiTarget = [regex]::Unescape("repo c\u1ee5 th\u1ec3")
+            return [PSCustomObject]@{
+                Ok                  = $false
+                ProjectId           = ""
+                WorkspacePath       = ""
+                WorkspaceName       = ""
+                MatchedBy           = "ambiguous-children"
+                EffectiveMainRepo   = ""
+                AmbiguousRepos      = $childCheck.Repos
+                AvailableWorkspaces = $availableWorkspaces
+                ConversationIds     = @()
+                ErrorMessage        = (& $formatNoWorkspaceMsg $WorkDir $multiLabel $multiTarget $wsListText)
+            }
+        }
+        if ($childCheck.Status -eq "single") {
+            $normChildMain = Normalize-MawWorkspacePath -RawPath $childCheck.MainRepo
+            $effectiveMainRepo = $normChildMain
+            if ($normChildMain) {
+                foreach ($entry in $parsedEntries) {
+                    if ($entry.IsSubagent) { continue }
+                    foreach ($wp in $entry.Paths) {
+                        if ($wp -eq $normChildMain) {
+                            return (& $buildSuccess $entry $wp "child-worktrees" $normChildMain)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    # (e) Workspace is a parent directory of WorkDir (or of effectiveMainRepo)
+    $bestParentEntry = $null
+    $bestParentPath = ""
+    foreach ($entry in $parsedEntries) {
+        if ($entry.IsSubagent) { continue }
+        foreach ($wp in $entry.Paths) {
+            if (-not $wp) { continue }
+            $isParentOfWorkDir = ($normWorkDir -and $normWorkDir.StartsWith("$wp/"))
+            $isParentOfMainRepo = ($effectiveMainRepo -and $effectiveMainRepo.StartsWith("$wp/"))
+            if ($isParentOfWorkDir -or $isParentOfMainRepo) {
+                if ($wp.Length -gt $bestParentPath.Length) {
+                    $bestParentEntry = $entry
+                    $bestParentPath = $wp
+                }
+            }
+        }
+    }
+    if ($null -ne $bestParentEntry) {
+        return (& $buildSuccess $bestParentEntry $bestParentPath "parent-workspace" $effectiveMainRepo)
+    }
+
+    # No match -> fail closed with clear error message and list of available workspaces
+    $repoLabel = if ($effectiveMainRepo) { $effectiveMainRepo } else { [regex]::Unescape("kh\u00f4ng x\u00e1c \u0111\u1ecbnh") }
+    $openTarget = if ($effectiveMainRepo) { $effectiveMainRepo } else { $WorkDir }
+    return [PSCustomObject]@{
+        Ok                  = $false
+        ProjectId           = ""
+        WorkspacePath       = ""
+        WorkspaceName       = ""
+        MatchedBy           = "none"
+        EffectiveMainRepo   = $effectiveMainRepo
+        AmbiguousRepos      = @()
+        AvailableWorkspaces = $availableWorkspaces
+        ConversationIds     = @()
+        ErrorMessage        = (& $formatNoWorkspaceMsg $WorkDir $repoLabel $openTarget $wsListText)
+    }
+}
+
 function Resolve-AntigravityProjectIdFromMetas {
     param(
         [Parameter(Mandatory=$false)]
@@ -109,96 +736,10 @@ function Resolve-AntigravityProjectIdFromMetas {
         [string]$MainWorktreePath = ""
     )
 
-    if ($null -eq $MetadataList -or $MetadataList.Count -eq 0) {
-        return ""
+    $wsRes = Resolve-AntigravityWorkspaceFromMetas -WorkDir $WorkDir -MetadataList $MetadataList -MainWorktreePath $MainWorktreePath
+    if ($wsRes -and $wsRes.Ok -and $wsRes.ProjectId) {
+        return [string]$wsRes.ProjectId
     }
-
-    $normWorkDir = Normalize-MawWorkspacePath -RawPath $WorkDir
-    if (-not $MainWorktreePath -and $WorkDir -and (Test-Path -LiteralPath $WorkDir)) {
-        $MainWorktreePath = Resolve-GitMainWorktreePath -WorkDir $WorkDir
-    }
-    $normMainRepo = Normalize-MawWorkspacePath -RawPath $MainWorktreePath
-
-    $parsedEntries = [System.Collections.Generic.List[psobject]]::new()
-    foreach ($rawItem in $MetadataList) {
-        if ($null -eq $rawItem) { continue }
-        $item = $rawItem
-        if ($item -is [string]) {
-            if (-not $item.Trim()) { continue }
-            try {
-                $item = $item | ConvertFrom-Json -ErrorAction Stop
-            } catch {
-                continue
-            }
-        }
-
-        $meta = $item
-        if ($null -ne $item.response -and $null -ne $item.response.conversationMetadata -and $null -ne $item.response.conversationMetadata.metadata) {
-            $meta = $item.response.conversationMetadata.metadata
-        } elseif ($null -ne $item.conversationMetadata -and $null -ne $item.conversationMetadata.metadata) {
-            $meta = $item.conversationMetadata.metadata
-        }
-
-        if ($null -eq $meta) { continue }
-        $projId = if ($null -ne $meta.projectId) { ([string]$meta.projectId).Trim() } else { "" }
-        if (-not $projId) { continue }
-
-        $wsPaths = [System.Collections.Generic.List[string]]::new()
-        if ($null -ne $meta.workspaces) {
-            foreach ($ws in @($meta.workspaces)) {
-                if ($null -eq $ws) { continue }
-                foreach ($rawUri in @($ws.workspaceFolderAbsoluteUri, $ws.gitRootAbsoluteUri)) {
-                    $np = Normalize-MawWorkspacePath -RawPath ([string]$rawUri)
-                    if ($np -and -not $wsPaths.Contains($np)) {
-                        $wsPaths.Add($np)
-                    }
-                }
-            }
-        }
-        if ($null -ne $meta.workspaceUris) {
-            foreach ($u in @($meta.workspaceUris)) {
-                $np = Normalize-MawWorkspacePath -RawPath ([string]$u)
-                if ($np -and -not $wsPaths.Contains($np)) {
-                    $wsPaths.Add($np)
-                }
-            }
-        }
-
-        $parsedEntries.Add([PSCustomObject]@{
-            ProjectId = $projId
-            Paths     = $wsPaths.ToArray()
-        })
-    }
-
-    if ($parsedEntries.Count -eq 0) {
-        return ""
-    }
-
-    if (-not $normWorkDir -and -not $normMainRepo) {
-        return $parsedEntries[0].ProjectId
-    }
-
-    # Pass 1: Exact match on WorkDir or MainWorktreePath
-    foreach ($entry in $parsedEntries) {
-        foreach ($wp in $entry.Paths) {
-            if (($normWorkDir -and $wp -eq $normWorkDir) -or ($normMainRepo -and $wp -eq $normMainRepo)) {
-                return $entry.ProjectId
-            }
-        }
-    }
-
-    # Pass 2: Parent repo match (WorkDir or MainWorktreePath is a subdirectory of workspace path, or vice versa)
-    foreach ($entry in $parsedEntries) {
-        foreach ($wp in $entry.Paths) {
-            if ($normWorkDir -and ($normWorkDir.StartsWith("$wp/") -or $wp.StartsWith("$normWorkDir/"))) {
-                return $entry.ProjectId
-            }
-            if ($normMainRepo -and ($normMainRepo.StartsWith("$wp/") -or $wp.StartsWith("$normMainRepo/"))) {
-                return $entry.ProjectId
-            }
-        }
-    }
-
     return ""
 }
 

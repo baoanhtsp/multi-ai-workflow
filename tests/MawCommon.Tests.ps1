@@ -571,3 +571,244 @@ exit 0
         }
     }
 }
+
+Describe "Antigravity Workspace Resolution (H11)" {
+    BeforeAll {
+        $script:InvokeAgyScript = Join-Path $script:RepoRoot "antigravity\skills\claude-leader\scripts\invoke-antigravity.ps1"
+        $script:prevAgyPid = $env:ANTIGRAVITY_PROJECT_ID
+        $script:prevAgyCid = $env:ANTIGRAVITY_CONVERSATION_ID
+        $script:prevMockFile = $env:ANTIGRAVITY_MOCK_METADATA_FILE
+        Remove-Item Env:\ANTIGRAVITY_PROJECT_ID -ErrorAction SilentlyContinue
+        Remove-Item Env:\ANTIGRAVITY_CONVERSATION_ID -ErrorAction SilentlyContinue
+        Remove-Item Env:\ANTIGRAVITY_MOCK_METADATA_FILE -ErrorAction SilentlyContinue
+    }
+
+    AfterAll {
+        if ($null -eq $script:prevAgyPid) { Remove-Item Env:\ANTIGRAVITY_PROJECT_ID -ErrorAction SilentlyContinue } else { $env:ANTIGRAVITY_PROJECT_ID = $script:prevAgyPid }
+        if ($null -eq $script:prevAgyCid) { Remove-Item Env:\ANTIGRAVITY_CONVERSATION_ID -ErrorAction SilentlyContinue } else { $env:ANTIGRAVITY_CONVERSATION_ID = $script:prevAgyCid }
+        if ($null -eq $script:prevMockFile) { Remove-Item Env:\ANTIGRAVITY_MOCK_METADATA_FILE -ErrorAction SilentlyContinue } else { $env:ANTIGRAVITY_MOCK_METADATA_FILE = $script:prevMockFile }
+    }
+
+    It "Resolves kocm-luong-like parent directory containing worktrees of 1 main repo to that main repo's workspace (Rule 2d)" {
+        $tmpRoot = Join-Path $env:TEMP ("maw_h11_1repo_" + [guid]::NewGuid().ToString("N"))
+        $mainRepo = Join-Path $tmpRoot "koc-manager-v2"
+        $wtParent = Join-Path $tmpRoot "kocm-luong"
+        $wt1 = Join-Path $wtParent "q1a-cham-cong-nhanh"
+        $wt2 = Join-Path $wtParent "q2b-bang-luong"
+        $nonGitSub = Join-Path $wtParent "_dac-ta"
+        New-Item -ItemType Directory -Path $mainRepo -Force | Out-Null
+        New-Item -ItemType Directory -Path $wt1 -Force | Out-Null
+        New-Item -ItemType Directory -Path $wt2 -Force | Out-Null
+        New-Item -ItemType Directory -Path $nonGitSub -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $mainRepo ".git\worktrees\q1a") -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $mainRepo ".git\worktrees\q2b") -Force | Out-Null
+        try {
+            $gitDir1 = (Join-Path $mainRepo ".git\worktrees\q1a").Replace('\', '/')
+            $gitDir2 = (Join-Path $mainRepo ".git\worktrees\q2b").Replace('\', '/')
+            [System.IO.File]::WriteAllText((Join-Path $wt1 ".git"), "gitdir: $gitDir1`n")
+            [System.IO.File]::WriteAllText((Join-Path $wt2 ".git"), "gitdir: $gitDir2`n")
+
+            $fakeMetas = @(
+                [PSCustomObject]@{
+                    conversationId = "11111111-1111-1111-1111-111111111111"
+                    projectId      = "proj-unrelated-first"
+                    workspaceUris  = @("file:///c%3A/laragon/www/unrelated-first")
+                },
+                [PSCustomObject]@{
+                    conversationId = "22222222-2222-2222-2222-222222222222"
+                    projectId      = "b50ac252-ee32-48d1-84bd-52030ac97eb1"
+                    workspaceUris  = @("file:///" + ($mainRepo.Replace('\', '/')))
+                }
+            )
+
+            $res = Resolve-AntigravityWorkspaceFromMetas -WorkDir $wtParent -MetadataList $fakeMetas
+            $res.Ok | Should -BeTrue
+            $res.MatchedBy | Should -Be "child-worktrees"
+            $res.ProjectId | Should -Be "b50ac252-ee32-48d1-84bd-52030ac97eb1"
+            $res.WorkspaceName | Should -Be "koc-manager-v2"
+            $res.ConversationIds | Should -Contain "22222222-2222-2222-2222-222222222222"
+            $res.ConversationIds | Should -Not -Contain "11111111-1111-1111-1111-111111111111"
+
+            $mockFile = Join-Path $tmpRoot "mock-metas.json"
+            @{ rows = $fakeMetas } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $mockFile -Encoding UTF8
+            $env:ANTIGRAVITY_MOCK_METADATA_FILE = $mockFile
+            $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:InvokeAgyScript -Action new -WorkDir $wtParent -DryRun 2>&1
+            $LASTEXITCODE | Should -Be 0
+            ($out -join "`n") | Should -Match "\[Antigravity\] workspace: koc-manager-v2 \("
+            ($out -join "`n") | Should -Match "project b50ac252-ee32-48d1-84bd-52030ac97eb1"
+        } finally {
+            Remove-Item Env:\ANTIGRAVITY_MOCK_METADATA_FILE -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "Fails with clear error when parent directory contains child worktrees pointing to 2 different repos (Rule 2d)" {
+        $tmpRoot = Join-Path $env:TEMP ("maw_h11_2repos_" + [guid]::NewGuid().ToString("N"))
+        $repoA = Join-Path $tmpRoot "repo-alpha"
+        $repoB = Join-Path $tmpRoot "repo-beta"
+        $wtParent = Join-Path $tmpRoot "mixed-worktrees"
+        $wtA = Join-Path $wtParent "wt-alpha"
+        $wtB = Join-Path $wtParent "wt-beta"
+        New-Item -ItemType Directory -Path (Join-Path $repoA ".git\worktrees\wt-alpha") -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $repoB ".git\worktrees\wt-beta") -Force | Out-Null
+        New-Item -ItemType Directory -Path $wtA -Force | Out-Null
+        New-Item -ItemType Directory -Path $wtB -Force | Out-Null
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $wtA ".git"), "gitdir: " + (Join-Path $repoA ".git\worktrees\wt-alpha").Replace('\', '/') + "`n")
+            [System.IO.File]::WriteAllText((Join-Path $wtB ".git"), "gitdir: " + (Join-Path $repoB ".git\worktrees\wt-beta").Replace('\', '/') + "`n")
+
+            $fakeMetas = @(
+                [PSCustomObject]@{
+                    conversationId = "aaaaaaaa-1111-1111-1111-111111111111"
+                    projectId      = "proj-alpha"
+                    workspaceUris  = @("file:///" + ($repoA.Replace('\', '/')))
+                },
+                [PSCustomObject]@{
+                    conversationId = "bbbbbbbb-2222-2222-2222-222222222222"
+                    projectId      = "proj-beta"
+                    workspaceUris  = @("file:///" + ($repoB.Replace('\', '/')))
+                }
+            )
+
+            $res = Resolve-AntigravityWorkspaceFromMetas -WorkDir $wtParent -MetadataList $fakeMetas
+            $res.Ok | Should -BeFalse
+            $res.MatchedBy | Should -Be "ambiguous-children"
+            $res.ProjectId | Should -Be ""
+            $res.AmbiguousRepos.Count | Should -Be 2
+
+            $mockFile = Join-Path $tmpRoot "mock-metas.json"
+            @{ rows = $fakeMetas } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $mockFile -Encoding UTF8
+            $env:ANTIGRAVITY_MOCK_METADATA_FILE = $mockFile
+            $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:InvokeAgyScript -Action new -WorkDir $wtParent -DryRun 2>&1
+            $LASTEXITCODE | Should -Not -Be 0
+            ($out -join "`n") | Should -Match "Antigravity"
+        } finally {
+            Remove-Item Env:\ANTIGRAVITY_MOCK_METADATA_FILE -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "Resolves a git worktree directly to its main repo workspace (Rule 2c)" {
+        $tmpRoot = Join-Path $env:TEMP ("maw_h11_wt_" + [guid]::NewGuid().ToString("N"))
+        $mainRepo = Join-Path $tmpRoot "koc-manager-v2"
+        $wtDir = Join-Path $tmpRoot "kocm-luong\q1a-cham-cong-nhanh"
+        New-Item -ItemType Directory -Path (Join-Path $mainRepo ".git\worktrees\q1a-cham-cong-nhanh") -Force | Out-Null
+        New-Item -ItemType Directory -Path $wtDir -Force | Out-Null
+        try {
+            [System.IO.File]::WriteAllText((Join-Path $wtDir ".git"), "gitdir: " + (Join-Path $mainRepo ".git\worktrees\q1a-cham-cong-nhanh").Replace('\', '/') + "`n")
+
+            $fakeMetas = @(
+                [PSCustomObject]@{
+                    conversationId = "11111111-1111-1111-1111-111111111111"
+                    projectId      = "proj-first-unrelated"
+                    workspaceUris  = @("file:///c%3A/laragon/www/first-unrelated")
+                },
+                [PSCustomObject]@{
+                    conversationId = "33333333-3333-3333-3333-333333333333"
+                    projectId      = "b50ac252-ee32-48d1-84bd-52030ac97eb1"
+                    workspaceUris  = @("file:///" + ($mainRepo.Replace('\', '/')))
+                }
+            )
+
+            $res = Resolve-AntigravityWorkspaceFromMetas -WorkDir $wtDir -MetadataList $fakeMetas
+            $res.Ok | Should -BeTrue
+            $res.MatchedBy | Should -Be "main-repo"
+            $res.ProjectId | Should -Be "b50ac252-ee32-48d1-84bd-52030ac97eb1"
+            $res.WorkspaceName | Should -Be "koc-manager-v2"
+        } finally {
+            Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "Fails with clear error for an unrelated WorkDir instead of falling back to the first project in list (Rule 1 & 2)" {
+        $tmpRoot = Join-Path $env:TEMP ("maw_h11_unrelated_" + [guid]::NewGuid().ToString("N"))
+        $unrelatedDir = Join-Path $tmpRoot "unopened-project"
+        New-Item -ItemType Directory -Path $unrelatedDir -Force | Out-Null
+        try {
+            $fakeMetas = @(
+                [PSCustomObject]@{
+                    conversationId = "11111111-1111-1111-1111-111111111111"
+                    projectId      = "7087aa32-8ab3-4c81-81b1-c2caf6667462"
+                    workspaceUris  = @("file:///c%3A/laragon/www/lam-video")
+                },
+                [PSCustomObject]@{
+                    conversationId = "22222222-2222-2222-2222-222222222222"
+                    projectId      = "225d8d1e-55ec-4e8b-98f1-6b20d0ce209f"
+                    workspaceUris  = @("file:///c%3A/laragon/www/happytime")
+                }
+            )
+
+            $res = Resolve-AntigravityWorkspaceFromMetas -WorkDir $unrelatedDir -MetadataList $fakeMetas
+            $res.Ok | Should -BeFalse
+            $res.ProjectId | Should -Be ""
+            $res.ErrorMessage | Should -Match "lam-video"
+            $res.ErrorMessage | Should -Match "happytime"
+            $res.ErrorMessage | Should -Match "-ProjectId"
+
+            $pidStr = Resolve-AntigravityProjectIdFromMetas -WorkDir $unrelatedDir -MetadataList $fakeMetas
+            $pidStr | Should -Be ""
+
+            $mockFile = Join-Path $tmpRoot "mock-metas.json"
+            @{ rows = $fakeMetas } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $mockFile -Encoding UTF8
+            $env:ANTIGRAVITY_MOCK_METADATA_FILE = $mockFile
+            $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:InvokeAgyScript -Action new -WorkDir $unrelatedDir -DryRun 2>&1
+            $LASTEXITCODE | Should -Not -Be 0
+            ($out -join "`n") | Should -Match "lam-video"
+        } finally {
+            Remove-Item Env:\ANTIGRAVITY_MOCK_METADATA_FILE -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    It "Preserves legacy behavior (returns first project in list) ONLY when WorkDir is omitted (Rule 1)" {
+        $fakeMetas = @(
+            [PSCustomObject]@{
+                conversationId = "11111111-1111-1111-1111-111111111111"
+                projectId      = "7087aa32-8ab3-4c81-81b1-c2caf6667462"
+                workspaceUris  = @("file:///c%3A/laragon/www/lam-video")
+            },
+            [PSCustomObject]@{
+                conversationId = "22222222-2222-2222-2222-222222222222"
+                projectId      = "b50ac252-ee32-48d1-84bd-52030ac97eb1"
+                workspaceUris  = @("file:///c%3A/laragon/www/koc-manager-v2")
+            }
+        )
+
+        $res = Resolve-AntigravityWorkspaceFromMetas -WorkDir "" -MetadataList $fakeMetas
+        $res.Ok | Should -BeTrue
+        $res.MatchedBy | Should -Be "latest-no-workdir"
+        $res.ProjectId | Should -Be "7087aa32-8ab3-4c81-81b1-c2caf6667462"
+        $res.WorkspaceName | Should -Be "lam-video"
+    }
+
+    It "Fails on send-latest when resolved workspace has no conversation instead of sending to another workspace's conversation (Rule 4)" {
+        $tmpRoot = Join-Path $env:TEMP ("maw_h11_sendlatest_" + [guid]::NewGuid().ToString("N"))
+        $targetDir = Join-Path $tmpRoot "koc-manager-v2"
+        New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
+        try {
+            # Entry 1 has a conversationId in another workspace; Entry 2 matches targetDir but has NO conversationId
+            $fakeMetas = @(
+                [PSCustomObject]@{
+                    conversationId = "11111111-1111-1111-1111-111111111111"
+                    projectId      = "7087aa32-8ab3-4c81-81b1-c2caf6667462"
+                    workspaceUris  = @("file:///c%3A/laragon/www/lam-video")
+                },
+                [PSCustomObject]@{
+                    conversationId = ""
+                    projectId      = "b50ac252-ee32-48d1-84bd-52030ac97eb1"
+                    workspaceUris  = @("file:///" + ($targetDir.Replace('\', '/')))
+                }
+            )
+
+            $mockFile = Join-Path $tmpRoot "mock-metas.json"
+            @{ rows = $fakeMetas } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $mockFile -Encoding UTF8
+            $env:ANTIGRAVITY_MOCK_METADATA_FILE = $mockFile
+            $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script:InvokeAgyScript -Action send-latest -WorkDir $targetDir -DryRun 2>&1
+            $LASTEXITCODE | Should -Not -Be 0
+            ($out -join "`n") | Should -Match "-Action new"
+        } finally {
+            Remove-Item Env:\ANTIGRAVITY_MOCK_METADATA_FILE -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $tmpRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}

@@ -24,7 +24,9 @@ param(
 
     [int]$TimeoutSeconds = 600,
 
-    [int]$QuietSeconds = 20
+    [int]$QuietSeconds = 20,
+
+    [switch]$DryRun
 )
 
 $ErrorActionPreference = "Stop"
@@ -224,8 +226,7 @@ function Get-CandidateConversationIds {
     }
     if (Test-Path -LiteralPath $brainDir) {
         $dirs = Get-ChildItem -LiteralPath $brainDir -Directory -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 12
+            Sort-Object LastWriteTime -Descending
         foreach ($d in $dirs) {
             if ($d.Name -and -not $d.Name.StartsWith(".") -and -not $candidates.Contains($d.Name)) {
                 $candidates.Add($d.Name)
@@ -235,88 +236,154 @@ function Get-CandidateConversationIds {
     return $candidates.ToArray()
 }
 
-function Resolve-EffectiveProjectId {
-    if ($ProjectId -and $ProjectId.Trim()) {
-        return $ProjectId.Trim()
-    }
-    if ($env:ANTIGRAVITY_PROJECT_ID -and $env:ANTIGRAVITY_PROJECT_ID.Trim()) {
-        return $env:ANTIGRAVITY_PROJECT_ID.Trim()
+function Get-AllAntigravityMetadata {
+    $dbItems = @(Get-AntigravitySummariesMetadata)
+    if ($env:ANTIGRAVITY_MOCK_METADATA_FILE -and (Test-Path -LiteralPath $env:ANTIGRAVITY_MOCK_METADATA_FILE -PathType Leaf)) {
+        return $dbItems
     }
 
-    $candidates = @(Get-CandidateConversationIds)
-    if ($candidates.Count -eq 0) {
-        return ""
+    $dbByCid = @{}
+    foreach ($item in $dbItems) {
+        if ($item.conversationId) {
+            $dbByCid[$item.conversationId] = $item
+        }
     }
 
-    $metaJsons = New-Object System.Collections.Generic.List[string]
-    foreach ($cid in $candidates) {
-        try {
-            $metaRes = Invoke-AgentApi -SubArgs @("get-conversation-metadata", $cid) -AllowBatFallback
-            if ($metaRes.StdOut -and $metaRes.StdOut.Trim()) {
-                $metaJsons.Add($metaRes.StdOut.Trim())
+    $ordered = New-Object System.Collections.Generic.List[object]
+    $seenCids = New-Object System.Collections.Generic.HashSet[string]
+
+    # 1. Prioritize active presence locks (currently open IDE conversation windows)
+    if (Test-Path -LiteralPath $presenceDir) {
+        $locks = Get-ChildItem -LiteralPath $presenceDir -Filter "*.lock" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending
+        foreach ($l in $locks) {
+            $cid = [System.IO.Path]::GetFileNameWithoutExtension($l.Name)
+            if (-not $cid -or $seenCids.Contains($cid)) { continue }
+            if ($dbByCid.ContainsKey($cid)) {
+                [void]$seenCids.Add($cid)
+                $ordered.Add($dbByCid[$cid])
+            } elseif ($dbItems.Count -eq 0) {
+                try {
+                    $metaRes = Invoke-AgentApi -SubArgs @("get-conversation-metadata", $cid) -AllowBatFallback
+                    if ($metaRes.StdOut -and $metaRes.StdOut.Trim()) {
+                        $parsed = $metaRes.StdOut.Trim() | ConvertFrom-Json -ErrorAction Stop
+                        $parsed | Add-Member -NotePropertyName "conversationId" -NotePropertyValue $cid -Force
+                        [void]$seenCids.Add($cid)
+                        $ordered.Add($parsed)
+                    }
+                } catch {}
             }
-        } catch {}
+        }
     }
 
-    if ($metaJsons.Count -eq 0) {
-        return ""
+    # 2. Add all conversations from conversation_summaries.db (ordered by last_modified_time DESC)
+    foreach ($item in $dbItems) {
+        $cid = [string]$item.conversationId
+        if ($cid) {
+            if (-not $seenCids.Contains($cid)) {
+                [void]$seenCids.Add($cid)
+                $ordered.Add($item)
+            }
+        } else {
+            $ordered.Add($item)
+        }
     }
 
-    $resolved = Resolve-AntigravityProjectIdFromMetas -WorkDir $WorkDir -MetadataList $metaJsons.ToArray()
-    if (-not $resolved) {
-        $resolved = Resolve-AntigravityProjectIdFromMetas -WorkDir "" -MetadataList $metaJsons.ToArray()
-    }
-    return $resolved
-}
-
-# 2. Workspace-Aware Target Conversation Discovery
-function Get-TargetConversationId {
-    if ($ConversationId -and $ConversationId.Trim()) {
-        return $ConversationId.Trim()
-    }
-
-    $candidates = @(Get-CandidateConversationIds)
-    if ($candidates.Count -eq 0) {
-        return $null
-    }
-
-    if ($WorkDir) {
-        $normWorkDir = Normalize-WorkspacePath $WorkDir
-        $mainWt = Resolve-GitMainWorktreePath -WorkDir $WorkDir
-        $normMainRepo = Normalize-WorkspacePath $mainWt
+    # 3. Fallback to querying brain directories via agentapi only when DB returned no items
+    if ($ordered.Count -eq 0) {
+        $candidates = @(Get-CandidateConversationIds)
         foreach ($cid in $candidates) {
+            if ($seenCids.Contains($cid)) { continue }
             try {
                 $metaRes = Invoke-AgentApi -SubArgs @("get-conversation-metadata", $cid) -AllowBatFallback
-                $metaRaw = $metaRes.StdOut
-                if ($metaRaw) {
-                    $metaObj = $metaRaw | ConvertFrom-Json
-                    $meta = $metaObj.response.conversationMetadata.metadata
-                    if ($meta) {
-                        if ($meta.workspaces) {
-                            foreach ($ws in $meta.workspaces) {
-                                $wsFolder = Normalize-WorkspacePath $ws.workspaceFolderAbsoluteUri
-                                $gitRoot  = Normalize-WorkspacePath $ws.gitRootAbsoluteUri
-                                if (($wsFolder -and ($wsFolder -eq $normWorkDir -or ($normMainRepo -and $wsFolder -eq $normMainRepo))) -or
-                                    ($gitRoot -and ($gitRoot -eq $normWorkDir -or ($normMainRepo -and $gitRoot -eq $normMainRepo)))) {
-                                    return $cid
-                                }
-                            }
-                        }
-                        if ($meta.workspaceUris) {
-                            foreach ($u in $meta.workspaceUris) {
-                                $normUri = Normalize-WorkspacePath $u
-                                if ($normUri -and ($normUri -eq $normWorkDir -or ($normMainRepo -and $normUri -eq $normMainRepo))) {
-                                    return $cid
-                                }
-                            }
-                        }
-                    }
+                if ($metaRes.StdOut -and $metaRes.StdOut.Trim()) {
+                    $parsed = $metaRes.StdOut.Trim() | ConvertFrom-Json -ErrorAction Stop
+                    $parsed | Add-Member -NotePropertyName "conversationId" -NotePropertyValue $cid -Force
+                    [void]$seenCids.Add($cid)
+                    $ordered.Add($parsed)
                 }
             } catch {}
         }
     }
 
-    return $candidates[0]
+    return $ordered.ToArray()
+}
+
+function Resolve-EffectiveWorkspace {
+    $metas = @(Get-AllAntigravityMetadata)
+    $explicitPid = ""
+    if ($ProjectId -and $ProjectId.Trim()) {
+        $explicitPid = $ProjectId.Trim()
+    } elseif ($env:ANTIGRAVITY_PROJECT_ID -and $env:ANTIGRAVITY_PROJECT_ID.Trim()) {
+        $envPid = $env:ANTIGRAVITY_PROJECT_ID.Trim()
+        $isAmbientHostEnv = $false
+        if ($env:ANTIGRAVITY_CONVERSATION_ID -and $env:ANTIGRAVITY_CONVERSATION_ID.Trim()) {
+            $hostCid = $env:ANTIGRAVITY_CONVERSATION_ID.Trim()
+            foreach ($m in $metas) {
+                if ($m.conversationId -eq $hostCid -and $m.projectId -eq $envPid) {
+                    $isAmbientHostEnv = $true
+                    break
+                }
+            }
+        }
+        if (-not $isAmbientHostEnv) {
+            $explicitPid = $envPid
+        }
+    }
+
+    return Resolve-AntigravityWorkspaceFromMetas -WorkDir $WorkDir -MetadataList $metas -ExplicitProjectId $explicitPid
+}
+
+function Format-AntigravityWorkspaceBanner([psobject]$WsResult) {
+    $name = if ($WsResult.WorkspaceName) { $WsResult.WorkspaceName } else { "default" }
+    $path = if ($WsResult.WorkspacePath) { $WsResult.WorkspacePath } else { "." }
+    $pidStr = if ($WsResult.ProjectId) { $WsResult.ProjectId } else { "unknown" }
+    return "[Antigravity] workspace: $name ($path) $([char]0x2014) project $pidStr"
+}
+
+function Resolve-EffectiveProjectId {
+    $wsRes = Resolve-EffectiveWorkspace
+    if (-not $wsRes.Ok) {
+        Write-Error $wsRes.ErrorMessage
+        exit 1
+    }
+    return [string]$wsRes.ProjectId
+}
+
+# 2. Workspace-Aware Target Conversation Discovery
+function Get-TargetConversationId {
+    param(
+        [switch]$PrintBanner
+    )
+
+    if ($ConversationId -and $ConversationId.Trim()) {
+        $trimmedCid = $ConversationId.Trim()
+        if ($PrintBanner) {
+            $wsRes = Resolve-EffectiveWorkspace
+            if ($wsRes.Ok) {
+                Write-Output (Format-AntigravityWorkspaceBanner -WsResult $wsRes)
+            }
+        }
+        return $trimmedCid
+    }
+
+    $wsRes = Resolve-EffectiveWorkspace
+    if (-not $wsRes.Ok) {
+        Write-Error $wsRes.ErrorMessage
+        exit 1
+    }
+
+    if ($PrintBanner) {
+        Write-Output (Format-AntigravityWorkspaceBanner -WsResult $wsRes)
+    }
+
+    if ($wsRes.ConversationIds -and $wsRes.ConversationIds.Count -gt 0) {
+        return [string]$wsRes.ConversationIds[0]
+    }
+
+    $noConvMsg = [regex]::Unescape("Kh\u00f4ng c\u00f3 cu\u1ed9c tr\u00f2 chuy\u1ec7n Antigravity n\u00e0o thu\u1ed9c workspace ") + "$($wsRes.WorkspaceName) ($($wsRes.WorkspacePath)) $([char]0x2014) project $($wsRes.ProjectId). " + [regex]::Unescape("H\u00e3y d\u00f9ng -Action new \u0111\u1ec3 t\u1ea1o cu\u1ed9c tr\u00f2 chuy\u1ec7n m\u1edbi.")
+    Write-Error $noConvMsg
+    exit 1
 }
 
 # 3. Untruncated Response Reader & Incremental Wait Polling (R3)
@@ -416,13 +483,21 @@ switch ($Action) {
         }
     }
     "new" {
-        if (-not $Prompt) {
+        if (-not $Prompt -and -not $DryRun) {
             Write-Error "Prompt is required for -Action new"
             exit 1
         }
-        $effProjectId = Resolve-EffectiveProjectId
-        if ($effProjectId) {
-            $env:ANTIGRAVITY_PROJECT_ID = $effProjectId
+        $wsRes = Resolve-EffectiveWorkspace
+        if (-not $wsRes.Ok) {
+            Write-Error $wsRes.ErrorMessage
+            exit 1
+        }
+        Write-Output (Format-AntigravityWorkspaceBanner -WsResult $wsRes)
+        if ($wsRes.ProjectId) {
+            $env:ANTIGRAVITY_PROJECT_ID = $wsRes.ProjectId
+        }
+        if ($DryRun) {
+            exit 0
         }
         $procRes = Invoke-AgentApi -SubArgs @("new-conversation", "--model=$Model", "--title=$Title", $Prompt)
         $newOut = Assert-AgentApiSuccess -Result $procRes -Context "new-conversation"
@@ -443,34 +518,47 @@ switch ($Action) {
         }
     }
     "send" {
-        if (-not $ConversationId) {
-            Write-Error "ConversationId is required for -Action send"
+        if (-not $ConversationId -and -not $WorkDir -and -not $ProjectId -and -not $env:ANTIGRAVITY_PROJECT_ID) {
+            Write-Error "ConversationId (or -WorkDir) is required for -Action send"
             exit 1
         }
-        if (-not $Prompt) {
+        if (-not $Prompt -and -not $DryRun) {
             Write-Error "Prompt is required for -Action send"
             exit 1
         }
-        $initialMaxStep = Get-MaxStepIndex -cid $ConversationId
-        $procRes = Invoke-AgentApi -SubArgs @("send-message", "--title=$Title", $ConversationId, $Prompt)
+        $targetId = if ($ConversationId -and $ConversationId.Trim()) {
+            $ConversationId.Trim()
+        } else {
+            Get-TargetConversationId -PrintBanner
+        }
+        if ($DryRun) {
+            Write-Output "TARGET_CONVERSATION_ID: $targetId"
+            exit 0
+        }
+        $initialMaxStep = Get-MaxStepIndex -cid $targetId
+        $procRes = Invoke-AgentApi -SubArgs @("send-message", "--title=$Title", $targetId, $Prompt)
         $sendOut = Assert-AgentApiSuccess -Result $procRes -Context "send-message"
         if ($sendOut) {
             Write-Output $sendOut
         }
-        Write-Output "Sent message to Antigravity conversation: $ConversationId"
+        Write-Output "Sent message to Antigravity conversation: $targetId"
         if (-not $NoWait) {
-            Wait-AntigravityTurn -cid $ConversationId -initialStepIndex $initialMaxStep -timeoutSec $TimeoutSeconds -quietSec $QuietSeconds
+            Wait-AntigravityTurn -cid $targetId -initialStepIndex $initialMaxStep -timeoutSec $TimeoutSeconds -quietSec $QuietSeconds
         }
     }
     "send-latest" {
-        $targetId = Get-TargetConversationId
+        if (-not $Prompt -and -not $DryRun) {
+            Write-Error "Prompt is required for -Action send-latest"
+            exit 1
+        }
+        $targetId = Get-TargetConversationId -PrintBanner
         if (-not $targetId) {
             Write-Error "No active Antigravity conversation found. Use -Action new instead."
             exit 1
         }
-        if (-not $Prompt) {
-            Write-Error "Prompt is required for -Action send-latest"
-            exit 1
+        if ($DryRun) {
+            Write-Output "TARGET_CONVERSATION_ID: $targetId"
+            exit 0
         }
         $initialMaxStep = Get-MaxStepIndex -cid $targetId
         $procRes = Invoke-AgentApi -SubArgs @("send-message", "--title=$Title", $targetId, $Prompt)
